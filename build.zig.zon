@@ -1,0 +1,19 @@
+.{
+    .name = .sqlz,
+    .version = "0.0.1",
+    .dependencies = .{
+        .zqlite = .{
+            .url = "git+https://github.com/karlseguin/zqlite.zig.git#b519eea9b1a2b5fcad68af6d0629e717e8746684",
+            .hash = "zqlite-0.0.1-RWLaY8M8nAB4m0tlSpT9A5PGUwX_JfWC5VlPjLe7lG2Q",
+            .lazy = true,
+        },
+        .pg = .{
+            .url = "git+https://github.com/karlseguin/pg.zig.git#f6442abf3fb0bbcf1007fac4799607f35688a89e",
+            .hash = "pg-0.0.0-Wp_7gVzCBgDIFbqjSA6I7bJQj0gh66KzpmDxvx1Nn4PV",
+            .lazy = true,
+        },
+    },
+    .minimum_zig_version = "0.16.0",
+    .paths = .{""},
+    .fingerprint = 0x74656e80c2910b59,
+}
