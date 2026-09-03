@@ -2,7 +2,7 @@
 
 ## Purpose
 
-`sqlz-check` is a host executable that parses migrations and queries, reconstructs
+The `check` subcommand of the sqlz host executable parses migrations and queries, reconstructs
 backend schemas, checks query contracts, and produces generated Zig modules. It
 exists outside Zig comptime so it can recover from multiple errors and render
 source-oriented diagnostics with labels and suggestions.
@@ -12,12 +12,13 @@ PostgreSQL, reads a database URL, or asks a backend server to prepare a query.
 
 ## Inputs and outputs
 
-The build helper supplies a machine-readable invocation containing:
+The build helper supplies a machine-readable invocation derived from a registered
+`sqlz.ziggy` project containing:
 
 - workspace-relative migration root;
 - one or more named-SQL roots;
 - one or more Zig roots containing `sqlz.Query` declarations;
-- codec IDs and their accepted database type patterns;
+- codec IDs from configuration and their build-bound Zig declarations;
 - the backends to analyze;
 - the required migration head, defaulting to the graph's sole head;
 - cache and generated-output paths owned by Zig's build graph.
@@ -115,9 +116,10 @@ change objects visible to checked queries. It is invalid on a recognized schema-
 changing statement. There is no general “ignore this DDL” directive.
 
 Objects created through unsupported syntax must be described in a checked
-catalog supplement registered with the build helper. Catalog supplements use a
-versioned sqlz JSON format, are backend-specific, and may add types, functions,
-operators, tables, or views. They cannot redefine migration-owned objects.
+Ziggy catalog supplement registered by project configuration. Supplements are
+backend/profile-specific and may add types, functions, operators, tables, or
+views. They cannot redefine migration-owned objects. See
+[catalogs.md](catalogs.md).
 
 ## Migration replay
 
@@ -223,6 +225,10 @@ file, the generator chooses built-in Zig types or registered codec types. A
 portable query must produce the same public Zig parameter and result contract on
 all target backends, even when its emitted backend SQL differs.
 
+Named SQL always generates `Row` and `OwnedRow`; it does not map directly into an
+arbitrary application domain struct. Use an embedded Zig query for an explicitly
+checked domain shape or convert a generated row manually.
+
 ### Cardinality checks
 
 The explicit cardinality determines the generated method. The analyzer enforces
@@ -234,7 +240,7 @@ only facts that are sound:
 - queries whose uniqueness cannot be proven remain valid;
 - an unconstrained `.one` may receive a warning, never an error.
 
-Warnings do not fail `sqlz-check` by default. The build helper offers
+Warnings do not fail `zig build sqlz -- check` by default. Project configuration offers
 `warnings_as_errors`, defaulting to `false`.
 
 ## Diagnostics
@@ -265,7 +271,8 @@ Rules:
 - Expected-token lists are capped and sorted by usefulness.
 - Paths are workspace-relative when possible.
 - Color is automatic on terminals and disabled by `NO_COLOR` or `--color=never`.
-- `--format=json` emits one JSON object per diagnostic for editor and CI use.
+- `--format json` emits versioned JSON records for editor and CI use, with JSON
+  alone on stdout and incidental output on stderr.
 - Independent errors are accumulated; the default cap is 100 and is configurable.
 
 The checker exits `0` on success, `1` for checked-source errors, and `2` for
@@ -281,8 +288,8 @@ Generated declarations contain:
 - exactly one cardinality-appropriate public execution method;
 - backend-specific static SQL and parameter mapping hidden from the caller;
 - compile assertions for codec contracts and embedded Zig metadata;
-- query IDs stable for identical logical inputs, used by statement caches and
-  debug context.
+- query IDs stable for identical logical inputs, used for driver preparation
+  hints, telemetry, and debug context.
 
 The generator never copies SQL comments into executable string data unless the
 driver requires them. It preserves statement semantics while replacing named
@@ -320,3 +327,8 @@ caching without changing public behavior.
 - Fuzz tests feed arbitrary bytes to lexers, parsers, directive readers, and
   graph manifests; no input may cause undefined behavior or an uncontrolled
   panic.
+
+The parser algorithm, ownership, recovery, version gates, limits, and engine
+differential suite are normative in [parser.md](parser.md). Type inference and
+catalog behavior are normative in [type-system.md](type-system.md) and
+[catalogs.md](catalogs.md).

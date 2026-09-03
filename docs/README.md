@@ -47,21 +47,34 @@ Unchecked or extension-specific operations remain possible through the raw
 
 - [Architecture](architecture.md) defines component boundaries, data flow,
   dependency isolation, backend adaptation, diagnostics, and caching.
+- [Configuration](configuration.md) defines `sqlz.ziggy`, profiles, source-root
+  aliases, limits, codecs, project identity, and multiple-project builds.
 - [Query API](query-api.md) defines both query authoring forms, generated APIs,
   parameter and result types, ownership, codecs, and transactions.
 - [SQL checker](sql-checker.md) defines parsing, schema replay, semantic checks,
   supported SQL, diagnostics, and generated output.
+- [Parser](parser.md), [type system](type-system.md), and
+  [catalogs](catalogs.md) specify the checker's detailed front end and semantics.
+- [Runtime](runtime.md) and [errors and observability](errors-and-observability.md)
+  specify wrappers, ownership, pools, transactions, Results, privacy, and events.
 - [Migrations](migrations.md) defines revision files, graph and execution
   semantics, state tracking, commands, and the runtime migrator.
+- [Migration state](migration-state.md) defines project identity, checksums,
+  applied revisions, internal upgrades, and the operation journal.
 - [Build integration](build-integration.md) defines feature flags, public modules,
   host tools, generated modules, consumer setup, and the build matrix.
+- [CLI](cli.md) defines the unified build-integrated command and output contract.
+- [Compatibility](compatibility.md), [testing](testing.md),
+  [performance](performance.md), and [security](security.md) define release policy.
+- [Design audit](design-audit.md) tracks resolved and deferred detail, while the
+  [ADR index](adr/README.md) records the rationale for accepted decisions.
 
 ## Terminology
 
 - **Backend**: one of `sqlite` or `postgres`.
 - **Dialect**: backend-specific SQL grammar and semantics.
-- **Checked query**: a static SQL statement accepted by `sqlz-check` against a
-  migration-derived catalog.
+- **Checked query**: a static SQL statement accepted by
+  `zig build sqlz -- check` against a migration-derived catalog.
 - **Query declaration**: a named `.sql` query or a `sqlz.Query` value in Zig.
 - **Executor**: a sqlz adapter around a backend connection, pool, or transaction
   that can run a checked query.
@@ -95,10 +108,10 @@ Unchecked or extension-specific operations remain possible through the raw
 Each milestone ends with its stated acceptance gate. The 0.1 release requires
 all milestones; early milestones are not separate compatibility promises.
 
-### M1: syntax, diagnostics, and graph foundations
+### M1: configuration, syntax, diagnostics, and graph foundations
 
-- Implement source management, lexer infrastructure, diagnostic rendering, the
-  migration manifest reader, and revision graph validation.
+- Implement versioned Ziggy configuration/manifests, source management, lexer
+  infrastructure, diagnostic rendering, and revision graph validation.
 - Implement common AST nodes and explicit dialect extension points.
 - Gate: golden tests cover multiple diagnostics, source labels, invalid UTF-8,
   invalid graphs, branches, and merges without crashing.
@@ -127,15 +140,17 @@ all milestones; early milestones are not separate compatibility promises.
 
 ### M5: migration execution and build integration
 
-- Implement migration state, locking, upgrade/downgrade/stamp operations, the
-  host command surface, runtime bundles, cache integration, and lazy flags.
+- Implement versioned migration state, operation journal, locking,
+  upgrade/downgrade/repair operations, unified host command, runtime bundles,
+  cache integration, and lazy flags.
 - Gate: migration integration tests pass on SQLite and PostgreSQL, and the four-
   configuration build matrix proves disabled dependencies remain unused.
 
 ### M6: hardening and 0.1 release
 
-- Add fuzz targets for lexing/parsing, deterministic-generation checks, public
-  API examples, compatibility fixtures, and failure-recovery tests.
+- Add engine differential/fuzz suites, deterministic-generation checks, public
+  API examples, compatibility fixtures, failure-recovery tests, and performance
+  baselines with numeric stabilization gates.
 - Gate: all documented examples compile, all public behavior has an integration
   test, and no open issue contradicts a normative statement in these documents.
 

@@ -1,351 +1,130 @@
 # Build-system integration
 
-## Goals
+The integration keeps zqlite and pg.zig lazy, runs analysis on the host, writes
+generated Zig only to the build cache, and supports several sqlz projects in one
+build.
 
-The build integration must:
-
-- keep `zqlite` and `pg.zig` disabled and lazy by default;
-- permit either or both in one consuming binary;
-- build the checker and generator for the host during cross-compilation;
-- expose explicit check and migration steps;
-- generate query and migration modules only in Zig-managed cache paths;
-- make all source dependencies visible to Zig's build graph;
-- avoid requiring database credentials, a live server, or committed generated
-  files for normal compilation.
-
-## Package options
-
-The sqlz dependency defines these backend options:
+## Dependency options
 
 | Option | Default | Effect |
 | --- | --- | --- |
-| `sqlite` | `false` | enable the `zqlite` runtime adapter |
-| `postgres` | `false` | enable the `pg.zig` runtime adapter |
-| `sqlite_system` | `false` | ask `zqlite` to link the system SQLite library |
-| `postgres_tls` | `false` | enable `pg.zig` OpenSSL/TLS support |
+| `sqlite` | `false` | fetch/build the zqlite runtime adapter |
+| `postgres` | `false` | fetch/build the pg.zig runtime adapter |
+| `sqlite_system` | `false` | use system SQLite; requires `sqlite` |
+| `postgres_tls` | `false` | enable driver TLS; requires `postgres` |
 
-`sqlite_system` is invalid unless `sqlite` is enabled. `postgres_tls` is invalid
-unless `postgres` is enabled. Backend-specific low-level options that sqlz later
-forwards must use the `sqlite_` or `postgres_` prefix; adding one must not change
-the default dependency graph.
+The package manifest marks both drivers lazy. `build.zig` calls
+`b.lazyDependency` only in its enabled branch. A disabled driver is not fetched,
+imported, compiled, translated, or linked. Core/checker-only, SQLite-only,
+PostgreSQL-only, and both-backend builds are mandatory test configurations. There
+is no implicit default backend or runtime `AnyDatabase`.
 
-The package manifest keeps `zqlite` and `pg` marked `.lazy = true`. `build.zig`
-uses `b.lazyDependency` only inside the matching enabled branch. It must not call
-`b.dependency`, import a driver build module, translate C headers, or create a
-link dependency for a disabled backend.
+## Build API
 
-Valid combinations are:
-
-| `sqlite` | `postgres` | Result |
-| --- | --- | --- |
-| false | false | checker/core only; no runtime executor |
-| true | false | SQLite runtime only |
-| false | true | PostgreSQL runtime only |
-| true | true | both statically available |
-
-There is no implicit default backend and no runtime `AnyDatabase` selection.
-
-## Published build and runtime API
-
-The dependency's `build.zig` exports helper declarations. A consumer aliases the
-build-script import separately from the runtime module:
+The proposed Zig 0.16 contract is:
 
 ```zig
-const std = @import("std");
-const sqlz_build = @import("sqlz");
+const tool = sqlz_build.addTool(b, .{ .dependency = sqlz_dep });
+const app_db = tool.addProject(.{
+    .name = "app",
+    .config = b.path("sqlz.ziggy"),
+    .dependency = sqlz_dep,
+    .runtime_backends = .{ .sqlite = true },
+    .codec_bindings = &.{
+        .{ .id = "uuid", .module = domain, .declaration = "UuidCodec" },
+    },
+});
 
-pub fn build(b: *std.Build) void {
-    const target = b.standardTargetOptions(.{});
-    const optimize = b.standardOptimizeOption(.{});
-
-    const enabled = .{ .sqlite = true, .postgres = false };
-    const sqlz_dep = b.dependency("sqlz", .{
-        .target = target,
-        .optimize = optimize,
-        .sqlite = enabled.sqlite,
-        .postgres = enabled.postgres,
-    });
-
-    const checked = sqlz_build.addQueries(b, .{
-        .dependency = sqlz_dep,
-        .name = "app_queries",
-        .migrations = b.path("migrations"),
-        .sql_roots = &.{b.path("queries")},
-        .zig_roots = &.{b.path("src")},
-        .runtime_backends = enabled,
-    });
-
-    const migrations = sqlz_build.addMigrations(b, .{
-        .dependency = sqlz_dep,
-        .name = "app_migrations",
-        .root = b.path("migrations"),
-        .runtime_backends = enabled,
-    });
-
-    const exe = b.addExecutable(.{
-        .name = "app",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "sqlz", .module = sqlz_dep.module("sqlz") },
-                .{ .name = "sqlz_queries", .module = checked.module },
-                .{ .name = "sqlz_migrations", .module = migrations.module },
-            },
-        }),
-    });
-
-    _ = exe;
-}
+exe.root_module.addImport("sqlz", sqlz_dep.module("sqlz"));
+exe.root_module.addImport("app_queries", app_db.queries_module);
+exe.root_module.addImport("app_migrations", app_db.migrations_module);
+exe.step.dependOn(app_db.check_step);
 ```
 
-The exact exported contracts are:
+The exported shapes are:
 
 ```zig
-pub const Backends = struct {
-    sqlite: bool = false,
-    postgres: bool = false,
+pub const Backends = struct { sqlite: bool = false, postgres: bool = false };
+
+pub const ToolOptions = struct {
+    dependency: *std.Build.Dependency,
 };
 
-pub const CodecRegistration = struct {
+pub const CodecBinding = struct {
     id: []const u8,
-    import_name: []const u8,
     module: *std.Build.Module,
     declaration: []const u8,
-    sqlite_types: []const []const u8 = &.{},
-    postgres_types: []const []const u8 = &.{},
 };
 
-pub const QueryOptions = struct {
-    dependency: *std.Build.Dependency,
+pub const ProjectOptions = struct {
     name: []const u8,
-    migrations: std.Build.LazyPath,
-    sql_roots: []const std.Build.LazyPath = &.{},
-    zig_roots: []const std.Build.LazyPath = &.{},
-    catalog_supplements: []const std.Build.LazyPath = &.{},
-    codecs: []const CodecRegistration = &.{},
+    config: std.Build.LazyPath,
+    dependency: *std.Build.Dependency,
     runtime_backends: Backends = .{},
-    migration_head: ?[]const u8 = null,
-    warnings_as_errors: bool = false,
+    codec_bindings: []const CodecBinding = &.{},
 };
 
-pub const CheckedQueries = struct {
-    module: *std.Build.Module,
+pub const Project = struct {
+    queries_module: *std.Build.Module,
+    migrations_module: *std.Build.Module,
     check_step: *std.Build.Step,
 };
 
-pub fn addQueries(b: *std.Build, options: QueryOptions) CheckedQueries;
-
-pub const MigrationOptions = struct {
-    dependency: *std.Build.Dependency,
-    name: []const u8,
-    root: std.Build.LazyPath,
-    runtime_backends: Backends = .{},
-    head: ?[]const u8 = null,
+pub const Tool = struct {
+    pub fn addProject(self: *Tool, options: ProjectOptions) Project;
 };
 
-pub const EmbeddedMigrations = struct {
-    module: *std.Build.Module,
-    check_step: *std.Build.Step,
-};
-
-pub fn addMigrations(
-    b: *std.Build,
-    options: MigrationOptions,
-) EmbeddedMigrations;
-
-pub fn addMigrateStep(
-    b: *std.Build,
-    options: MigrationOptions,
-) *std.Build.Step;
+pub fn addTool(b: *std.Build, options: ToolOptions) *Tool;
 ```
 
-`CodecRegistration` associates a stable codec ID with a public codec declaration
-in a module and backend database type patterns. `import_name` must be a valid,
-unique Zig import name and `declaration` must be one public identifier; generated
-code resolves the codec as `@field(@import(import_name), declaration)`. Type
-patterns use canonical catalog names, are compared case-insensitively where the
-dialect is case-insensitive, and may end in `*` for an explicitly registered
-prefix family. Empty backend patterns mean the codec does not support that
-backend. The registration contains no callback executed by the checker.
+`addTool` creates one unified `sqlz` top-level command. `addProject` requires a
+unique name and returns generated query and embedded-migration modules plus an
+internal check step.
 
-The runtime module is always named `sqlz`. With backend options enabled it
-conditionally exposes `sqlz.sqlite` and/or `sqlz.postgres`. Referencing a
-disabled namespace produces a direct compile error saying which dependency
-option enables it. The core declarations used by embedded `sqlz.Query` values
-remain available with no runtime backend.
+`sqlz.ziggy` owns paths, profile selection, root aliases, supplements, limits,
+project identity, and database codec patterns. Build registration owns only Zig
+build objects, selected runtime backends, and the strict codec ID to
+`{module, declaration}` binding described in [configuration.md](configuration.md).
 
-## Host tools
+## Host and target separation
 
-The package publishes internal host artifacts for checking/generation and
-migration commands. `sqlz_build` obtains them from the supplied dependency; a
-consumer does not locate binaries or invoke private paths itself.
+The checker, generator, and CLI target `b.graph.host`. Application modules and
+driver adapters target the consumer target. The checker never links a driver.
+Commands that connect to a database contain only the runtime adapters enabled for
+that project. Cross builds never execute target artifacts on the host.
 
-During a cross build:
+## Command and compile graph
 
-- checker, generator, and migration command artifacts target `b.graph.host`;
-- application modules and runtime adapters target the consumer's target;
-- generated Zig source is target-independent except for imports selected by the
-  runtime backend set;
-- no target executable is run on the host.
-
-The checker itself does not depend on either driver. The migration command links
-only the enabled backend adapters because it connects to a real database.
-
-## Build steps
-
-### `sqlz-check`
-
-The first `addQueries` or `addMigrations` call creates the top-level
-`sqlz-check` step. Later calls add their `check_step` as dependencies of the same
-aggregate. Running:
+The public command is:
 
 ```text
-zig build sqlz-check
+zig build sqlz -- init
+zig build sqlz -- check [--project app]
+zig build sqlz -- migrate upgrade head --project app ...
 ```
 
-validates every registered migration set and query set and produces cached
-generated modules.
+See [cli.md](cli.md) for its contract. Generated modules depend on successful
+checking, so stale output cannot compile. Targets containing embedded
+`sqlz.Query` declarations explicitly depend on the returned `check_step` even if
+they import no generated named-query module.
 
-Each generated module's compile step depends on its checker/generator run, so an
-application importing a named-SQL module cannot compile stale generated output.
-Application and library test steps must additionally depend on the relevant
-`check_step`; examples in sqlz documentation always show that edge. Unrelated
-targets that import neither a generated module nor an embedded query registry do
-not run the checker.
+All configuration, migration, SQL, Zig discovery roots, catalogs, and supplements
+are registered as build inputs. On Zig 0.16, directory roots use
+`std.Build.Step.addDirectoryWatchInput`, while individual lazy paths remain normal
+step inputs. Output paths are content-addressed from tool version, all input bytes,
+profiles, semantic configuration, and codec IDs. Absolute checkout paths and
+credentials never enter keys or generated files.
 
-Embedded Zig queries produce no source binding for their handwritten API, so
-their containing test/check step must depend explicitly on `check_step`. This is
-why `CheckedQueries` exposes the step even when `module` contains only generated
-verification metadata.
+## Generated modules
 
-### `sqlz-migrate`
+The query module mirrors required SQL-root aliases and subdirectories. The
+migration module embeds validated manifests and SQL for enabled runtime backends.
+Generation is deterministic, uses atomic cache writes, and never edits source
+directories. Backend-specific imports appear only when that backend is selected.
 
-`addMigrateStep` creates or contributes to the top-level `sqlz-migrate` step:
+## Acceptance tests
 
-```text
-zig build sqlz-migrate -- status --backend sqlite --database app.db
-zig build sqlz-migrate -- upgrade head --backend postgres
-```
-
-Only one migration root may contribute to this command in 0.1. Registering a
-second root is a build configuration error. The command supports only runtime
-backends enabled for the dependency; selecting a disabled backend prints an
-actionable error and never causes Zig to fetch that driver implicitly.
-
-The step depends on graph and SQL validation before launching the command. CLI
-arguments after `--` pass through unchanged. Connection details are runtime
-arguments or environment variables and never participate in the normal query-
-generation cache key.
-
-### Project tests
-
-The package itself exposes:
-
-- `zig build test`: backend-neutral unit and generated-code tests;
-- `zig build test-sqlite`: SQLite adapter and in-memory migration tests;
-- `zig build test-postgres`: PostgreSQL tests requiring `SQLZ_DATABASE_URL`;
-- `zig build test-integration`: aggregate of enabled backend integration tests;
-- `zig build test-build-matrix`: isolated consumer fixtures for all flag
-  combinations.
-
-PostgreSQL integration tests skip with an explicit message only when invoked
-without `SQLZ_DATABASE_URL`; CI jobs that promise PostgreSQL set
-`SQLZ_REQUIRE_POSTGRES=1`, turning absence into failure.
-
-## Generated paths and dependencies
-
-`addQueries` and `addMigrations` use `addRunArtifact` plus declared output files
-or directories. They never write into `src/`, `queries/`, `migrations/`, or a
-caller-provided tracked directory.
-
-Every registered input path is passed as a build dependency. Directory roots
-are accompanied by a deterministic discovered-file manifest so adding, removing,
-or renaming a query or migration invalidates the step. The generator writes:
-
-```text
-<zig-cache>/.../<name>/queries.zig
-<zig-cache>/.../<name>/migrations.zig
-<zig-cache>/.../<name>/sqlz-metadata.json
-```
-
-These are conceptual locations owned by Zig; consumers must use returned
-`LazyPath`/module handles and must not rely on their physical cache paths.
-
-## Backend examples
-
-### Core/checker only
-
-```zig
-const sqlz_dep = b.dependency("sqlz", .{
-    .target = target,
-    .optimize = optimize,
-});
-```
-
-This supports parser tooling and embedded query declarations but exposes no
-executor.
-
-### SQLite only
-
-```zig
-const sqlz_dep = b.dependency("sqlz", .{
-    .target = target,
-    .optimize = optimize,
-    .sqlite = true,
-});
-```
-
-Only `zqlite` is requested. The application opens connections through
-`sqlz.sqlite` and does not compile `pg.zig` or its dependencies.
-
-### PostgreSQL only
-
-```zig
-const sqlz_dep = b.dependency("sqlz", .{
-    .target = target,
-    .optimize = optimize,
-    .postgres = true,
-    .postgres_tls = true,
-});
-```
-
-Only `pg.zig` and its selected TLS dependencies are requested. No SQLite C
-source or headers enter the build.
-
-### Both
-
-```zig
-const sqlz_dep = b.dependency("sqlz", .{
-    .target = target,
-    .optimize = optimize,
-    .sqlite = true,
-    .postgres = true,
-});
-```
-
-Both namespaces and generated execution paths are available. Query declarations
-still decide whether each query targets one or both backends.
-
-## Build-matrix acceptance tests
-
-Each matrix case uses a minimal external consumer package and a fresh local
-cache:
-
-1. Core-only builds the checker and core module while the driver source trees
-   are unavailable; success proves neither lazy dependency is required.
-2. SQLite-only makes `pg.zig` unavailable, builds and runs a checked in-memory
-   query, and inspects link inputs for absence of PostgreSQL/OpenSSL artifacts.
-3. PostgreSQL-only makes `zqlite` unavailable, compiles a checked query, and
-   inspects compile/link inputs for absence of SQLite C artifacts.
-4. Both compiles one portable query and one query unique to each backend in one
-   executable.
-5. Cross-target builds run the host checker successfully and only compile, never
-   execute, target artifacts.
-6. Repeated generation with identical inputs produces byte-identical modules;
-   a failed generation leaves the prior cache entry untouched but unusable for a
-   changed input key.
-
-The test must validate actual dependency acquisition/build behavior, not merely
-the absence of a public import.
+Fixtures verify all four backend combinations without network access after normal
+dependency provisioning, host tools during cross compilation, watch invalidation
+for nested files, multiple project routing, codec binding failures, deterministic
+output, and compile failure after a checker error.

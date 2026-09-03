@@ -102,8 +102,9 @@ flags.
 
 ## Query build flow
 
-1. The consumer registers migration, `.sql`, Zig-query, and codec roots through
-   `sqlz_build`.
+1. The consumer registers `sqlz.ziggy` and build-only codec/backend bindings
+   through `sqlz_build`; configuration names the migration, `.sql`, Zig-query,
+   and supplement roots.
 2. The host tool hashes its version, configuration, and registered inputs.
 3. It loads and validates the shared migration graph.
 4. For every selected backend, it resolves the single head and replays upgrade
@@ -133,12 +134,12 @@ codec implementation, but never an SQL syntax or schema error.
 | Concern | SQLite / `zqlite` | PostgreSQL / `pg.zig` | Shared guarantee |
 | --- | --- | --- | --- |
 | Connection setup | file/URI and open flags | `std.Io`, network and auth options | setup remains backend-specific |
-| Pools | synchronous acquire/release | fallible acquire with timeout | both implement the executor protocol |
+| Pools | native zqlite pool wrapper | native pg.zig pool wrapper | sqlz adds no pool implementation |
 | Parameters | `?N` generated from `:name` | `$N` generated from `:name` | one typed argument struct |
 | Row storage | SQLite statement-owned values | result-buffer-owned values | row views never outlive their result |
 | Many rows | statement iterator with stored error | fallible network iterator | `next()` is always fallible |
 | Early stop | reset/finalize statement | drain result before reuse | public rows expose `drain()` |
-| Prepared statements | driver statement wrapper | server/client statement wrapper | adapter controls preparation policy |
+| Prepared statements | driver statement behavior | driver statement behavior | sqlz owns no statement cache or retry promise |
 | Raw access | underlying `zqlite` value | underlying `pg` value | explicit `raw()` escape hatch |
 
 The common API is a shared convention, not a runtime virtual interface. Generated
@@ -148,9 +149,9 @@ force the application to pay for dynamic dispatch.
 
 ## Errors
 
-Build-time failures are diagnostics and process exit status. Runtime operations
-return errors; the library never logs, panics, exits, or retries without an
-explicit caller policy.
+Build-time failures are diagnostics and process exit status. Fallible public
+runtime operations return `sqlz.Result(T)` with allocator-owned `.err` payloads;
+the library never logs, panics, exits, or retries without an explicit caller policy.
 
 The runtime core defines a small classification enum for portable handling:
 
@@ -166,10 +167,9 @@ pub const ErrorClass = enum {
 };
 ```
 
-Backend adapters retain the original error and expose `classifyError`. Generated
-queries use inferred error sets where practical and do not erase native driver
-errors into a single `anyerror` value. Decode failures name the query and column
-in debug context but do not allocate error strings on the success path.
+Backend adapters retain the original diagnostic and stable class/code. Full
+detail is caller-visible and sensitive; telemetry and migration journals receive
+only the safe subset defined in [errors-and-observability.md](errors-and-observability.md).
 
 ## Cache and reproducibility
 

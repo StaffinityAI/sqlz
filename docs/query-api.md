@@ -62,13 +62,16 @@ SELECT id, display_name FROM users WHERE display_name LIKE :pattern;
 SELECT id, display_name FROM users WHERE display_name ILIKE :pattern;
 ```
 
-The generator emits a declaration into the module configured as
-`sqlz_queries`:
+The generator emits `Row` and `OwnedRow` declarations into the namespace derived
+from the configured SQL-root alias, subdirectories, and `sqlz.name`:
 
 ```zig
 const queries = @import("sqlz_queries");
 
-var result = try queries.get_user.fetchOptional(executor, .{ .id = user_id });
+var result = switch (queries.get_user.fetchOptional(executor, .{ .id = user_id })) {
+    .ok => |value| value,
+    .err => |err| return handleSqlzError(err),
+};
 defer if (result) |*single| single.deinit();
 
 if (result) |*single| {
@@ -88,7 +91,6 @@ direct call to `sqlz.Query`:
 ```zig
 const sqlz = @import("sqlz");
 const domain = @import("domain.zig");
-const codecs = @import("codecs.zig");
 
 pub const insert_user = sqlz.Query(.{
     .sql =
@@ -106,8 +108,8 @@ pub const insert_user = sqlz.Query(.{
         id: domain.UserId,
         display_name: []const u8,
     },
-    .param_codecs = .{ .id = codecs.user_id },
-    .column_codecs = .{ .id = codecs.user_id },
+    .param_codecs = .{ .id = "user_id" },
+    .column_codecs = .{ .id = "user_id" },
 });
 ```
 
@@ -124,7 +126,7 @@ runtime type remains valid normal Zig code; only SQL analysis is external.
 
 Embedded declarations expose the same method selected by cardinality as
 generated declarations. An application must make its test or check step depend
-on the returned `sqlz-check` step; compiling an embedded declaration alone is
+on the project's returned internal check step; compiling an embedded declaration alone is
 not evidence that its SQL was checked.
 
 ## Backends and portability
@@ -176,10 +178,10 @@ Cardinality is an explicit API contract:
 
 | Cardinality | Generated method | Return shape |
 | --- | --- | --- |
-| `exec` | `execute(executor, args)` | `!sqlz.ExecResult` |
-| `one` | `fetchOne(executor, args)` | `!Single(Row)`; `error.NoRows` if empty |
-| `optional` | `fetchOptional(executor, args)` | `!?Single(Row)` |
-| `many` | `fetch(executor, args)` | `!Rows(Row)` |
+| `exec` | `execute(executor, args)` | `sqlz.Result(sqlz.ExecResult)` |
+| `one` | `fetchOne(executor, args)` | `sqlz.Result(Single(Row))`; structured no-row error if empty |
+| `optional` | `fetchOptional(executor, args)` | `sqlz.Result(?Single(Row))` |
+| `many` | `fetch(executor, args)` | `sqlz.Result(Rows(Row))` |
 
 `ExecResult.rows_affected` is `?u64`: both adapters provide a number when their
 driver does, and `null` when the command has no meaningful count. Backend-
@@ -204,7 +206,10 @@ are rejected.
 valid. It is non-copyable by convention and must be deinitialized:
 
 ```zig
-var single = try queries.get_user.fetchOne(executor, .{ .id = id });
+var single = switch (queries.get_user.fetchOne(executor, .{ .id = id })) {
+    .ok => |value| value,
+    .err => |err| return handleSqlzError(err),
+};
 defer single.deinit();
 
 const row = single.row();
@@ -220,8 +225,8 @@ performs the backend cleanup needed for this single-row operation.
 `Rows(Row)` owns the native statement/result and exposes:
 
 ```zig
-pub fn next(self: *Rows) !?Row;
-pub fn drain(self: *Rows) !void;
+pub fn next(self: *Rows) sqlz.Result(?Row);
+pub fn drain(self: *Rows) sqlz.Result(void);
 pub fn deinit(self: *Rows) void;
 ```
 
@@ -231,12 +236,21 @@ breaks early must call `drain` before `deinit` if it wants errors reported and a
 PostgreSQL pooled connection reused:
 
 ```zig
-var rows = try queries.list_users.fetch(executor, .{});
+var rows = switch (queries.list_users.fetch(executor, .{})) {
+    .ok => |value| value,
+    .err => |err| return handleSqlzError(err),
+};
 defer rows.deinit();
 
-while (try rows.next()) |row| {
+while (switch (rows.next()) {
+    .ok => |value| value,
+    .err => |err| return handleSqlzError(err),
+}) |row| {
     if (shouldStop(row)) {
-        try rows.drain();
+        switch (rows.drain()) {
+            .ok => {},
+            .err => |err| return handleSqlzError(err),
+        }
         break;
     }
 }
@@ -252,7 +266,7 @@ an infallible destructor.
 Every generated row view with borrowed fields exposes:
 
 ```zig
-pub fn toOwned(row: Row, allocator: std.mem.Allocator) !OwnedRow;
+pub fn toOwned(row: Row, allocator: std.mem.Allocator) sqlz.Result(OwnedRow);
 ```
 
 `OwnedRow` duplicates text, blob, JSON, and codec-declared borrowed fields.
@@ -293,6 +307,12 @@ may use a checked custom codec.
 SQLite type analysis uses declared type names, affinity, constraints, expression
 rules, and explicit casts. It never claims stronger runtime typing than those
 facts justify. Ambiguous SQLite expressions require an override.
+
+Non-STRICT tables are supported with a schema-level warning and runtime
+storage-class/range validation. PostgreSQL supports one-dimensional typed arrays
+with borrowed iteration and owned collection; multidimensional arrays are rejected
+in 0.1. The complete coercion and nullability rules are in
+[type-system.md](type-system.md).
 
 ## Custom codecs
 
@@ -352,16 +372,19 @@ are narrow adapter types rather than raw driver values, keeping codec code
 testable and making parameter/result indexes consistently zero-based.
 
 The generated module verifies the Zig codec shape and `sqlz_codec_id` at
-compilation. The external checker maps a Zig override such as `codecs.user_id`
-through the build registration's `import_name` and `declaration`, then uses the
-registered ID and database patterns to validate SQL. Query source must use the
-same import name registered with the build helper. Codec IDs and
-import/declaration pairs must be unique; changing a registration participates in
-the query cache fingerprint.
+compilation. The external checker resolves a string override such as `"user_id"`
+through database patterns in `sqlz.ziggy`; generated code resolves that same ID
+through the build registration's `{module, declaration}` binding. Codec IDs and
+bindings are strictly one-to-one; changing either participates in the query cache
+fingerprint.
 
 Enums and ID newtypes should normally use codecs instead of manually converting
 at every call. A codec is responsible for range validation and returns a decode
 error rather than trapping on invalid database data.
+
+Codec callbacks are internal adapter contracts and may use narrow Zig error
+unions; the generated public operation converts them into an owned `sqlz.Error`
+inside `sqlz.Result`.
 
 ## Executors, connections, and transactions
 
@@ -375,26 +398,21 @@ protocol. Public adapters cover:
 Construction remains backend-specific. Each wrapper exposes `raw()` for driver
 features outside sqlz's checked surface.
 
-`begin` returns a transaction owning or borrowing one native connection.
-`commit` and `rollback` consume its active state. Dropping an active transaction
-without either operation attempts rollback; explicit `rollback` is required
-when the caller needs rollback errors. Nested transactions/savepoints are not a
-0.1 guarantee.
+`begin` returns a distinct owned or borrowed transaction wrapper. `commit` and
+`rollback` return detailed `sqlz.Result` values and consume its active state.
+`deinit` rolls back an active transaction; rollback failure poisons and discards
+the connection. Nested transactions/savepoints are not a 0.1 guarantee.
 
 Queries executed in a transaction must receive that transaction as executor.
 A result handle must be drained or deinitialized before commit or rollback.
 
 ## Preparation and caching
 
-Generated queries are always parameterized. Each adapter may use the driver's
-preferred prepare/cache mechanism:
+Generated queries are always parameterized. sqlz does not implement a statement
+cache or promise transparent reprepare. zqlite and pg.zig retain their native
+preparation/cache behavior; stable query IDs may be supplied as hints. Advanced
+driver controls use the explicit backend escape hatch.
 
-- SQLite prepares per connection and resets a statement after use. A connection
-  may cache statements by generated query ID.
-- PostgreSQL uses `pg.zig` preparation behavior and must not share a prepared
-  statement across unrelated connections.
-
-Preparation is an optimization, not part of application-visible correctness.
-Cache eviction must finalize or release native statements. A schema-change error
-may invalidate and reprepare once; other errors are returned without implicit
-retry.
+The complete wrapper, pool, executor, transaction, and lifetime contract is in
+[runtime.md](runtime.md). Payload ownership and privacy are in
+[errors-and-observability.md](errors-and-observability.md).
