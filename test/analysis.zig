@@ -71,3 +71,75 @@ test "rejects missing relations and ambiguous unqualified columns" {
         analysis.analyze(std.testing.allocator, &schema, &ambiguous),
     );
 }
+
+test "infers parameters from update assignments comparisons and limits" {
+    var schema_sql = try parser.parse(
+        std.testing.allocator,
+        "CREATE TABLE users (id BIGINT PRIMARY KEY, name TEXT NOT NULL)",
+    );
+    defer schema_sql.deinit();
+    var schema = catalog.Catalog.init(std.testing.allocator);
+    defer schema.deinit();
+    try schema.applyParserJson(schema_sql.ast_json);
+
+    var update_sql = try parser.parse(
+        std.testing.allocator,
+        "UPDATE users SET name=:name WHERE id=:id RETURNING id",
+    );
+    defer update_sql.deinit();
+    var update = try ir.adapt(
+        std.testing.allocator,
+        update_sql.ast_json,
+        update_sql.rewritten.names,
+    );
+    defer update.deinit();
+    var update_result = try analysis.analyze(std.testing.allocator, &schema, &update);
+    defer update_result.deinit();
+    try std.testing.expectEqual(analysis.ScalarType.text, update_result.parameters[0].scalar_type);
+    try std.testing.expectEqual(analysis.ScalarType.integer, update_result.parameters[1].scalar_type);
+    try std.testing.expect(!update_result.parameters[0].nullable);
+
+    var page_sql = try parser.parse(
+        std.testing.allocator,
+        "SELECT id FROM users LIMIT :limit OFFSET :offset",
+    );
+    defer page_sql.deinit();
+    var page = try ir.adapt(std.testing.allocator, page_sql.ast_json, page_sql.rewritten.names);
+    defer page.deinit();
+    var page_result = try analysis.analyze(std.testing.allocator, &schema, &page);
+    defer page_result.deinit();
+    try std.testing.expectEqual(analysis.ScalarType.integer, page_result.parameters[0].scalar_type);
+    try std.testing.expectEqual(analysis.ScalarType.integer, page_result.parameters[1].scalar_type);
+}
+
+test "infers INSERT values and INSERT SELECT parameters from target columns" {
+    var schema_sql = try parser.parse(
+        std.testing.allocator,
+        "CREATE TABLE users (id BIGINT PRIMARY KEY, name TEXT NOT NULL);" ++
+            "CREATE TABLE role_permissions (" ++
+            "role_id BIGINT NOT NULL, permission_key TEXT NOT NULL)",
+    );
+    defer schema_sql.deinit();
+    var schema = catalog.Catalog.init(std.testing.allocator);
+    defer schema.deinit();
+    try schema.applyParserJson(schema_sql.ast_json);
+
+    const cases = [_][]const u8{
+        "INSERT INTO users(name) VALUES (:name) RETURNING id, name",
+        "INSERT INTO role_permissions(role_id, permission_key) " ++
+            "SELECT role_id, :new_key FROM role_permissions " ++
+            "WHERE permission_key=:old_key",
+    };
+    for (cases) |sql| {
+        var parsed = try parser.parse(std.testing.allocator, sql);
+        defer parsed.deinit();
+        var query = try ir.adapt(std.testing.allocator, parsed.ast_json, parsed.rewritten.names);
+        defer query.deinit();
+        var result = try analysis.analyze(std.testing.allocator, &schema, &query);
+        defer result.deinit();
+        for (result.parameters) |parameter| {
+            try std.testing.expectEqual(analysis.ScalarType.text, parameter.scalar_type);
+            try std.testing.expect(!parameter.nullable);
+        }
+    }
+}

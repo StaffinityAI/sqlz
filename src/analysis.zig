@@ -20,6 +20,7 @@ pub const ResultColumn = struct {
 pub const Analysis = struct {
     arena: std.heap.ArenaAllocator,
     columns: []const ResultColumn,
+    parameters: []const ResultColumn,
 
     pub fn deinit(self: *Analysis) void {
         self.arena.deinit();
@@ -63,7 +64,19 @@ pub fn analyze(
         result.scalar_type = scalarType(resolved.column.database_type);
         result.nullable = resolved.column.nullable or resolved.relation_nullable;
     }
-    return .{ .arena = arena, .columns = columns };
+    const parameters = try storage.alloc(ResultColumn, query.parameter_uses.len);
+    for (query.parameter_uses, parameters) |use, *result| {
+        result.* = .{
+            .name = try storage.dupe(u8, use.name),
+            .scalar_type = if (use.integer_hint) .integer else .unknown,
+            .nullable = !use.integer_hint,
+        };
+        const reference = use.column orelse continue;
+        const resolved = try resolveColumn(schema, query.relation_bindings, reference);
+        result.scalar_type = scalarType(resolved.column.database_type);
+        result.nullable = resolved.column.nullable;
+    }
+    return .{ .arena = arena, .columns = columns, .parameters = parameters };
 }
 
 fn resolveColumn(

@@ -18,6 +18,12 @@ pub const Projection = struct {
     column: ?ColumnReference,
 };
 
+pub const ParameterUse = struct {
+    name: []const u8,
+    column: ?ColumnReference = null,
+    integer_hint: bool = false,
+};
+
 pub const Query = struct {
     arena: std.heap.ArenaAllocator,
     kind: StatementKind,
@@ -25,6 +31,7 @@ pub const Query = struct {
     relations: []const []const u8,
     relation_bindings: []const Relation,
     parameters: []const []const u8,
+    parameter_uses: []const ParameterUse,
     result_columns: []const []const u8,
     projections: []const Projection,
 
@@ -73,8 +80,14 @@ pub fn adapt(
     try collectRelations(storage, statement, &relations, &relation_bindings, false);
 
     var parameters: std.ArrayList([]const u8) = .empty;
-    for (parameter_names) |name|
-        try parameters.append(storage, try storage.dupe(u8, name));
+    const parameter_uses = try storage.alloc(ParameterUse, parameter_names.len);
+    for (parameter_names, parameter_uses) |name, *use| {
+        const owned_name = try storage.dupe(u8, name);
+        try parameters.append(storage, owned_name);
+        use.* = .{ .name = owned_name };
+    }
+    try collectParameterUses(storage, statement, parameter_uses);
+    try collectStatementParameterUses(storage, kind, statement, mutation_targetName(kind, statement), parameter_uses);
 
     const target_list_name = if (kind == .select) "targetList" else "returningList";
     var result_columns: std.ArrayList([]const u8) = .empty;
@@ -119,9 +132,151 @@ pub fn adapt(
         .relations = try relations.toOwnedSlice(storage),
         .relation_bindings = try relation_bindings.toOwnedSlice(storage),
         .parameters = try parameters.toOwnedSlice(storage),
+        .parameter_uses = parameter_uses,
         .result_columns = try result_columns.toOwnedSlice(storage),
         .projections = try projections.toOwnedSlice(storage),
     };
+}
+
+fn collectStatementParameterUses(
+    allocator: std.mem.Allocator,
+    kind: StatementKind,
+    statement: std.json.Value,
+    target_name: ?[]const u8,
+    uses: []ParameterUse,
+) Error!void {
+    if (kind == .update) {
+        if (field(statement, "targetList")) |targets| {
+            if (targets != .array) return error.InvalidAst;
+            for (targets.array.items) |target| {
+                const result = field(target, "ResTarget") orelse return error.InvalidAst;
+                const name = field(result, "name") orelse return error.InvalidAst;
+                const value = field(result, "val") orelse return error.InvalidAst;
+                if (name != .string) return error.InvalidAst;
+                try bindExpressionParameter(allocator, uses, value, .{
+                    .qualifier = target_name,
+                    .name = name.string,
+                });
+            }
+        }
+    } else if (kind == .insert) {
+        try collectInsertParameterUses(allocator, statement, target_name, uses);
+    }
+    for ([_][]const u8{ "limitCount", "limitOffset" }) |field_name| {
+        if (field(statement, field_name)) |value| {
+            if (parameterOrdinal(value)) |ordinal| {
+                if (ordinal > 0 and ordinal <= uses.len) uses[ordinal - 1].integer_hint = true;
+            }
+        }
+    }
+}
+
+fn collectInsertParameterUses(
+    allocator: std.mem.Allocator,
+    statement: std.json.Value,
+    target_name: ?[]const u8,
+    uses: []ParameterUse,
+) Error!void {
+    const columns = field(statement, "cols") orelse return;
+    const select_value = field(statement, "selectStmt") orelse return;
+    if (columns != .array) return error.InvalidAst;
+    const select = field(select_value, "SelectStmt") orelse select_value;
+    var expressions: ?[]const std.json.Value = null;
+    if (field(select, "valuesLists")) |lists| {
+        if (lists != .array or lists.array.items.len == 0) return error.InvalidAst;
+        const list = field(lists.array.items[0], "List") orelse return error.InvalidAst;
+        const items = field(list, "items") orelse return error.InvalidAst;
+        if (items != .array) return error.InvalidAst;
+        expressions = items.array.items;
+    } else if (field(select, "targetList")) |targets| {
+        if (targets != .array) return error.InvalidAst;
+        var values: std.ArrayList(std.json.Value) = .empty;
+        for (targets.array.items) |target| {
+            const result = field(target, "ResTarget") orelse return error.InvalidAst;
+            try values.append(allocator, field(result, "val") orelse return error.InvalidAst);
+        }
+        expressions = try values.toOwnedSlice(allocator);
+    }
+    const values = expressions orelse return;
+    for (columns.array.items, values) |column_value, expression| {
+        const target = field(column_value, "ResTarget") orelse return error.InvalidAst;
+        const name = field(target, "name") orelse return error.InvalidAst;
+        if (name != .string) return error.InvalidAst;
+        try bindExpressionParameter(allocator, uses, expression, .{
+            .qualifier = target_name,
+            .name = name.string,
+        });
+    }
+}
+
+fn collectParameterUses(
+    allocator: std.mem.Allocator,
+    value: std.json.Value,
+    uses: []ParameterUse,
+) Error!void {
+    switch (value) {
+        .object => |object| {
+            if (object.get("A_Expr")) |expression| {
+                const left = field(expression, "lexpr");
+                const right = field(expression, "rexpr");
+                if (left != null and right != null) {
+                    if (try expressionColumn(allocator, left.?)) |column|
+                        try bindExpressionParameter(allocator, uses, right.?, column);
+                    if (try expressionColumn(allocator, right.?)) |column|
+                        try bindExpressionParameter(allocator, uses, left.?, column);
+                }
+            }
+            var iterator = object.iterator();
+            while (iterator.next()) |entry|
+                try collectParameterUses(allocator, entry.value_ptr.*, uses);
+        },
+        .array => |array| for (array.items) |item|
+            try collectParameterUses(allocator, item, uses),
+        else => {},
+    }
+}
+
+fn bindExpressionParameter(
+    allocator: std.mem.Allocator,
+    uses: []ParameterUse,
+    expression: std.json.Value,
+    column: ColumnReference,
+) Error!void {
+    const ordinal = parameterOrdinal(expression) orelse return;
+    if (ordinal == 0 or ordinal > uses.len) return error.InvalidAst;
+    if (uses[ordinal - 1].column != null) return;
+    uses[ordinal - 1].column = .{
+        .qualifier = if (column.qualifier) |value| try allocator.dupe(u8, value) else null,
+        .name = try allocator.dupe(u8, column.name),
+    };
+}
+
+fn parameterOrdinal(expression: std.json.Value) ?usize {
+    const parameter = field(expression, "ParamRef") orelse return null;
+    const number = field(parameter, "number") orelse return null;
+    if (number != .integer or number.integer <= 0) return null;
+    return @intCast(number.integer);
+}
+
+fn expressionColumn(allocator: std.mem.Allocator, expression: std.json.Value) Error!?ColumnReference {
+    const column = field(expression, "ColumnRef") orelse return null;
+    const fields = field(column, "fields") orelse return error.InvalidAst;
+    if (fields != .array or fields.array.items.len == 0) return error.InvalidAst;
+    return .{
+        .qualifier = if (fields.array.items.len >= 2)
+            try allocator.dupe(u8, try stringField(fields.array.items[fields.array.items.len - 2]))
+        else
+            null,
+        .name = try allocator.dupe(u8, try stringField(fields.array.items[fields.array.items.len - 1])),
+    };
+}
+
+fn mutation_targetName(kind: StatementKind, statement: std.json.Value) ?[]const u8 {
+    if (kind == .select) return null;
+    const relation = field(statement, "relation") orelse return null;
+    const name = field(relation, "relname") orelse return null;
+    if (name != .string) return null;
+    return name.string;
 }
 
 fn collectRelations(
