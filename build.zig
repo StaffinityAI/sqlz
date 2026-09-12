@@ -93,6 +93,11 @@ pub fn build(b: *std.Build) !void {
             .{ .name = "sqlz_migrations", .module = migrations_mod },
         },
     });
+    const ir_mod = b.addModule("sqlz_ir", .{
+        .root_source_file = b.path("src/ir.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
 
     const zqlite_dep = b.lazyDependency("zqlite", .{
         .target = target,
@@ -193,6 +198,23 @@ pub fn build(b: *std.Build) !void {
     test_step.dependOn(&run_checker.step);
     const checker_step = b.step("test-checker", "Run offline checker pipeline tests");
     checker_step.dependOn(&run_checker.step);
+
+    const ir_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/ir.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "sqlz_ir", .module = ir_mod },
+                .{ .name = "sqlz_parser", .module = parser_mod },
+            },
+        }),
+    });
+    const run_ir = b.addRunArtifact(ir_tests);
+    test_step.dependOn(&run_ir.step);
+    const ir_step = b.step("test-ir", "Run checker IR adapter tests");
+    ir_step.dependOn(&run_ir.step);
 
     if (zqlite_dep) |dep| {
         sqlz_mod.addImport("zqlite", dep.module("zqlite"));

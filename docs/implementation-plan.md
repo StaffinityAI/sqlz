@@ -21,7 +21,8 @@ this slice.
 | Catalog | Deterministic, atomic common + SQLite migration replay | Complete |
 | Catalog | Remaining SQLite 0.1 DDL objects and constraints | In progress |
 | Parser | SQLite-only syntax validation and capability gates | Not started |
-| Checker | Adapt query AST into checker IR | Not started |
+| Checker | Adapt statements, relations, parameters, and result names into IR | Complete |
+| Checker | Add typed expression IR for semantic inference | In progress |
 | Checker | Resolve names and infer parameter/result types and nullability | Not started |
 | Inputs | Discover named `.sql` files and embedded Zig declarations | Not started |
 | Generator | Deterministic build-cache Zig binding generation | Not started |
@@ -32,8 +33,8 @@ this slice.
 
 ## Current next steps
 
-1. Complete the remaining SQLite 0.1 DDL subset and dialect gates.
-2. Introduce a typed query IR over the `libpg_query` tree.
-3. Resolve names and infer types/nullability for the ten query families.
-4. Discover named SQL inputs and generate deterministic Zig bindings.
-5. Convert the examples to generated bindings and harden diagnostics/limits.
+1. Add typed expressions and resolve names/types/nullability for the query families.
+2. Complete the remaining SQLite 0.1 DDL subset and dialect gates.
+3. Discover named SQL inputs and generate deterministic Zig bindings.
+4. Convert the examples to generated bindings.
+5. Harden diagnostics, source limits, and the supported dependency matrix.
