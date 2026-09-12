@@ -30,7 +30,7 @@ this slice.
 | Checker | Resolve recursive CTE output shapes used by the samples | Complete |
 | Checker | General set-operation typing and conflicting constraints | Complete |
 | Inputs | Parse and deterministically discover named `.sql` files | Complete |
-| Inputs | Discover and validate embedded Zig declarations | Not started |
+| Inputs | Discover and validate embedded Zig declarations | In progress |
 | Generator | Deterministic, Zig-AST-validated binding source emission | Complete |
 | Generator | Deterministic root/path namespace assembly | Complete |
 | Generator | Build-cache module integration | Complete |

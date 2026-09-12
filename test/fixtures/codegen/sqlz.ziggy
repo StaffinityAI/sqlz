@@ -2,5 +2,5 @@
 .project_id = "550e8400-e29b-41d4-a716-446655440000",
 .migrations = "migrations",
 .sql_roots = .{ .app = "queries" },
-.zig_roots = [],
+.zig_roots = ["src"],
 .backends = .{ .sqlite = .{ .profile = "3.53" } },

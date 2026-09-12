@@ -116,6 +116,12 @@ pub fn build(b: *std.Build) !void {
         .target = host_target,
         .optimize = optimize,
     });
+    const zig_queries_mod = b.addModule("sqlz_zig_queries", .{
+        .root_source_file = b.path("src/zig_queries.zig"),
+        .target = host_target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "sqlz_query_files", .module = query_files_mod }},
+    });
     const checker_mod = b.addModule("sqlz_checker", .{
         .root_source_file = b.path("src/checker.zig"),
         .target = host_target,
@@ -148,6 +154,7 @@ pub fn build(b: *std.Build) !void {
             .{ .name = "sqlz_config", .module = config_mod },
             .{ .name = "sqlz_migrations", .module = migrations_mod },
             .{ .name = "sqlz_query_files", .module = query_files_mod },
+            .{ .name = "sqlz_zig_queries", .module = zig_queries_mod },
             .{ .name = "sqlz_checker", .module = checker_mod },
             .{ .name = "sqlz_generator", .module = generator_mod },
         },
@@ -211,6 +218,16 @@ pub fn build(b: *std.Build) !void {
     test_step.dependOn(&run_config.step);
     const config_step = b.step("test-config", "Run project configuration tests");
     config_step.dependOn(&run_config.step);
+
+    const zig_query_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/zig_queries.zig"),
+            .target = host_target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "sqlz_zig_queries", .module = zig_queries_mod }},
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(zig_query_tests).step);
 
     const catalog_tests = b.addTest(.{
         .root_module = b.createModule(.{

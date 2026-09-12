@@ -3,6 +3,7 @@ const ziggy = @import("ziggy");
 const config = @import("sqlz_config");
 const migrations = @import("sqlz_migrations");
 const query_files = @import("sqlz_query_files");
+const zig_queries = @import("sqlz_zig_queries");
 const checker = @import("sqlz_checker");
 const generator = @import("sqlz_generator");
 
@@ -55,6 +56,23 @@ pub fn generateProject(
         dialect,
     );
     defer schema.deinit();
+
+    for (project.zig_roots) |zig_root| {
+        var zig_dir = try project_dir.openDir(io, zig_root, .{ .iterate = true });
+        defer zig_dir.close(io);
+        var embedded = try zig_queries.discover(allocator, io, zig_dir, source_limit);
+        defer embedded.deinit();
+        for (embedded.sources) |*source| {
+            if (source.backends.postgres) return error.PostgresBackendDeferred;
+            var checked = try checker.checkNamedSqliteWithDialect(
+                allocator,
+                &schema,
+                source,
+                dialect,
+            );
+            checked.deinit();
+        }
+    }
 
     const root_count = project.sql_roots.fields.count();
     const states = try allocator.alloc(RootState, root_count);
