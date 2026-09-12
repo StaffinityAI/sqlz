@@ -2,6 +2,7 @@ const std = @import("std");
 const checker = @import("sqlz_checker");
 const catalog = @import("sqlz_catalog");
 const migrations = @import("sqlz_migrations");
+const query_files = @import("sqlz_query_files");
 
 test "replays SQLite migrations in graph order" {
     const inputs = [_]checker.MigrationInput{
@@ -111,4 +112,27 @@ test "discovery and replay apply common SQL before SQLite SQL" {
     defer schema.deinit();
     try std.testing.expect(schema.table("users") != null);
     try std.testing.expect(schema.indexes.get("users_email_key").?.unique);
+}
+
+test "checks a named SQLite query against the replayed catalog" {
+    var schema = catalog.Catalog.init(std.testing.allocator);
+    defer schema.deinit();
+    try checker.applySqliteRevisionAtomic(
+        &schema,
+        std.testing.allocator,
+        "CREATE TABLE users (id BIGINT PRIMARY KEY, name TEXT NOT NULL)",
+        "",
+    );
+    var source = try query_files.parse(std.testing.allocator, "get_user.sql",
+        \\-- sqlz.name: get_user
+        \\-- sqlz.backends: sqlite
+        \\-- sqlz.cardinality: optional
+        \\
+        \\SELECT id, name FROM users WHERE id=:id
+    );
+    defer source.deinit();
+    var checked = try checker.checkNamedSqlite(std.testing.allocator, &schema, &source);
+    defer checked.deinit();
+    try std.testing.expectEqual(@as(usize, 1), checked.analysis.parameters.len);
+    try std.testing.expectEqual(@as(usize, 2), checked.analysis.columns.len);
 }

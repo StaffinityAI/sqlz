@@ -27,8 +27,10 @@ this slice.
 | Checker | Infer parameters from comparisons, writes, and pagination | Complete |
 | Checker | Infer literals, common functions, arithmetic, casts, and scalar subqueries | Complete |
 | Checker | Resolve CTE/set-operation shapes and conflicting constraints | In progress |
-| Inputs | Discover named `.sql` files and embedded Zig declarations | Not started |
-| Generator | Deterministic build-cache Zig binding generation | Not started |
+| Inputs | Parse and deterministically discover named `.sql` files | Complete |
+| Inputs | Discover and validate embedded Zig declarations | Not started |
+| Generator | Deterministic, Zig-AST-validated binding source emission | Complete |
+| Generator | Build-cache module integration and namespace assembly | In progress |
 | Acceptance | Convert examples to generated checked bindings | Not started |
 | Hardening | Complete diagnostics, resource limits, and dependency matrix | Not started |
 | Deferred | PostgreSQL runtime backend | Deferred |
@@ -36,8 +38,8 @@ this slice.
 
 ## Current next steps
 
-1. Add typed expressions and resolve names/types/nullability for the query families.
-2. Complete the remaining SQLite 0.1 DDL subset and dialect gates.
-3. Discover named SQL inputs and generate deterministic Zig bindings.
-4. Convert the examples to generated bindings.
+1. Assemble discovered query variants into one generated build-cache module.
+2. Resolve CTE/set-operation shapes used by the recursive example.
+3. Complete the remaining SQLite 0.1 DDL subset and dialect gates.
+4. Convert the examples to generated bindings and add embedded-Zig discovery.
 5. Harden diagnostics, source limits, and the supported dependency matrix.

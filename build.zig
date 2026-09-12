@@ -83,16 +83,6 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
         .imports = &.{.{ .name = "ziggy", .module = ziggy_dep.module("ziggy") }},
     });
-    const checker_mod = b.addModule("sqlz_checker", .{
-        .root_source_file = b.path("src/checker.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "sqlz_parser", .module = parser_mod },
-            .{ .name = "sqlz_catalog", .module = catalog_mod },
-            .{ .name = "sqlz_migrations", .module = migrations_mod },
-        },
-    });
     const ir_mod = b.addModule("sqlz_ir", .{
         .root_source_file = b.path("src/ir.zig"),
         .target = target,
@@ -105,6 +95,34 @@ pub fn build(b: *std.Build) !void {
         .imports = &.{
             .{ .name = "sqlz_ir", .module = ir_mod },
             .{ .name = "sqlz_catalog", .module = catalog_mod },
+        },
+    });
+    const query_files_mod = b.addModule("sqlz_query_files", .{
+        .root_source_file = b.path("src/query_files.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const checker_mod = b.addModule("sqlz_checker", .{
+        .root_source_file = b.path("src/checker.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "sqlz_parser", .module = parser_mod },
+            .{ .name = "sqlz_catalog", .module = catalog_mod },
+            .{ .name = "sqlz_migrations", .module = migrations_mod },
+            .{ .name = "sqlz_ir", .module = ir_mod },
+            .{ .name = "sqlz_analysis", .module = analysis_mod },
+            .{ .name = "sqlz_query_files", .module = query_files_mod },
+        },
+    });
+    const generator_mod = b.addModule("sqlz_generator", .{
+        .root_source_file = b.path("src/generator.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "sqlz_checker", .module = checker_mod },
+            .{ .name = "sqlz_analysis", .module = analysis_mod },
+            .{ .name = "sqlz_query_files", .module = query_files_mod },
         },
     });
 
@@ -200,6 +218,7 @@ pub fn build(b: *std.Build) !void {
                 .{ .name = "sqlz_checker", .module = checker_mod },
                 .{ .name = "sqlz_catalog", .module = catalog_mod },
                 .{ .name = "sqlz_migrations", .module = migrations_mod },
+                .{ .name = "sqlz_query_files", .module = query_files_mod },
             },
         }),
     });
@@ -243,6 +262,38 @@ pub fn build(b: *std.Build) !void {
     test_step.dependOn(&run_analysis.step);
     const analysis_step = b.step("test-analysis", "Run query semantic analysis tests");
     analysis_step.dependOn(&run_analysis.step);
+
+    const query_file_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/query_files.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "sqlz_query_files", .module = query_files_mod }},
+        }),
+    });
+    const run_query_files = b.addRunArtifact(query_file_tests);
+    test_step.dependOn(&run_query_files.step);
+    const query_files_step = b.step("test-query-files", "Run named SQL discovery tests");
+    query_files_step.dependOn(&run_query_files.step);
+
+    const generator_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/generator.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "sqlz_generator", .module = generator_mod },
+                .{ .name = "sqlz_checker", .module = checker_mod },
+                .{ .name = "sqlz_catalog", .module = catalog_mod },
+                .{ .name = "sqlz_query_files", .module = query_files_mod },
+            },
+        }),
+    });
+    const run_generator = b.addRunArtifact(generator_tests);
+    test_step.dependOn(&run_generator.step);
+    const generator_step = b.step("test-generator", "Run checked binding generator tests");
+    generator_step.dependOn(&run_generator.step);
 
     if (zqlite_dep) |dep| {
         sqlz_mod.addImport("zqlite", dep.module("zqlite"));
