@@ -29,6 +29,7 @@ pub const Index = struct {
 pub const Table = struct {
     allocator: std.mem.Allocator,
     name: []const u8,
+    is_view: bool = false,
     columns: std.StringArrayHashMapUnmanaged(Column) = .empty,
 
     pub fn deinit(self: *Table) void {
@@ -87,6 +88,7 @@ pub const Catalog = struct {
             var table_copy: Table = .{
                 .allocator = allocator,
                 .name = try allocator.dupe(u8, source.name),
+                .is_view = source.is_view,
             };
             errdefer table_copy.deinit();
             var columns = source.columns.iterator();
@@ -141,6 +143,7 @@ pub const Catalog = struct {
             const node = raw.*.stmt;
             switch (node.*.node_case) {
                 pg.PG_QUERY__NODE__NODE_CREATE_STMT => try self.applyCreateTable(node.*.unnamed_0.create_stmt),
+                pg.PG_QUERY__NODE__NODE_VIEW_STMT => try self.applyCreateView(node.*.unnamed_0.view_stmt),
                 pg.PG_QUERY__NODE__NODE_INDEX_STMT => try self.applyCreateIndex(node.*.unnamed_0.index_stmt),
                 pg.PG_QUERY__NODE__NODE_ALTER_TABLE_STMT => try self.applyAlterTable(node.*.unnamed_0.alter_table_stmt),
                 pg.PG_QUERY__NODE__NODE_RENAME_STMT => try self.applyRename(node.*.unnamed_0.rename_stmt),
@@ -211,6 +214,45 @@ pub const Catalog = struct {
         });
     }
 
+    fn applyCreateView(self: *Catalog, node_ptr: [*c]pg.PgQuery__ViewStmt) Error!void {
+        if (node_ptr == null or node_ptr.*.view == null or node_ptr.*.query == null)
+            return error.InvalidAst;
+        const node = node_ptr.*;
+        if (node.replace != 0 or node.query.*.node_case != pg.PG_QUERY__NODE__NODE_SELECT_STMT)
+            return error.UnsupportedStatement;
+        const view_name = cString(node.view.*.relname) orelse return error.InvalidAst;
+        if (self.tables.contains(view_name)) return error.DuplicateTable;
+        const select = node.query.*.unnamed_0.select_stmt;
+        if (select == null or select.*.op != pg.PG_QUERY__SET_OPERATION__SETOP_NONE)
+            return error.UnsupportedStatement;
+
+        var bindings: std.ArrayList(ViewBinding) = .empty;
+        defer bindings.deinit(self.allocator);
+        for (nodeSlice(select.*.from_clause, select.*.n_from_clause)) |from|
+            try self.collectViewBindings(&bindings, from, false);
+        const targets = nodeSlice(select.*.target_list, select.*.n_target_list);
+        const aliases = nodeSlice(node.aliases, node.n_aliases);
+        if (aliases.len != 0 and aliases.len != targets.len) return error.InvalidAst;
+
+        var view: Table = .{
+            .allocator = self.allocator,
+            .name = try self.allocator.dupe(u8, view_name),
+            .is_view = true,
+        };
+        errdefer view.deinit();
+        for (targets, 0..) |target_node, index| {
+            const target = resTarget(target_node) orelse return error.InvalidAst;
+            const source = try resolveViewColumn(bindings.items, target.val);
+            const result_name = if (aliases.len != 0)
+                nodeString(aliases[index]) orelse return error.InvalidAst
+            else
+                viewResultName(target) orelse return error.InvalidAst;
+            try addCopiedColumn(&view, result_name, source.column, source.nullable);
+        }
+        if (view.columns.count() == 0) return error.InvalidAst;
+        try self.tables.putNoClobber(self.allocator, view.name, view);
+    }
+
     fn applyAlterTable(self: *Catalog, node_ptr: [*c]pg.PgQuery__AlterTableStmt) Error!void {
         if (node_ptr == null or node_ptr.*.relation == null) return error.InvalidAst;
         const node = node_ptr.*;
@@ -244,9 +286,15 @@ pub const Catalog = struct {
             const list = object.*.unnamed_0.list.*;
             if (list.n_items == 0) return error.InvalidAst;
             const name = nodeString(list.items[list.n_items - 1]) orelse return error.InvalidAst;
-            if (node.remove_type == pg.PG_QUERY__OBJECT_TYPE__OBJECT_TABLE) {
+            if (node.remove_type == pg.PG_QUERY__OBJECT_TYPE__OBJECT_TABLE or
+                node.remove_type == pg.PG_QUERY__OBJECT_TYPE__OBJECT_VIEW)
+            {
                 var removed = self.tables.fetchOrderedRemove(name) orelse
                     return error.MissingTable;
+                if ((node.remove_type == pg.PG_QUERY__OBJECT_TYPE__OBJECT_VIEW) != removed.value.is_view) {
+                    try self.tables.putNoClobber(self.allocator, removed.value.name, removed.value);
+                    return error.MissingTable;
+                }
                 removed.value.deinit();
             } else if (node.remove_type == pg.PG_QUERY__OBJECT_TYPE__OBJECT_INDEX) {
                 var removed = self.indexes.fetchOrderedRemove(name) orelse
@@ -319,7 +367,107 @@ pub const Catalog = struct {
             }
         }
     }
+
+    fn collectViewBindings(
+        self: *const Catalog,
+        bindings: *std.ArrayList(ViewBinding),
+        node: [*c]pg.PgQuery__Node,
+        nullable: bool,
+    ) Error!void {
+        if (node == null) return error.InvalidAst;
+        switch (node.*.node_case) {
+            pg.PG_QUERY__NODE__NODE_RANGE_VAR => {
+                const range = node.*.unnamed_0.range_var;
+                if (range == null) return error.InvalidAst;
+                const name = cString(range.*.relname) orelse return error.InvalidAst;
+                const table_ptr = self.tables.getPtr(name) orelse return error.MissingTable;
+                const alias = if (range.*.alias != null) value: {
+                    const candidate = cString(range.*.alias.*.aliasname) orelse return error.InvalidAst;
+                    break :value if (candidate.len == 0) null else candidate;
+                } else null;
+                try bindings.append(self.allocator, .{
+                    .name = name,
+                    .alias = alias,
+                    .table = table_ptr,
+                    .nullable = nullable,
+                });
+            },
+            pg.PG_QUERY__NODE__NODE_JOIN_EXPR => {
+                const join = node.*.unnamed_0.join_expr;
+                if (join == null) return error.InvalidAst;
+                try self.collectViewBindings(
+                    bindings,
+                    join.*.larg,
+                    nullable or join.*.jointype == pg.PG_QUERY__JOIN_TYPE__JOIN_RIGHT or
+                        join.*.jointype == pg.PG_QUERY__JOIN_TYPE__JOIN_FULL,
+                );
+                try self.collectViewBindings(
+                    bindings,
+                    join.*.rarg,
+                    nullable or join.*.jointype == pg.PG_QUERY__JOIN_TYPE__JOIN_LEFT or
+                        join.*.jointype == pg.PG_QUERY__JOIN_TYPE__JOIN_FULL,
+                );
+            },
+            else => return error.UnsupportedStatement,
+        }
+    }
 };
+
+const ViewBinding = struct {
+    name: []const u8,
+    alias: ?[]const u8,
+    table: *const Table,
+    nullable: bool,
+};
+
+const ResolvedViewColumn = struct {
+    column: *const Column,
+    nullable: bool,
+};
+
+fn resolveViewColumn(bindings: []const ViewBinding, node: [*c]pg.PgQuery__Node) Error!ResolvedViewColumn {
+    if (node == null or node.*.node_case != pg.PG_QUERY__NODE__NODE_COLUMN_REF)
+        return error.UnsupportedStatement;
+    const reference = node.*.unnamed_0.column_ref;
+    if (reference == null or reference.*.n_fields == 0) return error.InvalidAst;
+    const fields = nodeSlice(reference.*.fields, reference.*.n_fields);
+    const column_name = nodeString(fields[fields.len - 1]) orelse return error.UnsupportedStatement;
+    const qualifier = if (fields.len >= 2) nodeString(fields[fields.len - 2]) else null;
+    var found: ?ResolvedViewColumn = null;
+    for (bindings) |binding| {
+        if (qualifier) |name| {
+            const alias_match = if (binding.alias) |alias| std.mem.eql(u8, alias, name) else false;
+            if (!alias_match and !std.mem.eql(u8, binding.name, name)) continue;
+        }
+        const column = binding.table.columns.getPtr(column_name) orelse continue;
+        if (found != null) return error.InvalidAst;
+        found = .{ .column = column, .nullable = column.nullable or binding.nullable };
+    }
+    return found orelse error.MissingColumn;
+}
+
+fn viewResultName(target: *const pg.PgQuery__ResTarget) ?[]const u8 {
+    if (cString(target.name)) |name| if (name.len != 0) return name;
+    if (target.val == null or target.val.*.node_case != pg.PG_QUERY__NODE__NODE_COLUMN_REF) return null;
+    const reference = target.val.*.unnamed_0.column_ref;
+    if (reference == null or reference.*.n_fields == 0) return null;
+    return nodeString(reference.*.fields[reference.*.n_fields - 1]);
+}
+
+fn addCopiedColumn(table: *Table, name_value: []const u8, source: *const Column, nullable: bool) Error!void {
+    if (table.columns.contains(name_value)) return error.DuplicateColumn;
+    const name = try table.allocator.dupe(u8, name_value);
+    errdefer table.allocator.free(name);
+    const database_type = try table.allocator.dupe(u8, source.database_type);
+    errdefer table.allocator.free(database_type);
+    try table.columns.putNoClobber(table.allocator, name, .{
+        .name = name,
+        .database_type = database_type,
+        .nullable = nullable,
+        .primary_key = false,
+        .unique = false,
+    });
+}
 
 fn applyTableConstraint(table: *Table, constraint_ptr: [*c]pg.PgQuery__Constraint) Error!void {
     if (constraint_ptr == null) return error.InvalidAst;
@@ -380,6 +528,11 @@ fn addColumn(table: *Table, definition_ptr: [*c]pg.PgQuery__ColumnDef) Error!voi
 fn nodeString(node: [*c]pg.PgQuery__Node) ?[]const u8 {
     if (node == null or node.*.node_case != pg.PG_QUERY__NODE__NODE_STRING) return null;
     return cString(node.*.unnamed_0.string.*.sval);
+}
+
+fn resTarget(node: [*c]pg.PgQuery__Node) ?*const pg.PgQuery__ResTarget {
+    if (node == null or node.*.node_case != pg.PG_QUERY__NODE__NODE_RES_TARGET) return null;
+    return node.*.unnamed_0.res_target;
 }
 
 fn cString(value: [*c]u8) ?[]const u8 {

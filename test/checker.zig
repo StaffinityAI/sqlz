@@ -136,3 +136,28 @@ test "checks a named SQLite query against the replayed catalog" {
     try std.testing.expectEqual(@as(usize, 1), checked.analysis.parameters.len);
     try std.testing.expectEqual(@as(usize, 2), checked.analysis.columns.len);
 }
+
+test "checks a named query against a migration-defined view" {
+    var schema = catalog.Catalog.init(std.testing.allocator);
+    defer schema.deinit();
+    try checker.applySqliteRevisionAtomic(
+        &schema,
+        std.testing.allocator,
+        "CREATE TABLE users (id BIGINT PRIMARY KEY, name TEXT NOT NULL);" ++
+            "CREATE VIEW user_names AS SELECT id AS user_id, name FROM users",
+        "",
+    );
+    var source = try query_files.parse(std.testing.allocator, "list_user_names.sql",
+        \\-- sqlz.name: list_user_names
+        \\-- sqlz.backends: sqlite
+        \\-- sqlz.cardinality: many
+        \\
+        \\SELECT user_id, name FROM user_names
+    );
+    defer source.deinit();
+    var checked = try checker.checkNamedSqlite(std.testing.allocator, &schema, &source);
+    defer checked.deinit();
+    try std.testing.expectEqual(@as(usize, 2), checked.analysis.columns.len);
+    try std.testing.expectEqualStrings("user_id", checked.analysis.columns[0].name);
+    try std.testing.expect(!checked.analysis.columns[1].nullable);
+}

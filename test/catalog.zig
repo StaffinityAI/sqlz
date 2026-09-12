@@ -129,3 +129,27 @@ test "replays table and column renames through dependent indexes" {
     try std.testing.expectEqualStrings("accounts", index.table_name);
     try std.testing.expectEqualStrings("display_name", index.columns[0]);
 }
+
+test "replays views with projected column metadata and DROP VIEW" {
+    var create = try parser.parse(
+        std.testing.allocator,
+        "CREATE TABLE users (id BIGINT PRIMARY KEY, name TEXT NOT NULL, nickname TEXT);" ++
+            "CREATE VIEW user_names (user_id, display_name, nickname) AS " ++
+            "SELECT id, name, nickname FROM users",
+    );
+    defer create.deinit();
+    var drop = try parser.parse(std.testing.allocator, "DROP VIEW user_names");
+    defer drop.deinit();
+
+    var schema = catalog.Catalog.init(std.testing.allocator);
+    defer schema.deinit();
+    try schema.applyParserTree(create.tree);
+    const view = schema.table("user_names").?;
+    try std.testing.expect(view.is_view);
+    try std.testing.expectEqualStrings("int8", view.columns.get("user_id").?.database_type);
+    try std.testing.expect(!view.columns.get("display_name").?.nullable);
+    try std.testing.expect(view.columns.get("nickname").?.nullable);
+
+    try schema.applyParserTree(drop.tree);
+    try std.testing.expect(schema.table("user_names") == null);
+}
