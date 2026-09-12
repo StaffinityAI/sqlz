@@ -107,3 +107,25 @@ test "replays table-level primary and unique constraints" {
     try std.testing.expect(table.columns.get("user_id").?.primary_key);
     try std.testing.expect(table.columns.get("email").?.unique);
 }
+
+test "replays table and column renames through dependent indexes" {
+    var parsed = try parser.parse(
+        std.testing.allocator,
+        "CREATE TABLE users (id BIGINT PRIMARY KEY, name TEXT NOT NULL);" ++
+            "CREATE INDEX users_name_key ON users(name);" ++
+            "ALTER TABLE users RENAME COLUMN name TO display_name;" ++
+            "ALTER TABLE users RENAME TO accounts",
+    );
+    defer parsed.deinit();
+
+    var schema = catalog.Catalog.init(std.testing.allocator);
+    defer schema.deinit();
+    try schema.applyParserTree(parsed.tree);
+    try std.testing.expect(schema.table("users") == null);
+    const accounts = schema.table("accounts").?;
+    try std.testing.expect(accounts.columns.get("name") == null);
+    try std.testing.expect(accounts.columns.get("display_name") != null);
+    const index = schema.indexes.get("users_name_key").?;
+    try std.testing.expectEqualStrings("accounts", index.table_name);
+    try std.testing.expectEqualStrings("display_name", index.columns[0]);
+}

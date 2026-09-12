@@ -14,7 +14,7 @@ pub const Index = struct {
     allocator: std.mem.Allocator,
     name: []const u8,
     table_name: []const u8,
-    columns: []const []const u8,
+    columns: [][]const u8,
     unique: bool,
 
     pub fn deinit(self: *Index) void {
@@ -143,6 +143,7 @@ pub const Catalog = struct {
                 pg.PG_QUERY__NODE__NODE_CREATE_STMT => try self.applyCreateTable(node.*.unnamed_0.create_stmt),
                 pg.PG_QUERY__NODE__NODE_INDEX_STMT => try self.applyCreateIndex(node.*.unnamed_0.index_stmt),
                 pg.PG_QUERY__NODE__NODE_ALTER_TABLE_STMT => try self.applyAlterTable(node.*.unnamed_0.alter_table_stmt),
+                pg.PG_QUERY__NODE__NODE_RENAME_STMT => try self.applyRename(node.*.unnamed_0.rename_stmt),
                 pg.PG_QUERY__NODE__NODE_DROP_STMT => try self.applyDrop(node.*.unnamed_0.drop_stmt),
                 else => return error.UnsupportedStatement,
             }
@@ -253,6 +254,68 @@ pub const Catalog = struct {
                 removed.value.deinit();
             } else {
                 return error.UnsupportedStatement;
+            }
+        }
+    }
+
+    fn applyRename(self: *Catalog, node_ptr: [*c]pg.PgQuery__RenameStmt) Error!void {
+        if (node_ptr == null or node_ptr.*.relation == null) return error.InvalidAst;
+        const node = node_ptr.*;
+        const table_name = cString(node.relation.*.relname) orelse return error.InvalidAst;
+        const new_name = cString(node.newname) orelse return error.InvalidAst;
+        if (new_name.len == 0) return error.InvalidAst;
+        if (node.rename_type == pg.PG_QUERY__OBJECT_TYPE__OBJECT_TABLE) {
+            try self.renameTable(table_name, new_name);
+        } else if (node.rename_type == pg.PG_QUERY__OBJECT_TYPE__OBJECT_COLUMN) {
+            const old_name = cString(node.subname) orelse return error.InvalidAst;
+            if (old_name.len == 0) return error.InvalidAst;
+            try self.renameColumn(table_name, old_name, new_name);
+        } else {
+            return error.UnsupportedStatement;
+        }
+    }
+
+    fn renameTable(self: *Catalog, old_name: []const u8, new_name: []const u8) Error!void {
+        if (self.tables.contains(new_name)) return error.DuplicateTable;
+        const owned_name = try self.allocator.dupe(u8, new_name);
+        errdefer self.allocator.free(owned_name);
+        var removed = self.tables.fetchOrderedRemove(old_name) orelse return error.MissingTable;
+        self.allocator.free(removed.value.name);
+        removed.value.name = owned_name;
+        try self.tables.putNoClobber(self.allocator, owned_name, removed.value);
+
+        var indexes = self.indexes.iterator();
+        while (indexes.next()) |entry| {
+            if (!std.mem.eql(u8, entry.value_ptr.table_name, old_name)) continue;
+            const replacement = try self.allocator.dupe(u8, new_name);
+            self.allocator.free(entry.value_ptr.table_name);
+            entry.value_ptr.table_name = replacement;
+        }
+    }
+
+    fn renameColumn(
+        self: *Catalog,
+        table_name: []const u8,
+        old_name: []const u8,
+        new_name: []const u8,
+    ) Error!void {
+        const table_ptr = self.tables.getPtr(table_name) orelse return error.MissingTable;
+        if (table_ptr.columns.contains(new_name)) return error.DuplicateColumn;
+        const owned_name = try self.allocator.dupe(u8, new_name);
+        errdefer self.allocator.free(owned_name);
+        var removed = table_ptr.columns.fetchOrderedRemove(old_name) orelse return error.MissingColumn;
+        self.allocator.free(removed.value.name);
+        removed.value.name = owned_name;
+        try table_ptr.columns.putNoClobber(self.allocator, owned_name, removed.value);
+
+        var indexes = self.indexes.iterator();
+        while (indexes.next()) |entry| {
+            if (!std.mem.eql(u8, entry.value_ptr.table_name, table_name)) continue;
+            for (entry.value_ptr.columns) |*column| {
+                if (!std.mem.eql(u8, column.*, old_name)) continue;
+                const replacement = try self.allocator.dupe(u8, new_name);
+                self.allocator.free(column.*);
+                column.* = replacement;
             }
         }
     }
