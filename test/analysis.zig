@@ -169,6 +169,25 @@ test "infers arithmetic over scalar COUNT subqueries" {
     try std.testing.expectEqual(analysis.ScalarType.integer, result.parameters[0].scalar_type);
 }
 
+test "infers casts and comparison expressions from the typed AST" {
+    var schema = catalog.Catalog.init(std.testing.allocator);
+    defer schema.deinit();
+    var parsed = try parser.parse(
+        std.testing.allocator,
+        "SELECT CAST(1 AS TEXT) AS label, 1 < 2 AS ordered",
+    );
+    defer parsed.deinit();
+    var query = try ir.adapt(std.testing.allocator, parsed.tree, parsed.rewritten.names);
+    defer query.deinit();
+    var result = try analysis.analyze(std.testing.allocator, &schema, &query);
+    defer result.deinit();
+
+    try std.testing.expectEqual(analysis.ScalarType.text, result.columns[0].scalar_type);
+    try std.testing.expect(!result.columns[0].nullable);
+    try std.testing.expectEqual(analysis.ScalarType.boolean, result.columns[1].scalar_type);
+    try std.testing.expect(!result.columns[1].nullable);
+}
+
 test "resolves recursive CTE output and parameter types" {
     var schema_sql = try parser.parse(
         std.testing.allocator,
@@ -194,4 +213,63 @@ test "resolves recursive CTE output and parameter types" {
     try std.testing.expectEqual(analysis.ScalarType.integer, result.columns[1].scalar_type);
     try std.testing.expectEqual(analysis.ScalarType.integer, result.parameters[0].scalar_type);
     try std.testing.expectEqual(analysis.ScalarType.integer, result.parameters[1].scalar_type);
+}
+
+test "merges compatible set-operation result types and nullability" {
+    var schema_sql = try parser.parse(
+        std.testing.allocator,
+        "CREATE TABLE values_a (id BIGINT NOT NULL);" ++
+            "CREATE TABLE values_b (id BIGINT)",
+    );
+    defer schema_sql.deinit();
+    var schema = catalog.Catalog.init(std.testing.allocator);
+    defer schema.deinit();
+    try schema.applyParserTree(schema_sql.tree);
+
+    var parsed = try parser.parse(
+        std.testing.allocator,
+        "SELECT id AS value FROM values_a UNION ALL SELECT id FROM values_b",
+    );
+    defer parsed.deinit();
+    var query = try ir.adapt(std.testing.allocator, parsed.tree, parsed.rewritten.names);
+    defer query.deinit();
+    var result = try analysis.analyze(std.testing.allocator, &schema, &query);
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), result.columns.len);
+    try std.testing.expectEqualStrings("value", result.columns[0].name);
+    try std.testing.expectEqual(analysis.ScalarType.integer, result.columns[0].scalar_type);
+    try std.testing.expect(result.columns[0].nullable);
+}
+
+test "rejects incompatible set results and parameter constraints" {
+    var schema_sql = try parser.parse(
+        std.testing.allocator,
+        "CREATE TABLE values_a (id BIGINT NOT NULL, label TEXT NOT NULL)",
+    );
+    defer schema_sql.deinit();
+    var schema = catalog.Catalog.init(std.testing.allocator);
+    defer schema.deinit();
+    try schema.applyParserTree(schema_sql.tree);
+
+    const cases = [_]struct { sql: []const u8, expected: anyerror }{
+        .{
+            .sql = "SELECT id AS value FROM values_a UNION ALL SELECT label FROM values_a",
+            .expected = error.ConflictingResultType,
+        },
+        .{
+            .sql = "SELECT id FROM values_a WHERE id=:value OR label=:value",
+            .expected = error.ConflictingParameterType,
+        },
+    };
+    for (cases) |case| {
+        var parsed = try parser.parse(std.testing.allocator, case.sql);
+        defer parsed.deinit();
+        var query = try ir.adapt(std.testing.allocator, parsed.tree, parsed.rewritten.names);
+        defer query.deinit();
+        try std.testing.expectError(
+            case.expected,
+            analysis.analyze(std.testing.allocator, &schema, &query),
+        );
+    }
 }

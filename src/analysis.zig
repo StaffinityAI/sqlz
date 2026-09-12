@@ -32,6 +32,8 @@ pub const Error = error{
     MissingRelation,
     MissingColumn,
     AmbiguousColumn,
+    ConflictingResultType,
+    ConflictingParameterType,
 } || std.mem.Allocator.Error;
 
 const ResolvedColumn = struct {
@@ -86,13 +88,32 @@ pub fn analyze(
             .scalar_type = .unknown,
             .nullable = true,
         };
-        if (projection.column) |reference| {
-            const resolved = try resolveColumn(schema, ctes, query.top_level_bindings, reference, false);
+        if (projection.set_operands.len != 0) {
+            var resolved: ?ResolvedColumn = null;
+            for (projection.set_operands) |operand| {
+                const branch = try resolveExpression(
+                    schema,
+                    ctes,
+                    operand.bindings,
+                    operand.column,
+                    operand.hint,
+                );
+                resolved = try mergeResolved(resolved, branch, error.ConflictingResultType);
+            }
+            if (resolved) |value| {
+                result.scalar_type = value.scalar_type;
+                result.nullable = value.nullable;
+            }
+        } else {
+            const resolved = try resolveExpression(
+                schema,
+                ctes,
+                query.top_level_bindings,
+                projection.column,
+                projection.hint,
+            );
             result.scalar_type = resolved.scalar_type;
             result.nullable = resolved.nullable;
-        } else if (projection.hint) |hint| {
-            result.scalar_type = fromHint(hint.scalar_type);
-            result.nullable = hint.nullable;
         }
     }
     const parameters = try storage.alloc(ResultColumn, query.parameter_uses.len);
@@ -102,12 +123,53 @@ pub fn analyze(
             .scalar_type = if (use.integer_hint) .integer else .unknown,
             .nullable = !use.integer_hint,
         };
-        const reference = use.column orelse continue;
-        const resolved = try resolveColumn(schema, ctes, query.relation_bindings, reference, true);
-        result.scalar_type = resolved.scalar_type;
-        result.nullable = resolved.nullable;
+        var inferred: ?ResolvedColumn = if (use.integer_hint)
+            .{ .scalar_type = .integer, .nullable = false }
+        else
+            null;
+        for (use.columns) |reference| {
+            const resolved = try resolveColumn(schema, ctes, query.relation_bindings, reference, true);
+            inferred = try mergeResolved(inferred, resolved, error.ConflictingParameterType);
+        }
+        if (inferred) |value| {
+            result.scalar_type = value.scalar_type;
+            result.nullable = value.nullable;
+        }
     }
     return .{ .arena = arena, .columns = columns, .parameters = parameters };
+}
+
+fn resolveExpression(
+    schema: *const catalog.Catalog,
+    ctes: []const VirtualCte,
+    bindings: []const ir.Relation,
+    column: ?ir.ColumnReference,
+    hint: ?ir.ExpressionHint,
+) Error!ResolvedColumn {
+    if (column) |reference| return resolveColumn(schema, ctes, bindings, reference, false);
+    if (hint) |value| return .{
+        .scalar_type = fromHint(value.scalar_type),
+        .nullable = value.nullable,
+    };
+    return .{ .scalar_type = .unknown, .nullable = true };
+}
+
+fn mergeResolved(
+    current: ?ResolvedColumn,
+    next: ResolvedColumn,
+    conflict: Error,
+) Error!?ResolvedColumn {
+    const prior = current orelse return next;
+    const scalar_type: ScalarType = if (prior.scalar_type == .unknown)
+        next.scalar_type
+    else if (next.scalar_type == .unknown or prior.scalar_type == next.scalar_type)
+        prior.scalar_type
+    else if ((prior.scalar_type == .integer and next.scalar_type == .real) or
+        (prior.scalar_type == .real and next.scalar_type == .integer))
+        .real
+    else
+        return conflict;
+    return .{ .scalar_type = scalar_type, .nullable = prior.nullable or next.nullable };
 }
 
 fn resolvePhysicalColumn(

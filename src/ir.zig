@@ -6,10 +6,20 @@ pub const Relation = struct { name: []const u8, alias: ?[]const u8, nullable: bo
 pub const ColumnReference = struct { qualifier: ?[]const u8, name: []const u8 };
 pub const TypeHint = enum { integer, real, text, blob, boolean };
 pub const ExpressionHint = struct { scalar_type: TypeHint, nullable: bool };
-pub const Projection = struct { name: []const u8, column: ?ColumnReference, hint: ?ExpressionHint };
+pub const SetOperand = struct {
+    column: ?ColumnReference,
+    hint: ?ExpressionHint,
+    bindings: []const Relation,
+};
+pub const Projection = struct {
+    name: []const u8,
+    column: ?ColumnReference,
+    hint: ?ExpressionHint,
+    set_operands: []const SetOperand = &.{},
+};
 pub const ParameterUse = struct {
     name: []const u8,
-    column: ?ColumnReference = null,
+    columns: []const ColumnReference = &.{},
     integer_hint: bool = false,
 };
 pub const Cte = struct { name: []const u8, columns: []const Projection };
@@ -43,6 +53,7 @@ pub const Error = error{
 const Context = struct {
     allocator: std.mem.Allocator,
     uses: []ParameterUse,
+    constraints: []std.ArrayList(ColumnReference),
     relations: std.ArrayList([]const u8) = .empty,
     bindings: std.ArrayList(Relation) = .empty,
     top_bindings: std.ArrayList(Relation) = .empty,
@@ -86,13 +97,15 @@ pub fn adapt(
     errdefer arena.deinit();
     const storage = arena.allocator();
     const uses = try storage.alloc(ParameterUse, parameter_names.len);
+    const constraints = try storage.alloc(std.ArrayList(ColumnReference), parameter_names.len);
+    @memset(constraints, .empty);
     var parameters: std.ArrayList([]const u8) = .empty;
     for (parameter_names, uses) |name, *use| {
         const owned = try storage.dupe(u8, name);
         try parameters.append(storage, owned);
         use.* = .{ .name = owned };
     }
-    var context: Context = .{ .allocator = storage, .uses = uses };
+    var context: Context = .{ .allocator = storage, .uses = uses, .constraints = constraints };
 
     const kind, const mutation_target = switch (statement.*.node_case) {
         pg.PG_QUERY__NODE__NODE_SELECT_STMT => result: {
@@ -116,6 +129,8 @@ pub fn adapt(
         },
         else => return error.UnsupportedStatement,
     };
+    for (uses, constraints) |*use, *constraint_list|
+        use.columns = try constraint_list.toOwnedSlice(storage);
     return .{
         .arena = arena,
         .kind = kind,
@@ -135,6 +150,18 @@ fn collectSelect(ctx: *Context, pointer: [*c]pg.PgQuery__SelectStmt, top: bool, 
     if (pointer == null) return error.InvalidAst;
     const stmt = pointer.*;
     if (stmt.with_clause != null) try collectCtes(ctx, stmt.with_clause);
+    if (stmt.op != pg.PG_QUERY__SET_OPERATION__SETOP_NONE) {
+        if (results) {
+            try collectSetProjections(ctx, pointer);
+        } else {
+            if (stmt.larg == null or stmt.rarg == null) return error.InvalidAst;
+            try collectSelect(ctx, stmt.larg, false, false);
+            try collectSelect(ctx, stmt.rarg, false, false);
+        }
+        try markIntegerParameter(ctx, stmt.limit_count);
+        try markIntegerParameter(ctx, stmt.limit_offset);
+        return;
+    }
     for (nodeSlice(stmt.from_clause, stmt.n_from_clause)) |node| try collectFrom(ctx, node, false, top);
     if (results) try collectProjections(ctx, nodeSlice(stmt.target_list, stmt.n_target_list));
     for (nodeSlice(stmt.target_list, stmt.n_target_list)) |node|
@@ -145,6 +172,62 @@ fn collectSelect(ctx: *Context, pointer: [*c]pg.PgQuery__SelectStmt, top: bool, 
     try markIntegerParameter(ctx, stmt.limit_offset);
     if (stmt.larg != null) try collectSelect(ctx, stmt.larg, false, false);
     if (stmt.rarg != null) try collectSelect(ctx, stmt.rarg, false, false);
+}
+
+const SetBranch = struct {
+    targets: []const [*c]pg.PgQuery__Node,
+    bindings: []const Relation,
+};
+
+fn collectSetProjections(ctx: *Context, pointer: [*c]pg.PgQuery__SelectStmt) Error!void {
+    var branches: std.ArrayList(SetBranch) = .empty;
+    try collectSetBranches(ctx, pointer, &branches);
+    if (branches.items.len == 0) return error.InvalidAst;
+    const column_count = branches.items[0].targets.len;
+    for (branches.items[1..]) |branch|
+        if (branch.targets.len != column_count) return error.InvalidAst;
+
+    for (0..column_count) |column_index| {
+        const first = resTarget(branches.items[0].targets[column_index]) orelse return error.InvalidAst;
+        const owned_name = try ctx.allocator.dupe(u8, try resultName(first));
+        const operands = try ctx.allocator.alloc(SetOperand, branches.items.len);
+        for (branches.items, operands) |branch, *operand| {
+            const target = resTarget(branch.targets[column_index]) orelse return error.InvalidAst;
+            operand.* = .{
+                .column = try columnReference(ctx.allocator, target.val),
+                .hint = try inferExpression(target.val),
+                .bindings = branch.bindings,
+            };
+        }
+        try ctx.result_names.append(ctx.allocator, owned_name);
+        try ctx.projections.append(ctx.allocator, .{
+            .name = owned_name,
+            .column = operands[0].column,
+            .hint = operands[0].hint,
+            .set_operands = operands,
+        });
+    }
+}
+
+fn collectSetBranches(
+    ctx: *Context,
+    pointer: [*c]pg.PgQuery__SelectStmt,
+    branches: *std.ArrayList(SetBranch),
+) Error!void {
+    if (pointer == null) return error.InvalidAst;
+    const stmt = pointer.*;
+    if (stmt.op != pg.PG_QUERY__SET_OPERATION__SETOP_NONE) {
+        if (stmt.larg == null or stmt.rarg == null) return error.InvalidAst;
+        try collectSetBranches(ctx, stmt.larg, branches);
+        try collectSetBranches(ctx, stmt.rarg, branches);
+        return;
+    }
+    const binding_start = ctx.top_bindings.items.len;
+    try collectSelect(ctx, pointer, true, false);
+    try branches.append(ctx.allocator, .{
+        .targets = nodeSlice(stmt.target_list, stmt.n_target_list),
+        .bindings = try ctx.allocator.dupe(Relation, ctx.top_bindings.items[binding_start..]),
+    });
 }
 
 fn collectInsert(ctx: *Context, pointer: [*c]pg.PgQuery__InsertStmt) Error!void {
@@ -302,11 +385,14 @@ fn bindInsertParameters(ctx: *Context, insert: [*c]pg.PgQuery__InsertStmt, selec
 fn bindParameter(ctx: *Context, node: [*c]pg.PgQuery__Node, column: ColumnReference) Error!void {
     const ordinal = parameterOrdinal(node) orelse return;
     if (ordinal == 0 or ordinal > ctx.uses.len) return error.InvalidAst;
-    if (ctx.uses[ordinal - 1].column != null) return;
-    ctx.uses[ordinal - 1].column = .{
+    const owned: ColumnReference = .{
         .qualifier = if (column.qualifier) |value| try ctx.allocator.dupe(u8, value) else null,
         .name = try ctx.allocator.dupe(u8, column.name),
     };
+    for (ctx.constraints[ordinal - 1].items) |existing| {
+        if (std.meta.eql(existing, owned)) return;
+    }
+    try ctx.constraints[ordinal - 1].append(ctx.allocator, owned);
 }
 
 fn markIntegerParameter(ctx: *Context, node: [*c]pg.PgQuery__Node) Error!void {
@@ -362,12 +448,41 @@ fn inferExpression(node: [*c]pg.PgQuery__Node) Error!?ExpressionHint {
             const operator = nodeString(expression.*.name[expression.*.n_name - 1]) orelse return null;
             const left = try inferExpression(expression.*.lexpr);
             const right = try inferExpression(expression.*.rexpr);
+            if (std.mem.eql(u8, operator, "=") or std.mem.eql(u8, operator, "<>") or
+                std.mem.eql(u8, operator, "<") or std.mem.eql(u8, operator, ">") or
+                std.mem.eql(u8, operator, "<=") or std.mem.eql(u8, operator, ">=") or
+                std.ascii.eqlIgnoreCase(operator, "~~"))
+                return .{
+                    .scalar_type = .boolean,
+                    .nullable = (left == null or left.?.nullable) or (right == null or right.?.nullable),
+                };
             if (operator.len == 1 and std.mem.indexOfScalar(u8, "+-*/", operator[0]) != null and left != null and right != null)
                 return .{
                     .scalar_type = if (left.?.scalar_type == .real or right.?.scalar_type == .real) .real else .integer,
                     .nullable = left.?.nullable or right.?.nullable,
                 };
             return null;
+        },
+        pg.PG_QUERY__NODE__NODE_TYPE_CAST => {
+            const cast = node.*.unnamed_0.type_cast;
+            if (cast == null or cast.*.type_name == null) return null;
+            const type_name = cast.*.type_name;
+            if (type_name.*.n_names == 0) return null;
+            const name = nodeString(type_name.*.names[type_name.*.n_names - 1]) orelse return null;
+            const scalar_type: TypeHint = if (isAnyType(name, &.{ "int2", "int4", "int8", "integer", "smallint", "bigint" }))
+                .integer
+            else if (isAnyType(name, &.{ "float4", "float8", "numeric", "real" }))
+                .real
+            else if (isAnyType(name, &.{ "text", "varchar", "bpchar", "char", "name" }))
+                .text
+            else if (isAnyType(name, &.{ "bytea", "blob" }))
+                .blob
+            else if (isAnyType(name, &.{ "bool", "boolean" }))
+                .boolean
+            else
+                return null;
+            const inner = try inferExpression(cast.*.arg);
+            return .{ .scalar_type = scalar_type, .nullable = if (inner) |hint| hint.nullable else true };
         },
         pg.PG_QUERY__NODE__NODE_SUB_LINK => {
             const subselect = node.*.unnamed_0.sub_link.*.subselect;
@@ -415,5 +530,10 @@ fn nodeSlice(pointer: [*c][*c]pg.PgQuery__Node, len: usize) []const [*c]pg.PgQue
 }
 fn contains(values: []const []const u8, needle: []const u8) bool {
     for (values) |value| if (std.mem.eql(u8, value, needle)) return true;
+    return false;
+}
+
+fn isAnyType(needle: []const u8, values: []const []const u8) bool {
+    for (values) |value| if (std.ascii.eqlIgnoreCase(needle, value)) return true;
     return false;
 }
