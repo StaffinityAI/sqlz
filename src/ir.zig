@@ -1,41 +1,18 @@
 const std = @import("std");
+const pg = @import("libpg_query");
 
 pub const StatementKind = enum { select, insert, update, delete };
-
-pub const Relation = struct {
-    name: []const u8,
-    alias: ?[]const u8,
-    nullable: bool,
-};
-
-pub const ColumnReference = struct {
-    qualifier: ?[]const u8,
-    name: []const u8,
-};
-
+pub const Relation = struct { name: []const u8, alias: ?[]const u8, nullable: bool };
+pub const ColumnReference = struct { qualifier: ?[]const u8, name: []const u8 };
 pub const TypeHint = enum { integer, real, text, blob, boolean };
-
-pub const ExpressionHint = struct {
-    scalar_type: TypeHint,
-    nullable: bool,
-};
-
-pub const Projection = struct {
-    name: []const u8,
-    column: ?ColumnReference,
-    hint: ?ExpressionHint,
-};
-
+pub const ExpressionHint = struct { scalar_type: TypeHint, nullable: bool };
+pub const Projection = struct { name: []const u8, column: ?ColumnReference, hint: ?ExpressionHint };
 pub const ParameterUse = struct {
     name: []const u8,
     column: ?ColumnReference = null,
     integer_hint: bool = false,
 };
-
-pub const Cte = struct {
-    name: []const u8,
-    columns: []const Projection,
-};
+pub const Cte = struct { name: []const u8, columns: []const Projection };
 
 pub const Query = struct {
     arena: std.heap.ArenaAllocator,
@@ -61,487 +38,382 @@ pub const Error = error{
     MultipleStatements,
     UnsupportedStatement,
     MissingResultName,
-} || std.mem.Allocator.Error || std.json.ParseError(std.json.Scanner);
+} || std.mem.Allocator.Error;
+
+const Context = struct {
+    allocator: std.mem.Allocator,
+    uses: []ParameterUse,
+    relations: std.ArrayList([]const u8) = .empty,
+    bindings: std.ArrayList(Relation) = .empty,
+    top_bindings: std.ArrayList(Relation) = .empty,
+    ctes: std.ArrayList(Cte) = .empty,
+    result_names: std.ArrayList([]const u8) = .empty,
+    projections: std.ArrayList(Projection) = .empty,
+
+    fn addRange(self: *Context, range_ptr: [*c]pg.PgQuery__RangeVar, nullable: bool, top: bool) Error!void {
+        if (range_ptr == null) return error.InvalidAst;
+        const name = cString(range_ptr.*.relname) orelse return error.InvalidAst;
+        if (!contains(self.relations.items, name))
+            try self.relations.append(self.allocator, try self.allocator.dupe(u8, name));
+        const alias = if (range_ptr.*.alias != null)
+            try self.allocator.dupe(u8, cString(range_ptr.*.alias.*.aliasname) orelse return error.InvalidAst)
+        else
+            null;
+        try self.bindings.append(self.allocator, .{
+            .name = try self.allocator.dupe(u8, name),
+            .alias = alias,
+            .nullable = nullable,
+        });
+        if (top) try self.top_bindings.append(self.allocator, .{
+            .name = try self.allocator.dupe(u8, name),
+            .alias = if (alias) |value| try self.allocator.dupe(u8, value) else null,
+            .nullable = nullable,
+        });
+    }
+};
 
 pub fn adapt(
     allocator: std.mem.Allocator,
-    ast_json: []const u8,
+    tree: *const pg.PgQuery__ParseResult,
     parameter_names: []const []const u8,
 ) Error!Query {
+    if (tree.n_stmts != 1) return error.MultipleStatements;
+    const raw = tree.stmts[0];
+    if (raw == null or raw.*.stmt == null) return error.InvalidAst;
+    const statement = raw.*.stmt;
+
     var arena: std.heap.ArenaAllocator = .init(allocator);
     errdefer arena.deinit();
     const storage = arena.allocator();
-    var parsed = try std.json.parseFromSlice(std.json.Value, storage, ast_json, .{});
-    defer parsed.deinit();
-
-    const statements = field(parsed.value, "stmts") orelse return error.InvalidAst;
-    if (statements != .array or statements.array.items.len != 1)
-        return error.MultipleStatements;
-    const wrapper = field(statements.array.items[0], "stmt") orelse
-        return error.InvalidAst;
-    const statement, const kind: StatementKind = if (field(wrapper, "SelectStmt")) |node|
-        .{ node, .select }
-    else if (field(wrapper, "InsertStmt")) |node|
-        .{ node, .insert }
-    else if (field(wrapper, "UpdateStmt")) |node|
-        .{ node, .update }
-    else if (field(wrapper, "DeleteStmt")) |node|
-        .{ node, .delete }
-    else
-        return error.UnsupportedStatement;
-
-    var relations: std.ArrayList([]const u8) = .empty;
-    var relation_bindings: std.ArrayList(Relation) = .empty;
-    try collectRelations(storage, statement, &relations, &relation_bindings, false);
-    var top_names: std.ArrayList([]const u8) = .empty;
-    var top_level_bindings: std.ArrayList(Relation) = .empty;
-    if (kind == .select) {
-        if (field(statement, "fromClause")) |from|
-            try collectRelations(storage, from, &top_names, &top_level_bindings, false);
-    }
-    const ctes = try collectCtes(storage, statement);
-
+    const uses = try storage.alloc(ParameterUse, parameter_names.len);
     var parameters: std.ArrayList([]const u8) = .empty;
-    const parameter_uses = try storage.alloc(ParameterUse, parameter_names.len);
-    for (parameter_names, parameter_uses) |name, *use| {
-        const owned_name = try storage.dupe(u8, name);
-        try parameters.append(storage, owned_name);
-        use.* = .{ .name = owned_name };
+    for (parameter_names, uses) |name, *use| {
+        const owned = try storage.dupe(u8, name);
+        try parameters.append(storage, owned);
+        use.* = .{ .name = owned };
     }
-    try collectParameterUses(storage, statement, parameter_uses);
-    try collectStatementParameterUses(storage, kind, statement, mutation_targetName(kind, statement), parameter_uses);
+    var context: Context = .{ .allocator = storage, .uses = uses };
 
-    const target_list_name = if (kind == .select) "targetList" else "returningList";
-    var result_columns: std.ArrayList([]const u8) = .empty;
-    var projections: std.ArrayList(Projection) = .empty;
-    if (field(statement, target_list_name)) |target_list| {
-        if (target_list != .array) return error.InvalidAst;
-        for (target_list.array.items) |target| {
-            const result = field(target, "ResTarget") orelse return error.InvalidAst;
-            const name = try resultName(result);
-            const owned_name = try storage.dupe(u8, name);
-            try result_columns.append(storage, owned_name);
-            try projections.append(storage, .{
-                .name = owned_name,
-                .column = try columnReference(storage, result),
-                .hint = try expressionHint(result),
-            });
-        }
-    }
-
-    const mutation_target = if (kind == .select)
-        null
-    else blk: {
-        const relation = field(statement, "relation") orelse return error.InvalidAst;
-        const name = field(relation, "relname") orelse return error.InvalidAst;
-        if (name != .string) return error.InvalidAst;
-        break :blk try storage.dupe(u8, name.string);
+    const kind, const mutation_target = switch (statement.*.node_case) {
+        pg.PG_QUERY__NODE__NODE_SELECT_STMT => result: {
+            try collectSelect(&context, statement.*.unnamed_0.select_stmt, true, true);
+            break :result .{ StatementKind.select, @as(?[]const u8, null) };
+        },
+        pg.PG_QUERY__NODE__NODE_INSERT_STMT => result: {
+            const stmt = statement.*.unnamed_0.insert_stmt;
+            try collectInsert(&context, stmt);
+            break :result .{ StatementKind.insert, try mutationName(storage, stmt.*.relation) };
+        },
+        pg.PG_QUERY__NODE__NODE_UPDATE_STMT => result: {
+            const stmt = statement.*.unnamed_0.update_stmt;
+            try collectUpdate(&context, stmt);
+            break :result .{ StatementKind.update, try mutationName(storage, stmt.*.relation) };
+        },
+        pg.PG_QUERY__NODE__NODE_DELETE_STMT => result: {
+            const stmt = statement.*.unnamed_0.delete_stmt;
+            try collectDelete(&context, stmt);
+            break :result .{ StatementKind.delete, try mutationName(storage, stmt.*.relation) };
+        },
+        else => return error.UnsupportedStatement,
     };
-    if (mutation_target) |target| {
-        if (!contains(relations.items, target)) {
-            try relations.append(storage, try storage.dupe(u8, target));
-            try relation_bindings.append(storage, .{
-                .name = try storage.dupe(u8, target),
-                .alias = null,
-                .nullable = false,
-            });
-        }
-        try top_level_bindings.append(storage, .{
-            .name = try storage.dupe(u8, target),
-            .alias = null,
-            .nullable = false,
-        });
-    }
-
     return .{
         .arena = arena,
         .kind = kind,
         .mutation_target = mutation_target,
-        .relations = try relations.toOwnedSlice(storage),
-        .relation_bindings = try relation_bindings.toOwnedSlice(storage),
-        .top_level_bindings = try top_level_bindings.toOwnedSlice(storage),
-        .ctes = ctes,
+        .relations = try context.relations.toOwnedSlice(storage),
+        .relation_bindings = try context.bindings.toOwnedSlice(storage),
+        .top_level_bindings = try context.top_bindings.toOwnedSlice(storage),
+        .ctes = try context.ctes.toOwnedSlice(storage),
         .parameters = try parameters.toOwnedSlice(storage),
-        .parameter_uses = parameter_uses,
-        .result_columns = try result_columns.toOwnedSlice(storage),
-        .projections = try projections.toOwnedSlice(storage),
+        .parameter_uses = uses,
+        .result_columns = try context.result_names.toOwnedSlice(storage),
+        .projections = try context.projections.toOwnedSlice(storage),
     };
 }
 
-fn collectCtes(allocator: std.mem.Allocator, statement: std.json.Value) Error![]const Cte {
-    const with_clause = field(statement, "withClause") orelse return &.{};
-    const values = field(with_clause, "ctes") orelse return error.InvalidAst;
-    if (values != .array) return error.InvalidAst;
-    const ctes = try allocator.alloc(Cte, values.array.items.len);
-    for (values.array.items, ctes) |value, *cte| {
-        const node = field(value, "CommonTableExpr") orelse return error.InvalidAst;
-        const name = field(node, "ctename") orelse return error.InvalidAst;
-        const aliases = field(node, "aliascolnames") orelse return error.InvalidAst;
-        const query_value = field(node, "ctequery") orelse return error.InvalidAst;
-        if (name != .string or aliases != .array) return error.InvalidAst;
-        const query = field(query_value, "SelectStmt") orelse query_value;
-        const base = if (field(query, "larg")) |left| left else query;
-        const targets = field(base, "targetList") orelse return error.InvalidAst;
-        if (targets != .array or targets.array.items.len != aliases.array.items.len)
-            return error.InvalidAst;
-        const columns = try allocator.alloc(Projection, targets.array.items.len);
-        for (targets.array.items, aliases.array.items, columns) |target_value, alias_value, *column| {
-            const target = field(target_value, "ResTarget") orelse return error.InvalidAst;
-            column.* = .{
-                .name = try allocator.dupe(u8, try stringField(alias_value)),
-                .column = try columnReference(allocator, target),
-                .hint = try expressionHint(target),
-            };
-        }
-        cte.* = .{ .name = try allocator.dupe(u8, name.string), .columns = columns };
-    }
-    return ctes;
+fn collectSelect(ctx: *Context, pointer: [*c]pg.PgQuery__SelectStmt, top: bool, results: bool) Error!void {
+    if (pointer == null) return error.InvalidAst;
+    const stmt = pointer.*;
+    if (stmt.with_clause != null) try collectCtes(ctx, stmt.with_clause);
+    for (nodeSlice(stmt.from_clause, stmt.n_from_clause)) |node| try collectFrom(ctx, node, false, top);
+    if (results) try collectProjections(ctx, nodeSlice(stmt.target_list, stmt.n_target_list));
+    for (nodeSlice(stmt.target_list, stmt.n_target_list)) |node|
+        try walkExpression(ctx, (resTarget(node) orelse return error.InvalidAst).val);
+    try walkExpression(ctx, stmt.where_clause);
+    try walkExpression(ctx, stmt.having_clause);
+    try markIntegerParameter(ctx, stmt.limit_count);
+    try markIntegerParameter(ctx, stmt.limit_offset);
+    if (stmt.larg != null) try collectSelect(ctx, stmt.larg, false, false);
+    if (stmt.rarg != null) try collectSelect(ctx, stmt.rarg, false, false);
 }
 
-fn expressionHint(result: std.json.Value) Error!?ExpressionHint {
-    const expression = field(result, "val") orelse return error.InvalidAst;
-    return inferExpression(expression);
+fn collectInsert(ctx: *Context, pointer: [*c]pg.PgQuery__InsertStmt) Error!void {
+    if (pointer == null or pointer.*.relation == null) return error.InvalidAst;
+    try ctx.addRange(pointer.*.relation, false, true);
+    if (pointer.*.select_stmt != null and pointer.*.select_stmt.*.node_case == pg.PG_QUERY__NODE__NODE_SELECT_STMT) {
+        const select = pointer.*.select_stmt.*.unnamed_0.select_stmt;
+        try bindInsertParameters(ctx, pointer, select);
+        try collectSelect(ctx, select, false, false);
+    }
+    try collectReturning(ctx, pointer.*.returning_clause);
 }
 
-fn inferExpression(expression: std.json.Value) Error!?ExpressionHint {
-    if (field(expression, "ColumnRef") != null) return null;
-    if (field(expression, "A_Const")) |constant| {
-        if (field(constant, "ival") != null) return .{ .scalar_type = .integer, .nullable = false };
-        if (field(constant, "fval") != null) return .{ .scalar_type = .real, .nullable = false };
-        if (field(constant, "sval") != null) return .{ .scalar_type = .text, .nullable = false };
-        if (field(constant, "boolval") != null) return .{ .scalar_type = .boolean, .nullable = false };
-        return null;
+fn collectUpdate(ctx: *Context, pointer: [*c]pg.PgQuery__UpdateStmt) Error!void {
+    if (pointer == null or pointer.*.relation == null) return error.InvalidAst;
+    try ctx.addRange(pointer.*.relation, false, true);
+    for (nodeSlice(pointer.*.from_clause, pointer.*.n_from_clause)) |node| try collectFrom(ctx, node, false, true);
+    const table = cString(pointer.*.relation.*.relname) orelse return error.InvalidAst;
+    for (nodeSlice(pointer.*.target_list, pointer.*.n_target_list)) |node| {
+        const target = resTarget(node) orelse return error.InvalidAst;
+        try bindParameter(ctx, target.val, .{
+            .qualifier = table,
+            .name = cString(target.name) orelse return error.InvalidAst,
+        });
+        try walkExpression(ctx, target.val);
     }
-    if (field(expression, "FuncCall")) |call| {
-        const names = field(call, "funcname") orelse return error.InvalidAst;
-        if (names != .array or names.array.items.len == 0) return error.InvalidAst;
-        const name = try stringField(names.array.items[names.array.items.len - 1]);
-        if (std.ascii.eqlIgnoreCase(name, "count"))
-            return .{ .scalar_type = .integer, .nullable = false };
-        if (std.ascii.eqlIgnoreCase(name, "lower") or
-            std.ascii.eqlIgnoreCase(name, "upper") or
-            std.ascii.eqlIgnoreCase(name, "trim"))
-            return .{ .scalar_type = .text, .nullable = true };
-        return null;
-    }
-    if (field(expression, "A_Expr")) |binary| {
-        const left_value = field(binary, "lexpr") orelse return null;
-        const right_value = field(binary, "rexpr") orelse return null;
-        const left = try inferExpression(left_value);
-        const right = try inferExpression(right_value);
-        const operator = expressionOperator(binary) orelse return null;
-        if (std.mem.eql(u8, operator, "=") or std.mem.eql(u8, operator, "<>") or
-            std.mem.eql(u8, operator, "<") or std.mem.eql(u8, operator, ">") or
-            std.mem.eql(u8, operator, "<=") or std.mem.eql(u8, operator, ">=") or
-            std.ascii.eqlIgnoreCase(operator, "~~"))
-            return .{ .scalar_type = .boolean, .nullable = true };
-        if (std.mem.eql(u8, operator, "+") or std.mem.eql(u8, operator, "-") or
-            std.mem.eql(u8, operator, "*") or std.mem.eql(u8, operator, "/"))
-        {
-            if (left) |left_hint| {
-                if (right) |right_hint| {
-                    const scalar_type: TypeHint = if (left_hint.scalar_type == .real or
-                        right_hint.scalar_type == .real) .real else .integer;
-                    return .{
-                        .scalar_type = scalar_type,
-                        .nullable = left_hint.nullable or right_hint.nullable,
-                    };
-                }
-            }
-        }
-        return null;
-    }
-    if (field(expression, "SubLink")) |link| {
-        const select_value = field(link, "subselect") orelse return null;
-        const select = field(select_value, "SelectStmt") orelse select_value;
-        const targets = field(select, "targetList") orelse return null;
-        if (targets != .array or targets.array.items.len != 1) return null;
-        const target = field(targets.array.items[0], "ResTarget") orelse return null;
-        const value = field(target, "val") orelse return null;
-        return inferExpression(value);
-    }
-    if (field(expression, "TypeCast")) |cast| {
-        const type_name = field(cast, "typeName") orelse return null;
-        const names = field(type_name, "names") orelse return null;
-        if (names != .array or names.array.items.len == 0) return null;
-        const name = try stringField(names.array.items[names.array.items.len - 1]);
-        if (std.ascii.eqlIgnoreCase(name, "int2") or
-            std.ascii.eqlIgnoreCase(name, "int4") or
-            std.ascii.eqlIgnoreCase(name, "int8") or
-            std.ascii.eqlIgnoreCase(name, "integer"))
-            return .{ .scalar_type = .integer, .nullable = true };
-        if (std.ascii.eqlIgnoreCase(name, "text") or
-            std.ascii.eqlIgnoreCase(name, "varchar"))
-            return .{ .scalar_type = .text, .nullable = true };
-    }
-    return null;
+    try walkExpression(ctx, pointer.*.where_clause);
+    try collectReturning(ctx, pointer.*.returning_clause);
 }
 
-fn expressionOperator(expression: std.json.Value) ?[]const u8 {
-    const names = field(expression, "name") orelse return null;
-    if (names != .array or names.array.items.len == 0) return null;
-    return stringField(names.array.items[names.array.items.len - 1]) catch null;
+fn collectDelete(ctx: *Context, pointer: [*c]pg.PgQuery__DeleteStmt) Error!void {
+    if (pointer == null or pointer.*.relation == null) return error.InvalidAst;
+    try ctx.addRange(pointer.*.relation, false, true);
+    for (nodeSlice(pointer.*.using_clause, pointer.*.n_using_clause)) |node| try collectFrom(ctx, node, false, true);
+    try walkExpression(ctx, pointer.*.where_clause);
+    try collectReturning(ctx, pointer.*.returning_clause);
 }
 
-fn collectStatementParameterUses(
-    allocator: std.mem.Allocator,
-    kind: StatementKind,
-    statement: std.json.Value,
-    target_name: ?[]const u8,
-    uses: []ParameterUse,
-) Error!void {
-    if (kind == .update) {
-        if (field(statement, "targetList")) |targets| {
-            if (targets != .array) return error.InvalidAst;
-            for (targets.array.items) |target| {
-                const result = field(target, "ResTarget") orelse return error.InvalidAst;
-                const name = field(result, "name") orelse return error.InvalidAst;
-                const value = field(result, "val") orelse return error.InvalidAst;
-                if (name != .string) return error.InvalidAst;
-                try bindExpressionParameter(allocator, uses, value, .{
-                    .qualifier = target_name,
-                    .name = name.string,
-                });
-            }
-        }
-    } else if (kind == .insert) {
-        try collectInsertParameterUses(allocator, statement, target_name, uses);
-    }
-    for ([_][]const u8{ "limitCount", "limitOffset" }) |field_name| {
-        if (field(statement, field_name)) |value| {
-            if (parameterOrdinal(value)) |ordinal| {
-                if (ordinal > 0 and ordinal <= uses.len) uses[ordinal - 1].integer_hint = true;
-            }
-        }
-    }
+fn collectReturning(ctx: *Context, clause: [*c]pg.PgQuery__ReturningClause) Error!void {
+    if (clause == null) return;
+    const expressions = nodeSlice(clause.*.exprs, clause.*.n_exprs);
+    try collectProjections(ctx, expressions);
+    for (expressions) |node| try walkExpression(ctx, (resTarget(node) orelse return error.InvalidAst).val);
 }
 
-fn collectInsertParameterUses(
-    allocator: std.mem.Allocator,
-    statement: std.json.Value,
-    target_name: ?[]const u8,
-    uses: []ParameterUse,
-) Error!void {
-    const columns = field(statement, "cols") orelse return;
-    const select_value = field(statement, "selectStmt") orelse return;
-    if (columns != .array) return error.InvalidAst;
-    const select = field(select_value, "SelectStmt") orelse select_value;
-    var expressions: ?[]const std.json.Value = null;
-    if (field(select, "valuesLists")) |lists| {
-        if (lists != .array or lists.array.items.len == 0) return error.InvalidAst;
-        const list = field(lists.array.items[0], "List") orelse return error.InvalidAst;
-        const items = field(list, "items") orelse return error.InvalidAst;
-        if (items != .array) return error.InvalidAst;
-        expressions = items.array.items;
-    } else if (field(select, "targetList")) |targets| {
-        if (targets != .array) return error.InvalidAst;
-        var values: std.ArrayList(std.json.Value) = .empty;
-        for (targets.array.items) |target| {
-            const result = field(target, "ResTarget") orelse return error.InvalidAst;
-            try values.append(allocator, field(result, "val") orelse return error.InvalidAst);
-        }
-        expressions = try values.toOwnedSlice(allocator);
-    }
-    const values = expressions orelse return;
-    for (columns.array.items, values) |column_value, expression| {
-        const target = field(column_value, "ResTarget") orelse return error.InvalidAst;
-        const name = field(target, "name") orelse return error.InvalidAst;
-        if (name != .string) return error.InvalidAst;
-        try bindExpressionParameter(allocator, uses, expression, .{
-            .qualifier = target_name,
-            .name = name.string,
+fn collectProjections(ctx: *Context, values: []const [*c]pg.PgQuery__Node) Error!void {
+    for (values) |node| {
+        const target = resTarget(node) orelse return error.InvalidAst;
+        const owned_name = try ctx.allocator.dupe(u8, try resultName(target));
+        try ctx.result_names.append(ctx.allocator, owned_name);
+        try ctx.projections.append(ctx.allocator, .{
+            .name = owned_name,
+            .column = try columnReference(ctx.allocator, target.val),
+            .hint = try inferExpression(target.val),
         });
     }
 }
 
-fn collectParameterUses(
-    allocator: std.mem.Allocator,
-    value: std.json.Value,
-    uses: []ParameterUse,
-) Error!void {
-    switch (value) {
-        .object => |object| {
-            if (object.get("A_Expr")) |expression| {
-                const left = field(expression, "lexpr");
-                const right = field(expression, "rexpr");
-                if (left != null and right != null) {
-                    if (try expressionColumn(allocator, left.?)) |column|
-                        try bindExpressionParameter(allocator, uses, right.?, column);
-                    if (try expressionColumn(allocator, right.?)) |column|
-                        try bindExpressionParameter(allocator, uses, left.?, column);
-                }
-            }
-            var iterator = object.iterator();
-            while (iterator.next()) |entry|
-                try collectParameterUses(allocator, entry.value_ptr.*, uses);
+fn collectCtes(ctx: *Context, clause: [*c]pg.PgQuery__WithClause) Error!void {
+    for (nodeSlice(clause.*.ctes, clause.*.n_ctes)) |node| {
+        if (node.*.node_case != pg.PG_QUERY__NODE__NODE_COMMON_TABLE_EXPR) return error.InvalidAst;
+        const cte = node.*.unnamed_0.common_table_expr;
+        if (cte == null or cte.*.ctequery == null or cte.*.ctequery.*.node_case != pg.PG_QUERY__NODE__NODE_SELECT_STMT)
+            return error.InvalidAst;
+        const query = cte.*.ctequery.*.unnamed_0.select_stmt;
+        const base = if (query.*.larg != null) query.*.larg else query;
+        const targets = nodeSlice(base.*.target_list, base.*.n_target_list);
+        const aliases = nodeSlice(cte.*.aliascolnames, cte.*.n_aliascolnames);
+        if (targets.len != aliases.len) return error.InvalidAst;
+        const columns = try ctx.allocator.alloc(Projection, targets.len);
+        for (targets, aliases, columns) |target_node, alias_node, *column| {
+            const target = resTarget(target_node) orelse return error.InvalidAst;
+            column.* = .{
+                .name = try ctx.allocator.dupe(u8, nodeString(alias_node) orelse return error.InvalidAst),
+                .column = try columnReference(ctx.allocator, target.val),
+                .hint = try inferExpression(target.val),
+            };
+        }
+        try ctx.ctes.append(ctx.allocator, .{
+            .name = try ctx.allocator.dupe(u8, cString(cte.*.ctename) orelse return error.InvalidAst),
+            .columns = columns,
+        });
+        try collectSelect(ctx, query, false, false);
+    }
+}
+
+fn collectFrom(ctx: *Context, node: [*c]pg.PgQuery__Node, nullable: bool, top: bool) Error!void {
+    if (node == null) return error.InvalidAst;
+    switch (node.*.node_case) {
+        pg.PG_QUERY__NODE__NODE_RANGE_VAR => try ctx.addRange(node.*.unnamed_0.range_var, nullable, top),
+        pg.PG_QUERY__NODE__NODE_JOIN_EXPR => {
+            const join = node.*.unnamed_0.join_expr;
+            if (join == null) return error.InvalidAst;
+            try collectFrom(ctx, join.*.larg, nullable or join.*.jointype == pg.PG_QUERY__JOIN_TYPE__JOIN_RIGHT or join.*.jointype == pg.PG_QUERY__JOIN_TYPE__JOIN_FULL, top);
+            try collectFrom(ctx, join.*.rarg, nullable or join.*.jointype == pg.PG_QUERY__JOIN_TYPE__JOIN_LEFT or join.*.jointype == pg.PG_QUERY__JOIN_TYPE__JOIN_FULL, top);
+            try walkExpression(ctx, join.*.quals);
         },
-        .array => |array| for (array.items) |item|
-            try collectParameterUses(allocator, item, uses),
+        else => return error.UnsupportedStatement,
+    }
+}
+
+fn walkExpression(ctx: *Context, node: [*c]pg.PgQuery__Node) Error!void {
+    if (node == null) return;
+    switch (node.*.node_case) {
+        pg.PG_QUERY__NODE__NODE_A_EXPR => {
+            const expression = node.*.unnamed_0.a_expr;
+            if (try columnReference(ctx.allocator, expression.*.lexpr)) |column| try bindParameter(ctx, expression.*.rexpr, column);
+            if (try columnReference(ctx.allocator, expression.*.rexpr)) |column| try bindParameter(ctx, expression.*.lexpr, column);
+            try walkExpression(ctx, expression.*.lexpr);
+            try walkExpression(ctx, expression.*.rexpr);
+        },
+        pg.PG_QUERY__NODE__NODE_BOOL_EXPR => {
+            const expression = node.*.unnamed_0.bool_expr;
+            for (nodeSlice(expression.*.args, expression.*.n_args)) |arg| try walkExpression(ctx, arg);
+        },
+        pg.PG_QUERY__NODE__NODE_NULL_TEST => try walkExpression(ctx, node.*.unnamed_0.null_test.*.arg),
+        pg.PG_QUERY__NODE__NODE_FUNC_CALL => {
+            const call = node.*.unnamed_0.func_call;
+            for (nodeSlice(call.*.args, call.*.n_args)) |arg| try walkExpression(ctx, arg);
+            try walkExpression(ctx, call.*.agg_filter);
+        },
+        pg.PG_QUERY__NODE__NODE_TYPE_CAST => try walkExpression(ctx, node.*.unnamed_0.type_cast.*.arg),
+        pg.PG_QUERY__NODE__NODE_SUB_LINK => {
+            const link = node.*.unnamed_0.sub_link;
+            try walkExpression(ctx, link.*.testexpr);
+            if (link.*.subselect != null and link.*.subselect.*.node_case == pg.PG_QUERY__NODE__NODE_SELECT_STMT)
+                try collectSelect(ctx, link.*.subselect.*.unnamed_0.select_stmt, false, false);
+        },
         else => {},
     }
 }
 
-fn bindExpressionParameter(
-    allocator: std.mem.Allocator,
-    uses: []ParameterUse,
-    expression: std.json.Value,
-    column: ColumnReference,
-) Error!void {
-    const ordinal = parameterOrdinal(expression) orelse return;
-    if (ordinal == 0 or ordinal > uses.len) return error.InvalidAst;
-    if (uses[ordinal - 1].column != null) return;
-    uses[ordinal - 1].column = .{
-        .qualifier = if (column.qualifier) |value| try allocator.dupe(u8, value) else null,
-        .name = try allocator.dupe(u8, column.name),
+fn bindInsertParameters(ctx: *Context, insert: [*c]pg.PgQuery__InsertStmt, select: [*c]pg.PgQuery__SelectStmt) Error!void {
+    const columns = nodeSlice(insert.*.cols, insert.*.n_cols);
+    var expressions: []const [*c]pg.PgQuery__Node = &.{};
+    if (select.*.n_values_lists > 0) {
+        const list_node = select.*.values_lists[0];
+        if (list_node.*.node_case != pg.PG_QUERY__NODE__NODE_LIST) return error.InvalidAst;
+        expressions = nodeSlice(list_node.*.unnamed_0.list.*.items, list_node.*.unnamed_0.list.*.n_items);
+    } else {
+        expressions = nodeSlice(select.*.target_list, select.*.n_target_list);
+    }
+    const table = cString(insert.*.relation.*.relname) orelse return error.InvalidAst;
+    const count = @min(columns.len, expressions.len);
+    for (columns[0..count], expressions[0..count]) |column_node, expression_node| {
+        const column = resTarget(column_node) orelse return error.InvalidAst;
+        const expression = if (resTarget(expression_node)) |target| target.val else expression_node;
+        try bindParameter(ctx, expression, .{
+            .qualifier = table,
+            .name = cString(column.name) orelse return error.InvalidAst,
+        });
+    }
+}
+
+fn bindParameter(ctx: *Context, node: [*c]pg.PgQuery__Node, column: ColumnReference) Error!void {
+    const ordinal = parameterOrdinal(node) orelse return;
+    if (ordinal == 0 or ordinal > ctx.uses.len) return error.InvalidAst;
+    if (ctx.uses[ordinal - 1].column != null) return;
+    ctx.uses[ordinal - 1].column = .{
+        .qualifier = if (column.qualifier) |value| try ctx.allocator.dupe(u8, value) else null,
+        .name = try ctx.allocator.dupe(u8, column.name),
     };
 }
 
-fn parameterOrdinal(expression: std.json.Value) ?usize {
-    const parameter = field(expression, "ParamRef") orelse return null;
-    const number = field(parameter, "number") orelse return null;
-    if (number != .integer or number.integer <= 0) return null;
-    return @intCast(number.integer);
+fn markIntegerParameter(ctx: *Context, node: [*c]pg.PgQuery__Node) Error!void {
+    if (parameterOrdinal(node)) |ordinal| {
+        if (ordinal == 0 or ordinal > ctx.uses.len) return error.InvalidAst;
+        ctx.uses[ordinal - 1].integer_hint = true;
+    }
+    try walkExpression(ctx, node);
 }
 
-fn expressionColumn(allocator: std.mem.Allocator, expression: std.json.Value) Error!?ColumnReference {
-    const column = field(expression, "ColumnRef") orelse return null;
-    const fields = field(column, "fields") orelse return error.InvalidAst;
-    if (fields != .array or fields.array.items.len == 0) return error.InvalidAst;
+fn parameterOrdinal(node: [*c]pg.PgQuery__Node) ?usize {
+    if (node == null or node.*.node_case != pg.PG_QUERY__NODE__NODE_PARAM_REF) return null;
+    const number = node.*.unnamed_0.param_ref.*.number;
+    return if (number > 0) @intCast(number) else null;
+}
+
+fn columnReference(allocator: std.mem.Allocator, node: [*c]pg.PgQuery__Node) Error!?ColumnReference {
+    if (node == null or node.*.node_case != pg.PG_QUERY__NODE__NODE_COLUMN_REF) return null;
+    const column = node.*.unnamed_0.column_ref;
+    if (column == null or column.*.n_fields == 0) return error.InvalidAst;
+    const fields = nodeSlice(column.*.fields, column.*.n_fields);
     return .{
-        .qualifier = if (fields.array.items.len >= 2)
-            try allocator.dupe(u8, try stringField(fields.array.items[fields.array.items.len - 2]))
+        .qualifier = if (fields.len >= 2)
+            try allocator.dupe(u8, nodeString(fields[fields.len - 2]) orelse return error.InvalidAst)
         else
             null,
-        .name = try allocator.dupe(u8, try stringField(fields.array.items[fields.array.items.len - 1])),
+        .name = try allocator.dupe(u8, nodeString(fields[fields.len - 1]) orelse return error.InvalidAst),
     };
 }
 
-fn mutation_targetName(kind: StatementKind, statement: std.json.Value) ?[]const u8 {
-    if (kind == .select) return null;
-    const relation = field(statement, "relation") orelse return null;
-    const name = field(relation, "relname") orelse return null;
-    if (name != .string) return null;
-    return name.string;
-}
-
-fn collectRelations(
-    allocator: std.mem.Allocator,
-    value: std.json.Value,
-    relations: *std.ArrayList([]const u8),
-    bindings: *std.ArrayList(Relation),
-    nullable: bool,
-) std.mem.Allocator.Error!void {
-    switch (value) {
-        .object => |object| {
-            if (object.get("JoinExpr")) |join| {
-                const kind = field(join, "jointype");
-                const left_nullable = nullable or isJoinKind(kind, "JOIN_RIGHT") or
-                    isJoinKind(kind, "JOIN_FULL");
-                const right_nullable = nullable or isJoinKind(kind, "JOIN_LEFT") or
-                    isJoinKind(kind, "JOIN_FULL");
-                if (field(join, "larg")) |left|
-                    try collectRelations(allocator, left, relations, bindings, left_nullable);
-                if (field(join, "rarg")) |right|
-                    try collectRelations(allocator, right, relations, bindings, right_nullable);
-                if (field(join, "quals")) |quals|
-                    try collectRelations(allocator, quals, relations, bindings, nullable);
-                return;
-            }
-            if (object.get("RangeVar")) |range| {
-                if (field(range, "relname")) |name| {
-                    if (name == .string) {
-                        if (!contains(relations.items, name.string))
-                            try relations.append(allocator, try allocator.dupe(u8, name.string));
-                        try bindings.append(allocator, .{
-                            .name = try allocator.dupe(u8, name.string),
-                            .alias = try relationAlias(allocator, range),
-                            .nullable = nullable,
-                        });
-                    }
-                }
-            }
-            var iterator = object.iterator();
-            while (iterator.next()) |entry|
-                try collectRelations(allocator, entry.value_ptr.*, relations, bindings, nullable);
+fn inferExpression(node: [*c]pg.PgQuery__Node) Error!?ExpressionHint {
+    if (node == null) return null;
+    switch (node.*.node_case) {
+        pg.PG_QUERY__NODE__NODE_A_CONST => return switch (node.*.unnamed_0.a_const.*.val_case) {
+            pg.PG_QUERY__A__CONST__VAL_IVAL => .{ .scalar_type = .integer, .nullable = false },
+            pg.PG_QUERY__A__CONST__VAL_FVAL => .{ .scalar_type = .real, .nullable = false },
+            pg.PG_QUERY__A__CONST__VAL_BOOLVAL => .{ .scalar_type = .boolean, .nullable = false },
+            pg.PG_QUERY__A__CONST__VAL_SVAL => .{ .scalar_type = .text, .nullable = false },
+            else => null,
         },
-        .array => |array| for (array.items) |item|
-            try collectRelations(allocator, item, relations, bindings, nullable),
-        else => {},
+        pg.PG_QUERY__NODE__NODE_FUNC_CALL => {
+            const call = node.*.unnamed_0.func_call;
+            if (call.*.n_funcname == 0) return null;
+            const name = nodeString(call.*.funcname[call.*.n_funcname - 1]) orelse return null;
+            if (std.ascii.eqlIgnoreCase(name, "count")) return .{ .scalar_type = .integer, .nullable = false };
+            if (std.ascii.eqlIgnoreCase(name, "lower") or std.ascii.eqlIgnoreCase(name, "upper") or std.ascii.eqlIgnoreCase(name, "trim"))
+                return .{ .scalar_type = .text, .nullable = true };
+            return null;
+        },
+        pg.PG_QUERY__NODE__NODE_A_EXPR => {
+            const expression = node.*.unnamed_0.a_expr;
+            if (expression.*.n_name == 0) return null;
+            const operator = nodeString(expression.*.name[expression.*.n_name - 1]) orelse return null;
+            const left = try inferExpression(expression.*.lexpr);
+            const right = try inferExpression(expression.*.rexpr);
+            if (operator.len == 1 and std.mem.indexOfScalar(u8, "+-*/", operator[0]) != null and left != null and right != null)
+                return .{
+                    .scalar_type = if (left.?.scalar_type == .real or right.?.scalar_type == .real) .real else .integer,
+                    .nullable = left.?.nullable or right.?.nullable,
+                };
+            return null;
+        },
+        pg.PG_QUERY__NODE__NODE_SUB_LINK => {
+            const subselect = node.*.unnamed_0.sub_link.*.subselect;
+            if (subselect == null or subselect.*.node_case != pg.PG_QUERY__NODE__NODE_SELECT_STMT) return null;
+            const select = subselect.*.unnamed_0.select_stmt;
+            if (select.*.n_target_list != 1) return null;
+            return inferExpression((resTarget(select.*.target_list[0]) orelse return null).val);
+        },
+        else => return null,
     }
 }
 
-fn isJoinKind(kind: ?std.json.Value, expected: []const u8) bool {
-    const value = kind orelse return false;
-    return value == .string and std.mem.eql(u8, value.string, expected);
-}
-
-fn relationAlias(allocator: std.mem.Allocator, range: std.json.Value) std.mem.Allocator.Error!?[]const u8 {
-    const alias_value = field(range, "alias") orelse return null;
-    const alias = field(alias_value, "Alias") orelse alias_value;
-    const name = field(alias, "aliasname") orelse return null;
-    if (name != .string) return null;
-    return try allocator.dupe(u8, name.string);
-}
-
-fn columnReference(
-    allocator: std.mem.Allocator,
-    result: std.json.Value,
-) Error!?ColumnReference {
-    const expression = field(result, "val") orelse return error.InvalidAst;
-    const column = field(expression, "ColumnRef") orelse return null;
-    const fields = field(column, "fields") orelse return error.InvalidAst;
-    if (fields != .array or fields.array.items.len == 0) return error.InvalidAst;
-    const name = try stringField(fields.array.items[fields.array.items.len - 1]);
-    const qualifier = if (fields.array.items.len >= 2)
-        try allocator.dupe(u8, try stringField(fields.array.items[fields.array.items.len - 2]))
-    else
-        null;
-    return .{
-        .qualifier = qualifier,
-        .name = try allocator.dupe(u8, name),
-    };
-}
-
-fn stringField(value: std.json.Value) Error![]const u8 {
-    const string_node = field(value, "String") orelse return error.InvalidAst;
-    const name = field(string_node, "sval") orelse return error.InvalidAst;
-    if (name != .string) return error.InvalidAst;
-    return name.string;
-}
-
-fn resultName(result: std.json.Value) Error![]const u8 {
-    if (field(result, "name")) |name| {
-        if (name == .string) return name.string;
-        return error.InvalidAst;
+fn resultName(target: *const pg.PgQuery__ResTarget) Error![]const u8 {
+    if (cString(target.name)) |name| if (name.len != 0) return name;
+    if (target.val != null and target.val.*.node_case == pg.PG_QUERY__NODE__NODE_COLUMN_REF) {
+        const column = target.val.*.unnamed_0.column_ref;
+        if (column.*.n_fields > 0)
+            return nodeString(column.*.fields[column.*.n_fields - 1]) orelse error.MissingResultName;
     }
-    const expression = field(result, "val") orelse return error.InvalidAst;
-    if (field(expression, "ColumnRef")) |column| {
-        const fields = field(column, "fields") orelse return error.InvalidAst;
-        if (fields != .array or fields.array.items.len == 0) return error.InvalidAst;
-        const last = fields.array.items[fields.array.items.len - 1];
-        if (field(last, "String")) |string_node| {
-            const name = field(string_node, "sval") orelse return error.InvalidAst;
-            if (name == .string) return name.string;
-        }
-        if (field(last, "A_Star") != null) return "*";
-    }
-    if (field(expression, "FuncCall")) |call| {
-        const names = field(call, "funcname") orelse return error.InvalidAst;
-        if (names != .array or names.array.items.len == 0) return error.InvalidAst;
-        const last = names.array.items[names.array.items.len - 1];
-        const string_node = field(last, "String") orelse return error.InvalidAst;
-        const name = field(string_node, "sval") orelse return error.InvalidAst;
-        if (name == .string) return name.string;
+    if (target.val != null and target.val.*.node_case == pg.PG_QUERY__NODE__NODE_FUNC_CALL) {
+        const call = target.val.*.unnamed_0.func_call;
+        if (call.*.n_funcname > 0)
+            return nodeString(call.*.funcname[call.*.n_funcname - 1]) orelse error.MissingResultName;
     }
     return error.MissingResultName;
 }
 
+fn mutationName(allocator: std.mem.Allocator, range: [*c]pg.PgQuery__RangeVar) Error![]const u8 {
+    if (range == null) return error.InvalidAst;
+    return allocator.dupe(u8, cString(range.*.relname) orelse return error.InvalidAst);
+}
+fn resTarget(node: [*c]pg.PgQuery__Node) ?*const pg.PgQuery__ResTarget {
+    if (node == null or node.*.node_case != pg.PG_QUERY__NODE__NODE_RES_TARGET) return null;
+    return node.*.unnamed_0.res_target;
+}
+fn nodeString(node: [*c]pg.PgQuery__Node) ?[]const u8 {
+    if (node == null or node.*.node_case != pg.PG_QUERY__NODE__NODE_STRING) return null;
+    return cString(node.*.unnamed_0.string.*.sval);
+}
+fn cString(value: [*c]u8) ?[]const u8 {
+    return if (value == null) null else std.mem.span(value);
+}
+fn nodeSlice(pointer: [*c][*c]pg.PgQuery__Node, len: usize) []const [*c]pg.PgQuery__Node {
+    return if (len == 0) &.{} else pointer[0..len];
+}
 fn contains(values: []const []const u8, needle: []const u8) bool {
     for (values) |value| if (std.mem.eql(u8, value, needle)) return true;
     return false;
-}
-
-fn field(value: std.json.Value, name: []const u8) ?std.json.Value {
-    if (value != .object) return null;
-    return value.object.get(name);
 }

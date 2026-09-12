@@ -13,7 +13,7 @@ test "resolves qualified projected columns and their database types" {
     defer schema_sql.deinit();
     var schema = catalog.Catalog.init(std.testing.allocator);
     defer schema.deinit();
-    try schema.applyParserJson(schema_sql.ast_json);
+    try schema.applyParserTree(schema_sql.tree);
 
     var parsed = try parser.parse(
         std.testing.allocator,
@@ -21,7 +21,7 @@ test "resolves qualified projected columns and their database types" {
             "FROM users u LEFT JOIN profiles p ON p.user_id=u.id WHERE u.id=:id",
     );
     defer parsed.deinit();
-    var query = try ir.adapt(std.testing.allocator, parsed.ast_json, parsed.rewritten.names);
+    var query = try ir.adapt(std.testing.allocator, parsed.tree, parsed.rewritten.names);
     defer query.deinit();
     var result = try analysis.analyze(std.testing.allocator, &schema, &query);
     defer result.deinit();
@@ -40,13 +40,13 @@ test "rejects missing relations and ambiguous unqualified columns" {
     defer schema_sql.deinit();
     var schema = catalog.Catalog.init(std.testing.allocator);
     defer schema.deinit();
-    try schema.applyParserJson(schema_sql.ast_json);
+    try schema.applyParserTree(schema_sql.tree);
 
     var missing_sql = try parser.parse(std.testing.allocator, "SELECT id FROM missing");
     defer missing_sql.deinit();
     var missing = try ir.adapt(
         std.testing.allocator,
-        missing_sql.ast_json,
+        missing_sql.tree,
         missing_sql.rewritten.names,
     );
     defer missing.deinit();
@@ -62,7 +62,7 @@ test "rejects missing relations and ambiguous unqualified columns" {
     defer ambiguous_sql.deinit();
     var ambiguous = try ir.adapt(
         std.testing.allocator,
-        ambiguous_sql.ast_json,
+        ambiguous_sql.tree,
         ambiguous_sql.rewritten.names,
     );
     defer ambiguous.deinit();
@@ -80,7 +80,7 @@ test "infers parameters from update assignments comparisons and limits" {
     defer schema_sql.deinit();
     var schema = catalog.Catalog.init(std.testing.allocator);
     defer schema.deinit();
-    try schema.applyParserJson(schema_sql.ast_json);
+    try schema.applyParserTree(schema_sql.tree);
 
     var update_sql = try parser.parse(
         std.testing.allocator,
@@ -89,7 +89,7 @@ test "infers parameters from update assignments comparisons and limits" {
     defer update_sql.deinit();
     var update = try ir.adapt(
         std.testing.allocator,
-        update_sql.ast_json,
+        update_sql.tree,
         update_sql.rewritten.names,
     );
     defer update.deinit();
@@ -104,7 +104,7 @@ test "infers parameters from update assignments comparisons and limits" {
         "SELECT id FROM users LIMIT :limit OFFSET :offset",
     );
     defer page_sql.deinit();
-    var page = try ir.adapt(std.testing.allocator, page_sql.ast_json, page_sql.rewritten.names);
+    var page = try ir.adapt(std.testing.allocator, page_sql.tree, page_sql.rewritten.names);
     defer page.deinit();
     var page_result = try analysis.analyze(std.testing.allocator, &schema, &page);
     defer page_result.deinit();
@@ -122,7 +122,7 @@ test "infers INSERT values and INSERT SELECT parameters from target columns" {
     defer schema_sql.deinit();
     var schema = catalog.Catalog.init(std.testing.allocator);
     defer schema.deinit();
-    try schema.applyParserJson(schema_sql.ast_json);
+    try schema.applyParserTree(schema_sql.tree);
 
     const cases = [_][]const u8{
         "INSERT INTO users(name) VALUES (:name) RETURNING id, name",
@@ -133,7 +133,7 @@ test "infers INSERT values and INSERT SELECT parameters from target columns" {
     for (cases) |sql| {
         var parsed = try parser.parse(std.testing.allocator, sql);
         defer parsed.deinit();
-        var query = try ir.adapt(std.testing.allocator, parsed.ast_json, parsed.rewritten.names);
+        var query = try ir.adapt(std.testing.allocator, parsed.tree, parsed.rewritten.names);
         defer query.deinit();
         var result = try analysis.analyze(std.testing.allocator, &schema, &query);
         defer result.deinit();
@@ -153,14 +153,14 @@ test "infers arithmetic over scalar COUNT subqueries" {
     defer schema_sql.deinit();
     var schema = catalog.Catalog.init(std.testing.allocator);
     defer schema.deinit();
-    try schema.applyParserJson(schema_sql.ast_json);
+    try schema.applyParserTree(schema_sql.tree);
     var parsed = try parser.parse(
         std.testing.allocator,
         "SELECT (SELECT COUNT(*) FROM organization_members WHERE user_id=:user) + " ++
             "(SELECT COUNT(*) FROM workspace_members WHERE user_id=:user) AS total",
     );
     defer parsed.deinit();
-    var query = try ir.adapt(std.testing.allocator, parsed.ast_json, parsed.rewritten.names);
+    var query = try ir.adapt(std.testing.allocator, parsed.tree, parsed.rewritten.names);
     defer query.deinit();
     var result = try analysis.analyze(std.testing.allocator, &schema, &query);
     defer result.deinit();
@@ -177,7 +177,7 @@ test "resolves recursive CTE output and parameter types" {
     defer schema_sql.deinit();
     var schema = catalog.Catalog.init(std.testing.allocator);
     defer schema.deinit();
-    try schema.applyParserJson(schema_sql.ast_json);
+    try schema.applyParserTree(schema_sql.tree);
     var parsed = try parser.parse(
         std.testing.allocator,
         "WITH RECURSIVE held(id, depth) AS (" ++
@@ -186,7 +186,7 @@ test "resolves recursive CTE output and parameter types" {
             "WHERE h.depth<:depth) SELECT id, depth FROM held ORDER BY depth",
     );
     defer parsed.deinit();
-    var query = try ir.adapt(std.testing.allocator, parsed.ast_json, parsed.rewritten.names);
+    var query = try ir.adapt(std.testing.allocator, parsed.tree, parsed.rewritten.names);
     defer query.deinit();
     var result = try analysis.analyze(std.testing.allocator, &schema, &query);
     defer result.deinit();

@@ -15,7 +15,7 @@ test "replays CREATE TABLE columns from libpg_query AST" {
 
     var schema = catalog.Catalog.init(std.testing.allocator);
     defer schema.deinit();
-    try schema.applyParserJson(parsed.ast_json);
+    try schema.applyParserTree(parsed.tree);
 
     const users = schema.table("users").?;
     try std.testing.expectEqual(@as(usize, 3), users.columns.count());
@@ -41,8 +41,8 @@ test "replays indexes and ALTER TABLE operations" {
 
     var schema = catalog.Catalog.init(std.testing.allocator);
     defer schema.deinit();
-    try schema.applyParserJson(initial.ast_json);
-    try schema.applyParserJson(changes.ast_json);
+    try schema.applyParserTree(initial.tree);
+    try schema.applyParserTree(changes.tree);
 
     const users = schema.table("users").?;
     try std.testing.expect(!users.columns.get("active").?.nullable);
@@ -68,8 +68,8 @@ test "replays DROP INDEX and DROP TABLE" {
 
     var schema = catalog.Catalog.init(std.testing.allocator);
     defer schema.deinit();
-    try schema.applyParserJson(create.ast_json);
-    try schema.applyParserJson(drop.ast_json);
+    try schema.applyParserTree(create.tree);
+    try schema.applyParserTree(drop.tree);
     try std.testing.expect(schema.table("users") == null);
     try std.testing.expect(schema.indexes.get("users_id_key") == null);
 }
@@ -83,10 +83,10 @@ test "catalog rejects duplicate tables across migration inputs" {
 
     var schema = catalog.Catalog.init(std.testing.allocator);
     defer schema.deinit();
-    try schema.applyParserJson(parsed.ast_json);
+    try schema.applyParserTree(parsed.tree);
     try std.testing.expectError(
         error.DuplicateTable,
-        schema.applyParserJson(parsed.ast_json),
+        schema.applyParserTree(parsed.tree),
     );
 }
 
@@ -101,7 +101,7 @@ test "replays table-level primary and unique constraints" {
 
     var schema = catalog.Catalog.init(std.testing.allocator);
     defer schema.deinit();
-    try schema.applyParserJson(parsed.ast_json);
+    try schema.applyParserTree(parsed.tree);
     const table = schema.table("memberships").?;
     try std.testing.expect(table.columns.get("organization_id").?.primary_key);
     try std.testing.expect(table.columns.get("user_id").?.primary_key);

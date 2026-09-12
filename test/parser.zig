@@ -34,7 +34,12 @@ test "libpg_query parses shared SQL after portable parameter rewriting" {
     try std.testing.expectEqual(@as(usize, 2), parsed.rewritten.names.len);
     try std.testing.expectEqualStrings("tenant", parsed.rewritten.names[0]);
     try std.testing.expectEqualStrings("after", parsed.rewritten.names[1]);
-    try std.testing.expect(std.mem.indexOf(u8, parsed.ast_json, "SelectStmt") != null);
+    try std.testing.expectEqual(@as(usize, 1), parsed.tree.n_stmts);
+    const statement = parsed.tree.stmts[0].*.stmt;
+    try std.testing.expectEqual(
+        @as(c_uint, parser.ast.PG_QUERY__NODE__NODE_SELECT_STMT),
+        statement.*.node_case,
+    );
 }
 
 test "libpg_query covers returning and conflict queries used by SQLite examples" {
@@ -46,8 +51,12 @@ test "libpg_query covers returning and conflict queries used by SQLite examples"
     );
     defer parsed.deinit();
 
-    try std.testing.expect(std.mem.indexOf(u8, parsed.ast_json, "InsertStmt") != null);
-    try std.testing.expect(std.mem.indexOf(u8, parsed.ast_json, "onConflictClause") != null);
+    const statement = parsed.tree.stmts[0].*.stmt;
+    try std.testing.expectEqual(
+        @as(c_uint, parser.ast.PG_QUERY__NODE__NODE_INSERT_STMT),
+        statement.*.node_case,
+    );
+    try std.testing.expect(statement.*.unnamed_0.insert_stmt.*.on_conflict_clause != null);
     try std.testing.expectEqual(@as(usize, 2), parsed.rewritten.names.len);
 }
 

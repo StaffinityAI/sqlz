@@ -10,8 +10,10 @@ host-tool operation and never runs at Zig comptime.
 Bytes are retained by a source manager and decoded as UTF-8. Portable named
 parameters are lexically rewritten to PostgreSQL `$N` parameters in first-use
 order, preserving a mapping back to their names and original source. The rewritten
-statement is parsed by `libpg_query`; its protobuf/JSON tree is adapted into the
-checker IR and analyzed only after a usable statement was returned.
+statement is parsed by `libpg_query`. The protobuf-C parse tree is unpacked into
+the generated `PgQuery__*` structs and traversed directly by the catalog and
+checker adapters. The parser pipeline does not produce, parse, or traverse JSON.
+Semantic analysis starts only after a usable typed tree was returned.
 
 The parameter lexer handles quoted identifiers, escaped strings, comments, and
 named `:parameters`. A colon inside a string, quoted identifier, comment, cast, or

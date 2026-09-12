@@ -1,4 +1,6 @@
 const std = @import("std");
+const parser = @import("sqlz_parser");
+const pg = parser.ast;
 
 pub const Column = struct {
     name: []const u8,
@@ -50,7 +52,7 @@ pub const Error = error{
     MissingColumn,
     DuplicateIndex,
     MissingIndex,
-} || std.mem.Allocator.Error || std.json.ParseError(std.json.Scanner);
+} || std.mem.Allocator.Error;
 
 pub const Catalog = struct {
     allocator: std.mem.Allocator,
@@ -133,116 +135,97 @@ pub const Catalog = struct {
         return copy;
     }
 
-    pub fn applyParserJson(self: *Catalog, ast_json: []const u8) Error!void {
-        var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, ast_json, .{});
-        defer parsed.deinit();
-
-        const statements = field(parsed.value, "stmts") orelse return error.InvalidAst;
-        if (statements != .array) return error.InvalidAst;
-        for (statements.array.items) |statement| {
-            const stmt = field(statement, "stmt") orelse return error.InvalidAst;
-            if (field(stmt, "CreateStmt")) |create| {
-                try self.applyCreateTable(create);
-            } else if (field(stmt, "IndexStmt")) |index| {
-                try self.applyCreateIndex(index);
-            } else if (field(stmt, "AlterTableStmt")) |alter| {
-                try self.applyAlterTable(alter);
-            } else if (field(stmt, "DropStmt")) |drop| {
-                try self.applyDrop(drop);
-            } else {
-                return error.UnsupportedStatement;
+    pub fn applyParserTree(self: *Catalog, tree: *const pg.PgQuery__ParseResult) Error!void {
+        for (rawSlice(tree.stmts, tree.n_stmts)) |raw| {
+            if (raw == null or raw.*.stmt == null) return error.InvalidAst;
+            const node = raw.*.stmt;
+            switch (node.*.node_case) {
+                pg.PG_QUERY__NODE__NODE_CREATE_STMT => try self.applyCreateTable(node.*.unnamed_0.create_stmt),
+                pg.PG_QUERY__NODE__NODE_INDEX_STMT => try self.applyCreateIndex(node.*.unnamed_0.index_stmt),
+                pg.PG_QUERY__NODE__NODE_ALTER_TABLE_STMT => try self.applyAlterTable(node.*.unnamed_0.alter_table_stmt),
+                pg.PG_QUERY__NODE__NODE_DROP_STMT => try self.applyDrop(node.*.unnamed_0.drop_stmt),
+                else => return error.UnsupportedStatement,
             }
         }
     }
 
-    fn applyCreateTable(self: *Catalog, create: std.json.Value) Error!void {
-        const relation = field(create, "relation") orelse return error.InvalidAst;
-        const name_value = field(relation, "relname") orelse return error.InvalidAst;
-        if (name_value != .string) return error.InvalidAst;
-        if (self.tables.contains(name_value.string)) return error.DuplicateTable;
+    fn applyCreateTable(self: *Catalog, create_ptr: [*c]pg.PgQuery__CreateStmt) Error!void {
+        if (create_ptr == null or create_ptr.*.relation == null) return error.InvalidAst;
+        const create = create_ptr.*;
+        const table_name = cString(create.relation.*.relname) orelse return error.InvalidAst;
+        if (self.tables.contains(table_name)) return error.DuplicateTable;
 
         var table_value: Table = .{
             .allocator = self.allocator,
-            .name = try self.allocator.dupe(u8, name_value.string),
+            .name = try self.allocator.dupe(u8, table_name),
         };
         errdefer table_value.deinit();
 
-        const elements = field(create, "tableElts") orelse return error.InvalidAst;
-        if (elements != .array) return error.InvalidAst;
-        for (elements.array.items) |element| {
-            const definition = field(element, "ColumnDef") orelse continue;
-            try addColumn(&table_value, definition);
+        for (nodeSlice(create.table_elts, create.n_table_elts)) |element| {
+            if (element.*.node_case == pg.PG_QUERY__NODE__NODE_COLUMN_DEF)
+                try addColumn(&table_value, element.*.unnamed_0.column_def);
         }
-        for (elements.array.items) |element| {
-            const constraint = field(element, "Constraint") orelse continue;
-            try applyTableConstraint(&table_value, constraint);
+        for (nodeSlice(create.table_elts, create.n_table_elts)) |element| {
+            if (element.*.node_case == pg.PG_QUERY__NODE__NODE_CONSTRAINT)
+                try applyTableConstraint(&table_value, element.*.unnamed_0.constraint);
         }
         if (table_value.columns.count() == 0) return error.InvalidAst;
         try self.tables.putNoClobber(self.allocator, table_value.name, table_value);
     }
 
-    fn applyCreateIndex(self: *Catalog, node: std.json.Value) Error!void {
-        const name_value = field(node, "idxname") orelse return error.InvalidAst;
-        const relation = field(node, "relation") orelse return error.InvalidAst;
-        const table_value = field(relation, "relname") orelse return error.InvalidAst;
-        const params = field(node, "indexParams") orelse return error.InvalidAst;
-        if (name_value != .string or table_value != .string or params != .array)
-            return error.InvalidAst;
-        if (self.indexes.contains(name_value.string)) return error.DuplicateIndex;
-        const table_ptr = self.tables.getPtr(table_value.string) orelse return error.MissingTable;
+    fn applyCreateIndex(self: *Catalog, node_ptr: [*c]pg.PgQuery__IndexStmt) Error!void {
+        if (node_ptr == null or node_ptr.*.relation == null) return error.InvalidAst;
+        const node = node_ptr.*;
+        const index_name = cString(node.idxname) orelse return error.InvalidAst;
+        const table_name_value = cString(node.relation.*.relname) orelse return error.InvalidAst;
+        if (self.indexes.contains(index_name)) return error.DuplicateIndex;
+        const table_ptr = self.tables.getPtr(table_name_value) orelse return error.MissingTable;
 
         var columns: std.ArrayList([]const u8) = .empty;
         errdefer {
             for (columns.items) |column| self.allocator.free(column);
             columns.deinit(self.allocator);
         }
-        for (params.array.items) |param| {
-            const element = field(param, "IndexElem") orelse return error.InvalidAst;
-            const column = field(element, "name") orelse return error.InvalidAst;
-            if (column != .string or !table_ptr.columns.contains(column.string))
-                return error.MissingColumn;
-            try columns.append(self.allocator, try self.allocator.dupe(u8, column.string));
+        for (nodeSlice(node.index_params, node.n_index_params)) |param| {
+            if (param.*.node_case != pg.PG_QUERY__NODE__NODE_INDEX_ELEM) return error.InvalidAst;
+            const column = cString(param.*.unnamed_0.index_elem.*.name) orelse return error.InvalidAst;
+            if (!table_ptr.columns.contains(column)) return error.MissingColumn;
+            try columns.append(self.allocator, try self.allocator.dupe(u8, column));
         }
-        const name = try self.allocator.dupe(u8, name_value.string);
+        const name = try self.allocator.dupe(u8, index_name);
         errdefer self.allocator.free(name);
-        const table_name = try self.allocator.dupe(u8, table_value.string);
+        const table_name = try self.allocator.dupe(u8, table_name_value);
         errdefer self.allocator.free(table_name);
         const owned_columns = try columns.toOwnedSlice(self.allocator);
         errdefer {
             for (owned_columns) |column| self.allocator.free(column);
             self.allocator.free(owned_columns);
         }
-        const unique = if (field(node, "unique")) |value|
-            value == .bool and value.bool
-        else
-            false;
         try self.indexes.putNoClobber(self.allocator, name, .{
             .allocator = self.allocator,
             .name = name,
             .table_name = table_name,
             .columns = owned_columns,
-            .unique = unique,
+            .unique = node.unique != 0,
         });
     }
 
-    fn applyAlterTable(self: *Catalog, node: std.json.Value) Error!void {
-        const relation = field(node, "relation") orelse return error.InvalidAst;
-        const table_value = field(relation, "relname") orelse return error.InvalidAst;
-        const commands = field(node, "cmds") orelse return error.InvalidAst;
-        if (table_value != .string or commands != .array) return error.InvalidAst;
-        const table_ptr = self.tables.getPtr(table_value.string) orelse return error.MissingTable;
-        for (commands.array.items) |command_value| {
-            const command = field(command_value, "AlterTableCmd") orelse return error.InvalidAst;
-            const subtype = field(command, "subtype") orelse return error.InvalidAst;
-            if (subtype != .string) return error.InvalidAst;
-            if (std.mem.eql(u8, subtype.string, "AT_AddColumn")) {
-                const definition = field(command, "def") orelse return error.InvalidAst;
-                const column = field(definition, "ColumnDef") orelse return error.InvalidAst;
-                try addColumn(table_ptr, column);
-            } else if (std.mem.eql(u8, subtype.string, "AT_DropColumn")) {
-                const name = field(command, "name") orelse return error.InvalidAst;
-                if (name != .string) return error.InvalidAst;
-                const removed = table_ptr.columns.fetchOrderedRemove(name.string) orelse
+    fn applyAlterTable(self: *Catalog, node_ptr: [*c]pg.PgQuery__AlterTableStmt) Error!void {
+        if (node_ptr == null or node_ptr.*.relation == null) return error.InvalidAst;
+        const node = node_ptr.*;
+        const table_name = cString(node.relation.*.relname) orelse return error.InvalidAst;
+        const table_ptr = self.tables.getPtr(table_name) orelse return error.MissingTable;
+        for (nodeSlice(node.cmds, node.n_cmds)) |command_node| {
+            if (command_node.*.node_case != pg.PG_QUERY__NODE__NODE_ALTER_TABLE_CMD)
+                return error.InvalidAst;
+            const command = command_node.*.unnamed_0.alter_table_cmd.*;
+            if (command.subtype == pg.PG_QUERY__ALTER_TABLE_TYPE__AT_AddColumn) {
+                if (command.def == null or command.def.*.node_case != pg.PG_QUERY__NODE__NODE_COLUMN_DEF)
+                    return error.InvalidAst;
+                try addColumn(table_ptr, command.def.*.unnamed_0.column_def);
+            } else if (command.subtype == pg.PG_QUERY__ALTER_TABLE_TYPE__AT_DropColumn) {
+                const name = cString(command.name) orelse return error.InvalidAst;
+                const removed = table_ptr.columns.fetchOrderedRemove(name) orelse
                     return error.MissingColumn;
                 table_ptr.allocator.free(removed.value.name);
                 table_ptr.allocator.free(removed.value.database_type);
@@ -252,24 +235,20 @@ pub const Catalog = struct {
         }
     }
 
-    fn applyDrop(self: *Catalog, node: std.json.Value) Error!void {
-        const kind = field(node, "removeType") orelse return error.InvalidAst;
-        const objects = field(node, "objects") orelse return error.InvalidAst;
-        if (kind != .string or objects != .array) return error.InvalidAst;
-        for (objects.array.items) |object| {
-            const list = field(object, "List") orelse return error.InvalidAst;
-            const items = field(list, "items") orelse return error.InvalidAst;
-            if (items != .array or items.array.items.len == 0) return error.InvalidAst;
-            const string_node = field(items.array.items[items.array.items.len - 1], "String") orelse
-                return error.InvalidAst;
-            const name = field(string_node, "sval") orelse return error.InvalidAst;
-            if (name != .string) return error.InvalidAst;
-            if (std.mem.eql(u8, kind.string, "OBJECT_TABLE")) {
-                var removed = self.tables.fetchOrderedRemove(name.string) orelse
+    fn applyDrop(self: *Catalog, node_ptr: [*c]pg.PgQuery__DropStmt) Error!void {
+        if (node_ptr == null) return error.InvalidAst;
+        const node = node_ptr.*;
+        for (nodeSlice(node.objects, node.n_objects)) |object| {
+            if (object.*.node_case != pg.PG_QUERY__NODE__NODE_LIST) return error.InvalidAst;
+            const list = object.*.unnamed_0.list.*;
+            if (list.n_items == 0) return error.InvalidAst;
+            const name = nodeString(list.items[list.n_items - 1]) orelse return error.InvalidAst;
+            if (node.remove_type == pg.PG_QUERY__OBJECT_TYPE__OBJECT_TABLE) {
+                var removed = self.tables.fetchOrderedRemove(name) orelse
                     return error.MissingTable;
                 removed.value.deinit();
-            } else if (std.mem.eql(u8, kind.string, "OBJECT_INDEX")) {
-                var removed = self.indexes.fetchOrderedRemove(name.string) orelse
+            } else if (node.remove_type == pg.PG_QUERY__OBJECT_TYPE__OBJECT_INDEX) {
+                var removed = self.indexes.fetchOrderedRemove(name) orelse
                     return error.MissingIndex;
                 removed.value.deinit();
             } else {
@@ -279,20 +258,16 @@ pub const Catalog = struct {
     }
 };
 
-fn applyTableConstraint(table: *Table, constraint: std.json.Value) Error!void {
-    const kind = field(constraint, "contype") orelse return error.InvalidAst;
-    if (kind != .string) return error.InvalidAst;
-    const primary = std.mem.eql(u8, kind.string, "CONSTR_PRIMARY");
-    const unique = primary or std.mem.eql(u8, kind.string, "CONSTR_UNIQUE");
+fn applyTableConstraint(table: *Table, constraint_ptr: [*c]pg.PgQuery__Constraint) Error!void {
+    if (constraint_ptr == null) return error.InvalidAst;
+    const constraint = constraint_ptr.*;
+    const primary = constraint.contype == pg.PG_QUERY__CONSTR_TYPE__CONSTR_PRIMARY;
+    const unique = primary or constraint.contype == pg.PG_QUERY__CONSTR_TYPE__CONSTR_UNIQUE;
     if (!unique) return;
-
-    const keys = field(constraint, "keys") orelse return error.InvalidAst;
-    if (keys != .array or keys.array.items.len == 0) return error.InvalidAst;
-    for (keys.array.items) |item| {
-        const string_node = field(item, "String") orelse return error.InvalidAst;
-        const name = field(string_node, "sval") orelse return error.InvalidAst;
-        if (name != .string) return error.InvalidAst;
-        const column = table.columns.getPtr(name.string) orelse return error.MissingColumn;
+    if (constraint.n_keys == 0) return error.InvalidAst;
+    for (nodeSlice(constraint.keys, constraint.n_keys)) |item| {
+        const name = nodeString(item) orelse return error.InvalidAst;
+        const column = table.columns.getPtr(name) orelse return error.MissingColumn;
         column.unique = true;
         if (primary) {
             column.primary_key = true;
@@ -301,41 +276,34 @@ fn applyTableConstraint(table: *Table, constraint: std.json.Value) Error!void {
     }
 }
 
-fn addColumn(table: *Table, definition: std.json.Value) Error!void {
-    const name_value = field(definition, "colname") orelse return error.InvalidAst;
-    const type_name = field(definition, "typeName") orelse return error.InvalidAst;
-    if (name_value != .string) return error.InvalidAst;
-    if (table.columns.contains(name_value.string)) return error.DuplicateColumn;
-
-    const type_parts = field(type_name, "names") orelse return error.InvalidAst;
-    if (type_parts != .array or type_parts.array.items.len == 0) return error.InvalidAst;
-    const last = type_parts.array.items[type_parts.array.items.len - 1];
-    const string_node = field(last, "String") orelse return error.InvalidAst;
-    const type_value = field(string_node, "sval") orelse return error.InvalidAst;
-    if (type_value != .string) return error.InvalidAst;
+fn addColumn(table: *Table, definition_ptr: [*c]pg.PgQuery__ColumnDef) Error!void {
+    if (definition_ptr == null or definition_ptr.*.type_name == null) return error.InvalidAst;
+    const definition = definition_ptr.*;
+    const column_name = cString(definition.colname) orelse return error.InvalidAst;
+    if (table.columns.contains(column_name)) return error.DuplicateColumn;
+    const type_name = definition.type_name.*;
+    if (type_name.n_names == 0) return error.InvalidAst;
+    const database_type_value = nodeString(type_name.names[type_name.n_names - 1]) orelse
+        return error.InvalidAst;
 
     var nullable = true;
     var primary_key = false;
     var unique = false;
-    if (field(definition, "constraints")) |constraints| {
-        if (constraints != .array) return error.InvalidAst;
-        for (constraints.array.items) |item| {
-            const constraint = field(item, "Constraint") orelse continue;
-            const kind = field(constraint, "contype") orelse continue;
-            if (kind != .string) continue;
-            if (std.mem.eql(u8, kind.string, "CONSTR_NOTNULL")) nullable = false;
-            if (std.mem.eql(u8, kind.string, "CONSTR_PRIMARY")) {
-                nullable = false;
-                primary_key = true;
-                unique = true;
-            }
-            if (std.mem.eql(u8, kind.string, "CONSTR_UNIQUE")) unique = true;
+    for (nodeSlice(definition.constraints, definition.n_constraints)) |item| {
+        if (item.*.node_case != pg.PG_QUERY__NODE__NODE_CONSTRAINT) continue;
+        const kind = item.*.unnamed_0.constraint.*.contype;
+        if (kind == pg.PG_QUERY__CONSTR_TYPE__CONSTR_NOTNULL) nullable = false;
+        if (kind == pg.PG_QUERY__CONSTR_TYPE__CONSTR_PRIMARY) {
+            nullable = false;
+            primary_key = true;
+            unique = true;
         }
+        if (kind == pg.PG_QUERY__CONSTR_TYPE__CONSTR_UNIQUE) unique = true;
     }
 
-    const name = try table.allocator.dupe(u8, name_value.string);
+    const name = try table.allocator.dupe(u8, column_name);
     errdefer table.allocator.free(name);
-    const database_type = try table.allocator.dupe(u8, type_value.string);
+    const database_type = try table.allocator.dupe(u8, database_type_value);
     errdefer table.allocator.free(database_type);
     try table.columns.putNoClobber(table.allocator, name, .{
         .name = name,
@@ -346,7 +314,22 @@ fn addColumn(table: *Table, definition: std.json.Value) Error!void {
     });
 }
 
-fn field(value: std.json.Value, name: []const u8) ?std.json.Value {
-    if (value != .object) return null;
-    return value.object.get(name);
+fn nodeString(node: [*c]pg.PgQuery__Node) ?[]const u8 {
+    if (node == null or node.*.node_case != pg.PG_QUERY__NODE__NODE_STRING) return null;
+    return cString(node.*.unnamed_0.string.*.sval);
+}
+
+fn cString(value: [*c]u8) ?[]const u8 {
+    if (value == null) return null;
+    return std.mem.span(value);
+}
+
+fn nodeSlice(value: [*c][*c]pg.PgQuery__Node, len: usize) []const [*c]pg.PgQuery__Node {
+    if (len == 0) return &.{};
+    return value[0..len];
+}
+
+fn rawSlice(value: [*c][*c]pg.PgQuery__RawStmt, len: usize) []const [*c]pg.PgQuery__RawStmt {
+    if (len == 0) return &.{};
+    return value[0..len];
 }

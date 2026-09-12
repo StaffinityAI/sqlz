@@ -39,7 +39,7 @@ pub fn checkNamedSqlite(
     if (!source.backends.sqlite) return error.BackendNotSelected;
     var parsed = try parser.parse(allocator, source.sql);
     errdefer parsed.deinit();
-    var query = try ir.adapt(allocator, parsed.ast_json, parsed.rewritten.names);
+    var query = try ir.adapt(allocator, parsed.tree, parsed.rewritten.names);
     errdefer query.deinit();
     const produces_rows = query.projections.len != 0;
     if (source.cardinality == .exec and produces_rows) return error.UnexpectedResultColumns;
@@ -113,5 +113,5 @@ fn parseAndApply(
     if (std.mem.trim(u8, sql, &std.ascii.whitespace).len == 0) return;
     var parsed = try parser.parse(allocator, sql);
     defer parsed.deinit();
-    try schema.applyParserJson(parsed.ast_json);
+    try schema.applyParserTree(parsed.tree);
 }

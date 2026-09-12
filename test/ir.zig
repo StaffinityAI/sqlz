@@ -12,7 +12,7 @@ test "adapts a joined SELECT into stable checker IR" {
     defer parsed.deinit();
     var query = try ir.adapt(
         std.testing.allocator,
-        parsed.ast_json,
+        parsed.tree,
         parsed.rewritten.names,
     );
     defer query.deinit();
@@ -63,7 +63,7 @@ test "adapts INSERT UPDATE and DELETE targets" {
         defer parsed.deinit();
         var query = try ir.adapt(
             std.testing.allocator,
-            parsed.ast_json,
+            parsed.tree,
             parsed.rewritten.names,
         );
         defer query.deinit();
@@ -81,6 +81,6 @@ test "rejects multi-statement checked queries" {
     defer parsed.deinit();
     try std.testing.expectError(
         error.MultipleStatements,
-        ir.adapt(std.testing.allocator, parsed.ast_json, parsed.rewritten.names),
+        ir.adapt(std.testing.allocator, parsed.tree, parsed.rewritten.names),
     );
 }

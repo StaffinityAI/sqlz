@@ -19,7 +19,9 @@ parameters to first-use `$N` ordinals before parsing and retain the name mapping
 
 Build the pinned C source with Zig for the selected target. Do not use a
 platform-specific prebuilt archive. The checker consumes the resulting parse tree;
-it does not run SQL parsing at Zig comptime.
+it does not run SQL parsing at Zig comptime. Consume the generated protobuf-C
+`PgQuery__*` structs directly. JSON serialization and generic JSON-tree traversal
+are not part of the parser boundary.
 
 `libpg_query` is not an SQLite parser. SQLite-only syntax is recognized and
 validated by a narrow SQLite layer, while the shared subset is parsed through

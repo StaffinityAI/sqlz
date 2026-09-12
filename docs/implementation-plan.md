@@ -14,6 +14,7 @@ this slice.
 | Boundaries | Host parser separated from SQLite runtime | Complete |
 | Configuration | Pin and use Ziggy for strict project configuration | Complete |
 | Parser | Pin and compile `libpg_query` from source | Complete |
+| Parser | Traverse the typed protobuf-C AST directly, without JSON | Complete |
 | Parser | Portable named parameters and original-source diagnostic mapping | Complete |
 | Catalog | Replay common tables, columns, keys, indexes, ALTER, and DROP | Complete |
 | Migrations | Validate revision IDs, graph shape, and deterministic ordering | Complete |

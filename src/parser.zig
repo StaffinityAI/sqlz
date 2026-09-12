@@ -1,6 +1,8 @@
 const std = @import("std");
 const libpg_query = @import("libpg_query");
 
+pub const ast = libpg_query;
+
 pub const RewrittenSql = struct {
     sql: []u8,
     names: []const []const u8,
@@ -124,11 +126,11 @@ pub const ParseError = error{ EmptyInput, ParseError } || std.mem.Allocator.Erro
 
 pub const ParseResult = struct {
     rewritten: RewrittenSql,
-    ast_json: []const u8,
+    tree: *libpg_query.PgQuery__ParseResult,
     allocator: std.mem.Allocator,
 
     pub fn deinit(self: *ParseResult) void {
-        self.allocator.free(self.ast_json);
+        libpg_query.pg_query__parse_result__free_unpacked(self.tree, null);
         self.rewritten.deinit(self.allocator);
         self.* = undefined;
     }
@@ -162,8 +164,8 @@ pub fn parseDetailed(
     const terminated = try allocator.dupeZ(u8, rewritten.sql);
     defer allocator.free(terminated);
 
-    const native = libpg_query.pg_query_parse(terminated.ptr);
-    defer libpg_query.pg_query_free_parse_result(native);
+    const native = libpg_query.pg_query_parse_protobuf(terminated.ptr);
+    defer libpg_query.pg_query_free_protobuf_parse_result(native);
     if (native.@"error") |native_error| {
         const cursor: usize = if (native_error.*.cursorpos <= 0)
             0
@@ -179,10 +181,15 @@ pub fn parseDetailed(
             .rewritten_offset = cursor,
         } };
     }
-    const ast_json = try allocator.dupe(u8, std.mem.span(native.parse_tree));
+    const tree = libpg_query.pg_query__parse_result__unpack(
+        null,
+        native.parse_tree.len,
+        @ptrCast(native.parse_tree.data),
+    );
+    if (tree == null) return error.OutOfMemory;
     return .{ .ok = .{
         .rewritten = rewritten,
-        .ast_json = ast_json,
+        .tree = tree,
         .allocator = allocator,
     } };
 }

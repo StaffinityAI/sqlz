@@ -56,19 +56,21 @@ pub fn build(b: *std.Build) !void {
         .root_module = libpg_query_mod,
     });
     const translate_pg_query = b.addTranslateC(.{
-        .root_source_file = libpg_query_root.path(b, "pg_query.h"),
+        .root_source_file = b.path("src/libpg_query_wrapper.h"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
     translate_pg_query.addIncludePath(libpg_query_root);
+    translate_pg_query.addIncludePath(libpg_query_root.path(b, "vendor"));
+    const pg_query_bindings = translate_pg_query.createModule();
     const parser_mod = b.addModule("sqlz_parser", .{
         .root_source_file = b.path("src/parser.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
         .imports = &.{
-            .{ .name = "libpg_query", .module = translate_pg_query.createModule() },
+            .{ .name = "libpg_query", .module = pg_query_bindings },
         },
     });
     parser_mod.linkLibrary(libpg_query);
@@ -76,6 +78,7 @@ pub fn build(b: *std.Build) !void {
         .root_source_file = b.path("src/catalog.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{.{ .name = "sqlz_parser", .module = parser_mod }},
     });
     const migrations_mod = b.addModule("sqlz_migrations", .{
         .root_source_file = b.path("src/migrations.zig"),
@@ -87,6 +90,7 @@ pub fn build(b: *std.Build) !void {
         .root_source_file = b.path("src/ir.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{.{ .name = "libpg_query", .module = pg_query_bindings }},
     });
     const analysis_mod = b.addModule("sqlz_analysis", .{
         .root_source_file = b.path("src/analysis.zig"),
