@@ -22,6 +22,12 @@ test "adapts a joined SELECT into stable checker IR" {
     try expectStrings(&.{ "users", "profiles" }, query.relations);
     try expectStrings(&.{"id"}, query.parameters);
     try expectStrings(&.{ "name", "profile_label" }, query.result_columns);
+    try std.testing.expectEqualStrings("u", query.relation_bindings[0].alias.?);
+    try std.testing.expectEqualStrings("p", query.relation_bindings[1].alias.?);
+    try std.testing.expect(!query.relation_bindings[0].nullable);
+    try std.testing.expect(query.relation_bindings[1].nullable);
+    try std.testing.expectEqualStrings("u", query.projections[0].column.?.qualifier.?);
+    try std.testing.expectEqualStrings("name", query.projections[0].column.?.name);
 }
 
 fn expectStrings(expected: []const []const u8, actual: []const []const u8) !void {

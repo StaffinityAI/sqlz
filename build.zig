@@ -98,6 +98,15 @@ pub fn build(b: *std.Build) !void {
         .target = target,
         .optimize = optimize,
     });
+    const analysis_mod = b.addModule("sqlz_analysis", .{
+        .root_source_file = b.path("src/analysis.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "sqlz_ir", .module = ir_mod },
+            .{ .name = "sqlz_catalog", .module = catalog_mod },
+        },
+    });
 
     const zqlite_dep = b.lazyDependency("zqlite", .{
         .target = target,
@@ -215,6 +224,25 @@ pub fn build(b: *std.Build) !void {
     test_step.dependOn(&run_ir.step);
     const ir_step = b.step("test-ir", "Run checker IR adapter tests");
     ir_step.dependOn(&run_ir.step);
+
+    const analysis_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/analysis.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "sqlz_analysis", .module = analysis_mod },
+                .{ .name = "sqlz_ir", .module = ir_mod },
+                .{ .name = "sqlz_parser", .module = parser_mod },
+                .{ .name = "sqlz_catalog", .module = catalog_mod },
+            },
+        }),
+    });
+    const run_analysis = b.addRunArtifact(analysis_tests);
+    test_step.dependOn(&run_analysis.step);
+    const analysis_step = b.step("test-analysis", "Run query semantic analysis tests");
+    analysis_step.dependOn(&run_analysis.step);
 
     if (zqlite_dep) |dep| {
         sqlz_mod.addImport("zqlite", dep.module("zqlite"));

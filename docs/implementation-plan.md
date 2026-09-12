@@ -22,8 +22,9 @@ this slice.
 | Catalog | Remaining SQLite 0.1 DDL objects and constraints | In progress |
 | Parser | SQLite-only syntax validation and capability gates | Not started |
 | Checker | Adapt statements, relations, parameters, and result names into IR | Complete |
-| Checker | Add typed expression IR for semantic inference | In progress |
-| Checker | Resolve names and infer parameter/result types and nullability | Not started |
+| Checker | Column-reference expression IR with aliases and outer-join facts | Complete |
+| Checker | Resolve projected columns, scalar types, and nullability | Complete |
+| Checker | Infer parameter and non-column expression types | In progress |
 | Inputs | Discover named `.sql` files and embedded Zig declarations | Not started |
 | Generator | Deterministic build-cache Zig binding generation | Not started |
 | Acceptance | Convert examples to generated checked bindings | Not started |
