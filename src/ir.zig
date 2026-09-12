@@ -13,9 +13,17 @@ pub const ColumnReference = struct {
     name: []const u8,
 };
 
+pub const TypeHint = enum { integer, real, text, blob, boolean };
+
+pub const ExpressionHint = struct {
+    scalar_type: TypeHint,
+    nullable: bool,
+};
+
 pub const Projection = struct {
     name: []const u8,
     column: ?ColumnReference,
+    hint: ?ExpressionHint,
 };
 
 pub const ParameterUse = struct {
@@ -102,6 +110,7 @@ pub fn adapt(
             try projections.append(storage, .{
                 .name = owned_name,
                 .column = try columnReference(storage, result),
+                .hint = try expressionHint(result),
             });
         }
     }
@@ -136,6 +145,91 @@ pub fn adapt(
         .result_columns = try result_columns.toOwnedSlice(storage),
         .projections = try projections.toOwnedSlice(storage),
     };
+}
+
+fn expressionHint(result: std.json.Value) Error!?ExpressionHint {
+    const expression = field(result, "val") orelse return error.InvalidAst;
+    return inferExpression(expression);
+}
+
+fn inferExpression(expression: std.json.Value) Error!?ExpressionHint {
+    if (field(expression, "ColumnRef") != null) return null;
+    if (field(expression, "A_Const")) |constant| {
+        if (field(constant, "ival") != null) return .{ .scalar_type = .integer, .nullable = false };
+        if (field(constant, "fval") != null) return .{ .scalar_type = .real, .nullable = false };
+        if (field(constant, "sval") != null) return .{ .scalar_type = .text, .nullable = false };
+        if (field(constant, "boolval") != null) return .{ .scalar_type = .boolean, .nullable = false };
+        return null;
+    }
+    if (field(expression, "FuncCall")) |call| {
+        const names = field(call, "funcname") orelse return error.InvalidAst;
+        if (names != .array or names.array.items.len == 0) return error.InvalidAst;
+        const name = try stringField(names.array.items[names.array.items.len - 1]);
+        if (std.ascii.eqlIgnoreCase(name, "count"))
+            return .{ .scalar_type = .integer, .nullable = false };
+        if (std.ascii.eqlIgnoreCase(name, "lower") or
+            std.ascii.eqlIgnoreCase(name, "upper") or
+            std.ascii.eqlIgnoreCase(name, "trim"))
+            return .{ .scalar_type = .text, .nullable = true };
+        return null;
+    }
+    if (field(expression, "A_Expr")) |binary| {
+        const left_value = field(binary, "lexpr") orelse return null;
+        const right_value = field(binary, "rexpr") orelse return null;
+        const left = try inferExpression(left_value);
+        const right = try inferExpression(right_value);
+        const operator = expressionOperator(binary) orelse return null;
+        if (std.mem.eql(u8, operator, "=") or std.mem.eql(u8, operator, "<>") or
+            std.mem.eql(u8, operator, "<") or std.mem.eql(u8, operator, ">") or
+            std.mem.eql(u8, operator, "<=") or std.mem.eql(u8, operator, ">=") or
+            std.ascii.eqlIgnoreCase(operator, "~~"))
+            return .{ .scalar_type = .boolean, .nullable = true };
+        if (std.mem.eql(u8, operator, "+") or std.mem.eql(u8, operator, "-") or
+            std.mem.eql(u8, operator, "*") or std.mem.eql(u8, operator, "/"))
+        {
+            if (left) |left_hint| {
+                if (right) |right_hint| {
+                    const scalar_type: TypeHint = if (left_hint.scalar_type == .real or
+                        right_hint.scalar_type == .real) .real else .integer;
+                    return .{
+                        .scalar_type = scalar_type,
+                        .nullable = left_hint.nullable or right_hint.nullable,
+                    };
+                }
+            }
+        }
+        return null;
+    }
+    if (field(expression, "SubLink")) |link| {
+        const select_value = field(link, "subselect") orelse return null;
+        const select = field(select_value, "SelectStmt") orelse select_value;
+        const targets = field(select, "targetList") orelse return null;
+        if (targets != .array or targets.array.items.len != 1) return null;
+        const target = field(targets.array.items[0], "ResTarget") orelse return null;
+        const value = field(target, "val") orelse return null;
+        return inferExpression(value);
+    }
+    if (field(expression, "TypeCast")) |cast| {
+        const type_name = field(cast, "typeName") orelse return null;
+        const names = field(type_name, "names") orelse return null;
+        if (names != .array or names.array.items.len == 0) return null;
+        const name = try stringField(names.array.items[names.array.items.len - 1]);
+        if (std.ascii.eqlIgnoreCase(name, "int2") or
+            std.ascii.eqlIgnoreCase(name, "int4") or
+            std.ascii.eqlIgnoreCase(name, "int8") or
+            std.ascii.eqlIgnoreCase(name, "integer"))
+            return .{ .scalar_type = .integer, .nullable = true };
+        if (std.ascii.eqlIgnoreCase(name, "text") or
+            std.ascii.eqlIgnoreCase(name, "varchar"))
+            return .{ .scalar_type = .text, .nullable = true };
+    }
+    return null;
+}
+
+fn expressionOperator(expression: std.json.Value) ?[]const u8 {
+    const names = field(expression, "name") orelse return null;
+    if (names != .array or names.array.items.len == 0) return null;
+    return stringField(names.array.items[names.array.items.len - 1]) catch null;
 }
 
 fn collectStatementParameterUses(

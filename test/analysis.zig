@@ -143,3 +143,28 @@ test "infers INSERT values and INSERT SELECT parameters from target columns" {
         }
     }
 }
+
+test "infers arithmetic over scalar COUNT subqueries" {
+    var schema_sql = try parser.parse(
+        std.testing.allocator,
+        "CREATE TABLE organization_members (user_id BIGINT NOT NULL);" ++
+            "CREATE TABLE workspace_members (user_id BIGINT NOT NULL)",
+    );
+    defer schema_sql.deinit();
+    var schema = catalog.Catalog.init(std.testing.allocator);
+    defer schema.deinit();
+    try schema.applyParserJson(schema_sql.ast_json);
+    var parsed = try parser.parse(
+        std.testing.allocator,
+        "SELECT (SELECT COUNT(*) FROM organization_members WHERE user_id=:user) + " ++
+            "(SELECT COUNT(*) FROM workspace_members WHERE user_id=:user) AS total",
+    );
+    defer parsed.deinit();
+    var query = try ir.adapt(std.testing.allocator, parsed.ast_json, parsed.rewritten.names);
+    defer query.deinit();
+    var result = try analysis.analyze(std.testing.allocator, &schema, &query);
+    defer result.deinit();
+    try std.testing.expectEqual(analysis.ScalarType.integer, result.columns[0].scalar_type);
+    try std.testing.expect(!result.columns[0].nullable);
+    try std.testing.expectEqual(analysis.ScalarType.integer, result.parameters[0].scalar_type);
+}

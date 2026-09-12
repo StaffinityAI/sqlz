@@ -59,10 +59,20 @@ pub fn analyze(
             .scalar_type = .unknown,
             .nullable = true,
         };
-        const reference = projection.column orelse continue;
-        const resolved = try resolveColumn(schema, query.relation_bindings, reference);
-        result.scalar_type = scalarType(resolved.column.database_type);
-        result.nullable = resolved.column.nullable or resolved.relation_nullable;
+        if (projection.column) |reference| {
+            const resolved = try resolveColumn(schema, query.relation_bindings, reference);
+            result.scalar_type = scalarType(resolved.column.database_type);
+            result.nullable = resolved.column.nullable or resolved.relation_nullable;
+        } else if (projection.hint) |hint| {
+            result.scalar_type = switch (hint.scalar_type) {
+                .integer => .integer,
+                .real => .real,
+                .text => .text,
+                .blob => .blob,
+                .boolean => .boolean,
+            };
+            result.nullable = hint.nullable;
+        }
     }
     const parameters = try storage.alloc(ResultColumn, query.parameter_uses.len);
     for (query.parameter_uses, parameters) |use, *result| {
@@ -72,11 +82,32 @@ pub fn analyze(
             .nullable = !use.integer_hint,
         };
         const reference = use.column orelse continue;
-        const resolved = try resolveColumn(schema, query.relation_bindings, reference);
+        const resolved = try resolveParameterColumn(schema, query.relation_bindings, reference);
         result.scalar_type = scalarType(resolved.column.database_type);
         result.nullable = resolved.column.nullable;
     }
     return .{ .arena = arena, .columns = columns, .parameters = parameters };
+}
+
+fn resolveParameterColumn(
+    schema: *const catalog.Catalog,
+    bindings: []const ir.Relation,
+    reference: ir.ColumnReference,
+) Error!ResolvedColumn {
+    if (reference.qualifier != null) return resolveColumn(schema, bindings, reference);
+    var found: ?ResolvedColumn = null;
+    for (bindings) |binding| {
+        const table = schema.table(binding.name) orelse return error.MissingRelation;
+        const column = table.columns.getPtr(reference.name) orelse continue;
+        if (found) |prior| {
+            if (!std.ascii.eqlIgnoreCase(prior.column.database_type, column.database_type) or
+                prior.column.nullable != column.nullable)
+                return error.AmbiguousColumn;
+        } else {
+            found = .{ .column = column, .relation_nullable = false };
+        }
+    }
+    return found orelse error.MissingColumn;
 }
 
 fn resolveColumn(

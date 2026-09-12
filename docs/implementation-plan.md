@@ -25,7 +25,8 @@ this slice.
 | Checker | Column-reference expression IR with aliases and outer-join facts | Complete |
 | Checker | Resolve projected columns, scalar types, and nullability | Complete |
 | Checker | Infer parameters from comparisons, writes, and pagination | Complete |
-| Checker | Infer non-column expressions, functions, CTEs, and conflicts | In progress |
+| Checker | Infer literals, common functions, arithmetic, casts, and scalar subqueries | Complete |
+| Checker | Resolve CTE/set-operation shapes and conflicting constraints | In progress |
 | Inputs | Discover named `.sql` files and embedded Zig declarations | Not started |
 | Generator | Deterministic build-cache Zig binding generation | Not started |
 | Acceptance | Convert examples to generated checked bindings | Not started |
