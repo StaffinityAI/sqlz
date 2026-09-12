@@ -40,7 +40,7 @@ this slice.
 ## Current next steps
 
 1. Assemble discovered query variants into one generated build-cache module.
-2. Resolve CTE/set-operation shapes used by the recursive example.
+2. Generalize set-operation typing and reject conflicting parameter constraints.
 3. Complete the remaining SQLite 0.1 DDL subset and dialect gates.
 4. Convert the examples to generated bindings and add embedded-Zig discovery.
 5. Harden diagnostics, source limits, and the supported dependency matrix.
