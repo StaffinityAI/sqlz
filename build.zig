@@ -81,6 +81,17 @@ pub fn build(b: *std.Build) !void {
         .root_source_file = b.path("src/migrations.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{.{ .name = "ziggy", .module = ziggy_dep.module("ziggy") }},
+    });
+    const checker_mod = b.addModule("sqlz_checker", .{
+        .root_source_file = b.path("src/checker.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "sqlz_parser", .module = parser_mod },
+            .{ .name = "sqlz_catalog", .module = catalog_mod },
+            .{ .name = "sqlz_migrations", .module = migrations_mod },
+        },
     });
 
     const zqlite_dep = b.lazyDependency("zqlite", .{
@@ -156,6 +167,7 @@ pub fn build(b: *std.Build) !void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "sqlz_migrations", .module = migrations_mod },
+                .{ .name = "ziggy", .module = ziggy_dep.module("ziggy") },
             },
         }),
     });
@@ -163,6 +175,24 @@ pub fn build(b: *std.Build) !void {
     test_step.dependOn(&run_migrations.step);
     const migrations_step = b.step("test-migrations", "Run migration graph tests");
     migrations_step.dependOn(&run_migrations.step);
+
+    const checker_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/checker.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "sqlz_checker", .module = checker_mod },
+                .{ .name = "sqlz_catalog", .module = catalog_mod },
+                .{ .name = "sqlz_migrations", .module = migrations_mod },
+            },
+        }),
+    });
+    const run_checker = b.addRunArtifact(checker_tests);
+    test_step.dependOn(&run_checker.step);
+    const checker_step = b.step("test-checker", "Run offline checker pipeline tests");
+    checker_step.dependOn(&run_checker.step);
 
     if (zqlite_dep) |dep| {
         sqlz_mod.addImport("zqlite", dep.module("zqlite"));

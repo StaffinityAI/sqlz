@@ -17,8 +17,9 @@ this slice.
 | Parser | Portable named parameters and original-source diagnostic mapping | Complete |
 | Catalog | Replay common tables, columns, keys, indexes, ALTER, and DROP | Complete |
 | Migrations | Validate revision IDs, graph shape, and deterministic ordering | Complete |
-| Migrations | Parse manifests and discover revision inputs | Not started |
-| Catalog | Ordered, atomic migration replay and remaining 0.1 DDL | In progress |
+| Migrations | Parse manifests and discover revision inputs | Complete |
+| Catalog | Deterministic, atomic common + SQLite migration replay | Complete |
+| Catalog | Remaining SQLite 0.1 DDL objects and constraints | In progress |
 | Parser | SQLite-only syntax validation and capability gates | Not started |
 | Checker | Adapt query AST into checker IR | Not started |
 | Checker | Resolve names and infer parameter/result types and nullability | Not started |
@@ -31,8 +32,8 @@ this slice.
 
 ## Current next steps
 
-1. Connect ordered revision inputs to parser-backed catalog replay.
-2. Parse strict Ziggy manifests and discover migration directories/files.
-3. Complete atomic replay and the remaining SQLite 0.1 DDL subset.
-4. Introduce a typed query IR over the `libpg_query` tree.
-5. Resolve the ten example query families and generate their Zig bindings.
+1. Complete the remaining SQLite 0.1 DDL subset and dialect gates.
+2. Introduce a typed query IR over the `libpg_query` tree.
+3. Resolve names and infer types/nullability for the ten query families.
+4. Discover named SQL inputs and generate deterministic Zig bindings.
+5. Convert the examples to generated bindings and harden diagnostics/limits.

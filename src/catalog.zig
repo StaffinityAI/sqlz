@@ -75,6 +75,64 @@ pub const Catalog = struct {
         return self.tables.getPtr(name);
     }
 
+    pub fn clone(self: *const Catalog, allocator: std.mem.Allocator) std.mem.Allocator.Error!Catalog {
+        var copy = Catalog.init(allocator);
+        errdefer copy.deinit();
+
+        var tables = self.tables.iterator();
+        while (tables.next()) |entry| {
+            const source = entry.value_ptr;
+            var table_copy: Table = .{
+                .allocator = allocator,
+                .name = try allocator.dupe(u8, source.name),
+            };
+            errdefer table_copy.deinit();
+            var columns = source.columns.iterator();
+            while (columns.next()) |column_entry| {
+                const column = column_entry.value_ptr;
+                const name = try allocator.dupe(u8, column.name);
+                errdefer allocator.free(name);
+                const database_type = try allocator.dupe(u8, column.database_type);
+                errdefer allocator.free(database_type);
+                try table_copy.columns.putNoClobber(allocator, name, .{
+                    .name = name,
+                    .database_type = database_type,
+                    .nullable = column.nullable,
+                    .primary_key = column.primary_key,
+                    .unique = column.unique,
+                });
+            }
+            try copy.tables.putNoClobber(allocator, table_copy.name, table_copy);
+        }
+
+        var indexes = self.indexes.iterator();
+        while (indexes.next()) |entry| {
+            const source = entry.value_ptr;
+            const name = try allocator.dupe(u8, source.name);
+            errdefer allocator.free(name);
+            const table_name = try allocator.dupe(u8, source.table_name);
+            errdefer allocator.free(table_name);
+            const columns = try allocator.alloc([]const u8, source.columns.len);
+            var copied: usize = 0;
+            errdefer {
+                for (columns[0..copied]) |column| allocator.free(column);
+                allocator.free(columns);
+            }
+            for (source.columns, 0..) |column, index| {
+                columns[index] = try allocator.dupe(u8, column);
+                copied += 1;
+            }
+            try copy.indexes.putNoClobber(allocator, name, .{
+                .allocator = allocator,
+                .name = name,
+                .table_name = table_name,
+                .columns = columns,
+                .unique = source.unique,
+            });
+        }
+        return copy;
+    }
+
     pub fn applyParserJson(self: *Catalog, ast_json: []const u8) Error!void {
         var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, ast_json, .{});
         defer parsed.deinit();
