@@ -295,6 +295,7 @@ pub const Catalog = struct {
                     try self.tables.putNoClobber(self.allocator, removed.value.name, removed.value);
                     return error.MissingTable;
                 }
+                try self.removeIndexesForTable(name);
                 removed.value.deinit();
             } else if (node.remove_type == pg.PG_QUERY__OBJECT_TYPE__OBJECT_INDEX) {
                 var removed = self.indexes.fetchOrderedRemove(name) orelse
@@ -320,6 +321,20 @@ pub const Catalog = struct {
             try self.renameColumn(table_name, old_name, new_name);
         } else {
             return error.UnsupportedStatement;
+        }
+    }
+
+    fn removeIndexesForTable(self: *Catalog, table_name: []const u8) Error!void {
+        var names: std.ArrayList([]const u8) = .empty;
+        defer names.deinit(self.allocator);
+        var indexes = self.indexes.iterator();
+        while (indexes.next()) |entry| {
+            if (std.mem.eql(u8, entry.value_ptr.table_name, table_name))
+                try names.append(self.allocator, entry.key_ptr.*);
+        }
+        for (names.items) |name| {
+            var removed = self.indexes.fetchOrderedRemove(name) orelse continue;
+            removed.value.deinit();
         }
     }
 

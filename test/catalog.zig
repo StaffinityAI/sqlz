@@ -153,3 +153,41 @@ test "replays views with projected column metadata and DROP VIEW" {
     try schema.applyParserTree(drop.tree);
     try std.testing.expect(schema.table("user_names") == null);
 }
+
+test "accepts generated columns foreign checks and partial indexes" {
+    var parsed = try parser.parseSqlite(
+        std.testing.allocator,
+        "CREATE TABLE parents (id INTEGER PRIMARY KEY);" ++
+            "CREATE TABLE children (" ++
+            "id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL REFERENCES parents(id), " ++
+            "score INTEGER CHECK(score >= 0), " ++
+            "doubled INTEGER GENERATED ALWAYS AS (score * 2) STORED, " ++
+            "FOREIGN KEY (parent_id) REFERENCES parents(id));" ++
+            "CREATE INDEX positive_children ON children(score) WHERE score > 0",
+    );
+    defer parsed.deinit();
+
+    var schema = catalog.Catalog.init(std.testing.allocator);
+    defer schema.deinit();
+    try schema.applyParserTree(parsed.tree);
+    const children = schema.table("children").?;
+    try std.testing.expect(children.columns.get("doubled") != null);
+    try std.testing.expect(!children.columns.get("parent_id").?.nullable);
+    try std.testing.expect(schema.indexes.get("positive_children") != null);
+}
+
+test "dropping a table removes its indexes" {
+    var parsed = try parser.parse(
+        std.testing.allocator,
+        "CREATE TABLE users (id BIGINT);" ++
+            "CREATE INDEX users_id_key ON users(id);" ++
+            "DROP TABLE users",
+    );
+    defer parsed.deinit();
+
+    var schema = catalog.Catalog.init(std.testing.allocator);
+    defer schema.deinit();
+    try schema.applyParserTree(parsed.tree);
+    try std.testing.expect(schema.table("users") == null);
+    try std.testing.expect(schema.indexes.get("users_id_key") == null);
+}

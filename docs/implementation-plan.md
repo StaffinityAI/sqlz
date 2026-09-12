@@ -20,7 +20,7 @@ this slice.
 | Migrations | Validate revision IDs, graph shape, and deterministic ordering | Complete |
 | Migrations | Parse manifests and discover revision inputs | Complete |
 | Catalog | Deterministic, atomic common + SQLite migration replay | Complete |
-| Catalog | Remaining SQLite 0.1 DDL objects and constraints | In progress |
+| Catalog | Remaining SQLite 0.1 DDL objects and constraints | Complete |
 | Parser | SQLite-only syntax validation and capability gates | In progress |
 | Checker | Adapt statements, relations, parameters, and result names into IR | Complete |
 | Checker | Column-reference expression IR with aliases and outer-join facts | Complete |
