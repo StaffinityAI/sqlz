@@ -41,12 +41,13 @@ recover from; it does not stop at the first parse or semantic error.
 
 The syntax package contains:
 
-- one lexer that preserves comments and source positions and recognizes named
-  `:parameters` without confusing PostgreSQL `::casts`;
-- common AST nodes for statements, expressions, names, queries, and DDL;
-- SQLite and PostgreSQL parser policies for dialect-specific constructs;
-- a formatter used only for debugging and snapshot tests, not for rewriting
-  user SQL.
+- a small lexer that recognizes and rewrites named `:parameters` without
+  confusing strings, comments, or PostgreSQL `::casts`;
+- pinned `libpg_query` source, built for the host, for common and PostgreSQL
+  syntax trees;
+- an adapter from the parser tree to checker IR and source locations;
+- a narrow SQLite parser/validation policy for constructs outside PostgreSQL
+  grammar.
 
 The parser must not import either database driver. Unsupported syntax produces a
 normal diagnostic rather than an `unreachable`, assertion failure, or inferred

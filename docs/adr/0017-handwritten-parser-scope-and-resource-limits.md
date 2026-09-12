@@ -1,6 +1,6 @@
 # ADR 0017: Handwritten parser scope and resource limits
 
-- Status: Accepted
+- Status: Superseded by [ADR 0031](0031-libpg-query-parser.md)
 - Date: 2026-09-03
 
 ## Context

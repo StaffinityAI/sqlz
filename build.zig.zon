@@ -2,6 +2,14 @@
     .name = .sqlz,
     .version = "0.0.1",
     .dependencies = .{
+        .ziggy = .{
+            .url = "git+https://github.com/kristoff-it/ziggy.git#0b61581980d6905dd4108a618d602f5778593122",
+            .hash = "ziggy-0.1.0-kTg8v0NWBgAyFtS5awtOlKnC7ddvefR_I0Xh3XQyi7p1",
+        },
+        .libpg_query_source = .{
+            .url = "git+https://github.com/pganalyze/libpg_query.git#204fbdbd3ed5f8691ab358e49f1fc5397b4679e2",
+            .hash = "N-V-__8AABam8AGXKt6JaO4YJhtbE2eALOH3ykvUnCh-FnLG",
+        },
         .zqlite = .{
             .url = "git+https://github.com/karlseguin/zqlite.zig.git#b519eea9b1a2b5fcad68af6d0629e717e8746684",
             .hash = "zqlite-0.0.1-RWLaY8M8nAB4m0tlSpT9A5PGUwX_JfWC5VlPjLe7lG2Q",

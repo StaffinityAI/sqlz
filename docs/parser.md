@@ -1,45 +1,48 @@
 # SQL parser
 
-The checker contains a handwritten, error-recovering SQL parser. It performs no
-SQL parsing in Zig comptime. Statements use recursive descent and expressions use
-a Pratt parser with dialect- and profile-specific parselets.
+The checker uses pganalyze's `libpg_query` as its common SQL and PostgreSQL parser.
+The dependency is pinned to release 18.0.0, which embeds the PostgreSQL 18.4
+parser, and is compiled from source for the selected Zig target. SQL parsing is a
+host-tool operation and never runs at Zig comptime.
 
 ## Pipeline
 
-Bytes are retained by a source manager, decoded as UTF-8, tokenized with exact
-byte spans, parsed into an arena-owned AST, and analyzed only if a usable statement
-was recovered. Tokens and AST nodes refer to immutable source slices; callers must
-keep the source manager alive for the complete checking invocation.
+Bytes are retained by a source manager and decoded as UTF-8. Portable named
+parameters are lexically rewritten to PostgreSQL `$N` parameters in first-use
+order, preserving a mapping back to their names and original source. The rewritten
+statement is parsed by `libpg_query`; its protobuf/JSON tree is adapted into the
+checker IR and analyzed only after a usable statement was returned.
 
-The lexer handles quoted identifiers, escaped strings, dollar-quoted PostgreSQL
-strings, comments, numeric forms, named `:parameters`, and dialect operators. A
-colon inside a string, comment, cast, or operator is never a parameter.
+The parameter lexer handles quoted identifiers, escaped strings, comments, and
+named `:parameters`. A colon inside a string, quoted identifier, comment, cast, or
+operator is never a parameter. The PostgreSQL scanner and grammar remain owned by
+`libpg_query`.
 
 ## Grammar and versions
 
-The common grammar covers schema statements needed for replay and SELECT, INSERT,
-UPDATE, DELETE, and WITH queries. Dialect modules add SQLite and PostgreSQL forms.
-Every non-common production has a minimum/maximum profile gate and capability
-requirements. Unsupported syntax receives a targeted diagnostic; it is never
-silently accepted as opaque SQL when schema or result inference depends on it.
+The common query grammar covers SELECT, INSERT, UPDATE, DELETE, WITH, conflict
+clauses, and RETURNING through `libpg_query`. Dialect policies add capability
+checks. A narrow SQLite syntax layer handles SQLite-only forms such as pragmas,
+`INSERT OR IGNORE`, and table options; those forms are not presented unchanged to
+the PostgreSQL parser.
 
-Operator binding powers are tables reviewed against the supported engines. The
-AST preserves qualification, aliases, joins, conflict clauses, returning clauses,
-casts, null tests, ordering, and source spans. Identifier comparison follows the
-backend: unquoted PostgreSQL names fold to lowercase, quoted names are exact, and
-SQLite lookup follows SQLite semantics.
+The adapted AST preserves qualification, aliases, joins, conflict clauses,
+returning clauses, casts, null tests, ordering, and source locations. Identifier
+comparison follows the backend: unquoted PostgreSQL names fold to lowercase,
+quoted names are exact, and SQLite lookup follows SQLite semantics.
 
 ## Recovery
 
-Recovery synchronizes at statement terminators, clause starters, comma-delimited
-lists, and balanced closing delimiters. Diagnostics contain a primary span,
-labels, notes, stable code, backend/profile, and actionable fix when known. Later
-analysis does not cascade from explicitly poisoned nodes.
+The checker converts parser errors and cursor positions back through the parameter
+rewrite map. Diagnostics contain a primary span, labels, notes, stable code,
+backend/profile, and actionable fix when known. Independent query files continue
+after a failed statement; semantic analysis does not run for that statement.
 
 ## Limits and conformance
 
-The parser enforces the limits in [configuration.md](configuration.md). Tests use
-golden ASTs and diagnostics, property tests, mutation tests, and fuzzing. Differential
-CI sends accepted syntax to every supported PostgreSQL major and SQLite capability
+The parser wrapper enforces the limits in [configuration.md](configuration.md).
+Tests use real-world acceptance queries, golden adapted ASTs and diagnostics,
+property tests, and fuzzing of the parameter rewrite boundary. Differential CI
+sends accepted syntax to every supported PostgreSQL major and SQLite capability
 profile. Engine acceptance does not replace semantic checking, but disagreement is
-a release-blocking parser issue unless documented as an intentional subset.
+a release-blocking issue unless documented as an intentional subset.

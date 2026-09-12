@@ -27,7 +27,7 @@ be replaced only by a new ADR. Records use [0000-template.md](0000-template.md).
 | [0014](0014-custom-codecs-and-split-registration.md) | Custom codecs | Accepted |
 | [0015](0015-strict-types-sqlite-validation-and-postgres-arrays.md) | Strict typing and arrays | Accepted |
 | [0016](0016-database-version-capability-and-namespace-profiles.md) | Database profiles | Accepted |
-| [0017](0017-handwritten-parser-scope-and-resource-limits.md) | Parser and limits | Accepted |
+| [0017](0017-handwritten-parser-scope-and-resource-limits.md) | Parser and limits | Superseded by 0031 |
 | [0018](0018-ziggy-for-versioned-project-metadata.md) | Ziggy metadata | Accepted |
 | [0019](0019-builtin-catalogs-supplements-and-polymorphism.md) | Catalog model | Accepted |
 | [0020](0020-source-oriented-diagnostics-and-machine-output.md) | Diagnostics and machine output | Accepted |
@@ -41,3 +41,4 @@ be replaced only by a new ADR. Records use [0000-template.md](0000-template.md).
 | [0028](0028-persisted-format-and-api-compatibility.md) | Compatibility | Accepted |
 | [0029](0029-supported-platform-and-conformance-matrix.md) | Platform and conformance matrix | Accepted |
 | [0030](0030-documentation-authority-adr-governance-and-performance-gates.md) | Documentation governance and performance | Accepted |
+| [0031](0031-libpg-query-parser.md) | libpg_query parser boundary | Accepted |

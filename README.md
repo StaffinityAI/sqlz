@@ -1,12 +1,13 @@
 # sqlz
 
-sqlz is a planned SQL toolkit for Zig, inspired by Rust's SQLx. It aims to keep
+sqlz is an early SQL toolkit for Zig, inspired by Rust's SQLx. It aims to keep
 applications close to handwritten SQL while providing offline query checking,
 generated type-safe bindings, and revision-based migrations.
 
 > [!IMPORTANT]
-> sqlz is currently in the design phase. The public API described in the design
-> documents has not been implemented yet.
+> The first SQLite query/runtime slice is implemented. The offline semantic
+> checker, generated bindings, migrations, PostgreSQL runtime, and stable public
+> API are still under development.
 
 ## Planned features
 
@@ -15,8 +16,8 @@ generated type-safe bindings, and revision-based migrations.
 - Lazy backend dependencies, with neither backend enabled by default and support
   for enabling either or both.
 - Checked queries authored as named `.sql` files or typed Zig declarations.
-- A custom host-side SQL parser and checker with precise diagnostics—no SQL
-  parsing or semantic analysis at comptime.
+- A host-side checker using pinned `libpg_query` for shared SQL syntax, with a
+  narrow SQLite extension layer—no SQL parsing or semantic analysis at comptime.
 - Offline schema reconstruction from migrations, without a development database.
 - Typed named parameters, typed borrowed rows, explicit owned-row conversion,
   and custom codecs for application types.
@@ -32,7 +33,7 @@ connections, transactions, allocation, and domain models.
 
 ## Design documents
 
-The pre-implementation specification lives in [`docs/`](docs/README.md):
+The evolving specification lives in [`docs/`](docs/README.md):
 
 - [Architecture](docs/architecture.md)
 - [Project configuration](docs/configuration.md)
@@ -51,16 +52,21 @@ The pre-implementation specification lives in [`docs/`](docs/README.md):
 - [Design completeness audit](docs/design-audit.md) and
   [architecture decision records](docs/adr/README.md)
 
-These documents define the intended 0.1 behavior and implementation milestones.
-Until the first implementation exists, they are the source of truth for project
-scope and API design.
+These documents define the intended 0.1 behavior and implementation milestones;
+the current slice implements only the subset described below.
 
-## Status
+## Current slice
 
-The immediate next milestone is the checker foundation: source management,
-diagnostics, SQL lexer/parser infrastructure, migration manifest loading, and
-revision graph validation. See the [implementation roadmap](docs/README.md#implementation-roadmap)
-for the complete sequence and acceptance gates.
+`zig build test` exercises typed SQLite queries across exec, one, optional, and
+many cardinalities; borrowed and owned rows; nullable joins; recursive CTEs;
+upserts with RETURNING; transaction commit/rollback; portable named-parameter
+rewriting; and `libpg_query` parsing. Each scenario under `examples/` is also an
+independently runnable executable, for example `zig build run-account_crud`.
+
+The immediate next milestone is the offline semantic checker and binding
+generator on top of this parser/runtime foundation. See the
+[implementation roadmap](docs/README.md#implementation-roadmap) for the complete
+sequence and acceptance gates.
 
 ## License
 
