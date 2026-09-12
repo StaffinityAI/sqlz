@@ -90,3 +90,29 @@ test "syntax diagnostics map libpg_query positions to the original SQL" {
         },
     }
 }
+
+test "SQLite normalization accepts real-world conflict and table options" {
+    var insert = try parser.parseSqlite(
+        std.testing.allocator,
+        "INSERT OR IGNORE INTO memberships(user_id) VALUES (:user_id)",
+    );
+    defer insert.deinit();
+    try std.testing.expectEqual(
+        @as(c_uint, parser.ast.PG_QUERY__NODE__NODE_INSERT_STMT),
+        insert.tree.stmts[0].*.stmt.*.node_case,
+    );
+    try std.testing.expectEqualStrings("user_id", insert.rewritten.names[0]);
+
+    var ddl = try parser.parseSqlite(
+        std.testing.allocator,
+        "CREATE TABLE notes (id INTEGER PRIMARY KEY AUTOINCREMENT, body TEXT) STRICT;" ++
+            "CREATE TABLE memberships (user_id INTEGER, role_id INTEGER, " ++
+            "PRIMARY KEY (user_id, role_id)) WITHOUT ROWID",
+    );
+    defer ddl.deinit();
+    try std.testing.expectEqual(@as(usize, 2), ddl.tree.n_stmts);
+
+    var identifier = try parser.parseSqlite(std.testing.allocator, "SELECT strict FROM settings");
+    defer identifier.deinit();
+    try std.testing.expectEqual(@as(usize, 1), identifier.tree.n_stmts);
+}

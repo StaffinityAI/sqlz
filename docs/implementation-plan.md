@@ -21,7 +21,7 @@ this slice.
 | Migrations | Parse manifests and discover revision inputs | Complete |
 | Catalog | Deterministic, atomic common + SQLite migration replay | Complete |
 | Catalog | Remaining SQLite 0.1 DDL objects and constraints | In progress |
-| Parser | SQLite-only syntax validation and capability gates | Not started |
+| Parser | SQLite-only syntax validation and capability gates | In progress |
 | Checker | Adapt statements, relations, parameters, and result names into IR | Complete |
 | Checker | Column-reference expression IR with aliases and outer-join facts | Complete |
 | Checker | Resolve projected columns, scalar types, and nullability | Complete |

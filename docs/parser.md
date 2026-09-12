@@ -28,6 +28,12 @@ checks. A narrow SQLite syntax layer handles SQLite-only forms such as pragmas,
 `INSERT OR IGNORE`, and table options; those forms are not presented unchanged to
 the PostgreSQL parser.
 
+The current SQLite layer masks `AUTOINCREMENT`, trailing `STRICT`, and
+`WITHOUT ROWID` for host-side structural analysis, and maps `INSERT OR IGNORE`
+to its plain insert shape. Masking preserves byte positions; generated/runtime
+SQL remains the original SQLite text. Capability validation is still expanded
+incrementally and never changes the SQL sent to SQLite.
+
 The adapted AST preserves qualification, aliases, joins, conflict clauses,
 returning clauses, casts, null tests, ordering, and source locations. Identifier
 comparison follows the backend: unquoted PostgreSQL names fold to lowercase,

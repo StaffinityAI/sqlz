@@ -161,3 +161,31 @@ test "checks a named query against a migration-defined view" {
     try std.testing.expectEqualStrings("user_id", checked.analysis.columns[0].name);
     try std.testing.expect(!checked.analysis.columns[1].nullable);
 }
+
+test "replays SQLite table options and checks INSERT OR IGNORE" {
+    var schema = catalog.Catalog.init(std.testing.allocator);
+    defer schema.deinit();
+    try checker.applySqliteRevisionAtomic(
+        &schema,
+        std.testing.allocator,
+        "",
+        "CREATE TABLE memberships (" ++
+            "user_id INTEGER NOT NULL, role_id INTEGER NOT NULL, " ++
+            "PRIMARY KEY (user_id, role_id)) WITHOUT ROWID;" ++
+            "CREATE TABLE notes (id INTEGER PRIMARY KEY AUTOINCREMENT, body TEXT) STRICT",
+    );
+    try std.testing.expect(schema.table("memberships") != null);
+    try std.testing.expect(schema.table("notes") != null);
+
+    var source = try query_files.parse(std.testing.allocator, "assign_role.sql",
+        \\-- sqlz.name: assign_role
+        \\-- sqlz.backends: sqlite
+        \\-- sqlz.cardinality: exec
+        \\
+        \\INSERT OR IGNORE INTO memberships(user_id, role_id) VALUES (:user_id, :role_id)
+    );
+    defer source.deinit();
+    var checked = try checker.checkNamedSqlite(std.testing.allocator, &schema, &source);
+    defer checked.deinit();
+    try std.testing.expectEqual(@as(usize, 2), checked.analysis.parameters.len);
+}

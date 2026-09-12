@@ -37,7 +37,7 @@ pub fn checkNamedSqlite(
     source: *const query_files.Source,
 ) Error!CheckedQuery {
     if (!source.backends.sqlite) return error.BackendNotSelected;
-    var parsed = try parser.parse(allocator, source.sql);
+    var parsed = try parser.parseSqlite(allocator, source.sql);
     errdefer parsed.deinit();
     var query = try ir.adapt(allocator, parsed.tree, parsed.rewritten.names);
     errdefer query.deinit();
@@ -98,8 +98,8 @@ pub fn applySqliteRevisionAtomic(
 ) (parser.ParseError || catalog.Error)!void {
     var staged = try schema.clone(allocator);
     errdefer staged.deinit();
-    try parseAndApply(&staged, allocator, common_sql);
-    try parseAndApply(&staged, allocator, sqlite_sql);
+    try parseAndApply(&staged, allocator, common_sql, false);
+    try parseAndApply(&staged, allocator, sqlite_sql, true);
 
     schema.deinit();
     schema.* = staged;
@@ -109,9 +109,13 @@ fn parseAndApply(
     schema: *catalog.Catalog,
     allocator: std.mem.Allocator,
     sql: []const u8,
+    sqlite: bool,
 ) (parser.ParseError || catalog.Error)!void {
     if (std.mem.trim(u8, sql, &std.ascii.whitespace).len == 0) return;
-    var parsed = try parser.parse(allocator, sql);
+    var parsed = if (sqlite)
+        try parser.parseSqlite(allocator, sql)
+    else
+        try parser.parse(allocator, sql);
     defer parsed.deinit();
     try schema.applyParserTree(parsed.tree);
 }

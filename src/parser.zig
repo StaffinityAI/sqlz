@@ -205,6 +205,106 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) ParseError!ParseR
     };
 }
 
+pub fn parseSqlite(allocator: std.mem.Allocator, source: []const u8) ParseError!ParseResult {
+    const normalized = try normalizeSqlite(allocator, source);
+    defer allocator.free(normalized);
+    return parse(allocator, normalized);
+}
+
+fn normalizeSqlite(allocator: std.mem.Allocator, source: []const u8) std.mem.Allocator.Error![]u8 {
+    var output: std.ArrayList(u8) = .empty;
+    errdefer output.deinit(allocator);
+    const State = enum { normal, single, double, backtick, bracket, line_comment, block_comment };
+    var state: State = .normal;
+    var index: usize = 0;
+    while (index < source.len) {
+        const c = source[index];
+        if (state == .normal and isIdentStart(c)) {
+            var end = index + 1;
+            while (end < source.len and isIdentContinue(source[end])) : (end += 1) {}
+            const word = source[index..end];
+            if (std.ascii.eqlIgnoreCase(word, "AUTOINCREMENT") or
+                (std.ascii.eqlIgnoreCase(word, "STRICT") and isTrailingTableOption(source, index, end)))
+            {
+                try appendMasked(&output, allocator, source[index..end]);
+                index = end;
+                continue;
+            }
+            if (std.ascii.eqlIgnoreCase(word, "WITHOUT")) {
+                if (keywordAfter(source, end, "ROWID")) |rowid_end| {
+                    try appendMasked(&output, allocator, source[index..rowid_end]);
+                    index = rowid_end;
+                    continue;
+                }
+            }
+            try output.appendSlice(allocator, word);
+            index = end;
+            if (std.ascii.eqlIgnoreCase(word, "INSERT")) {
+                if (keywordAfter(source, end, "OR")) |or_end| {
+                    if (keywordAfter(source, or_end, "IGNORE")) |ignore_end| {
+                        try appendMasked(&output, allocator, source[end..ignore_end]);
+                        index = ignore_end;
+                    }
+                }
+            }
+            continue;
+        }
+        switch (state) {
+            .normal => {
+                if (c == '\'') state = .single else if (c == '"') state = .double else if (c == '`') state = .backtick else if (c == '[') state = .bracket else if (c == '-' and index + 1 < source.len and source[index + 1] == '-') state = .line_comment else if (c == '/' and index + 1 < source.len and source[index + 1] == '*') state = .block_comment;
+            },
+            .single => if (c == '\'' and !(index + 1 < source.len and source[index + 1] == '\'')) {
+                state = .normal;
+            } else if (c == '\'' and index + 1 < source.len and source[index + 1] == '\'') {
+                try output.append(allocator, c);
+                index += 1;
+            },
+            .double => if (c == '"') {
+                state = .normal;
+            },
+            .backtick => if (c == '`') {
+                state = .normal;
+            },
+            .bracket => if (c == ']') {
+                state = .normal;
+            },
+            .line_comment => if (c == '\n') {
+                state = .normal;
+            },
+            .block_comment => if (c == '*' and index + 1 < source.len and source[index + 1] == '/') {
+                try output.append(allocator, c);
+                index += 1;
+                state = .normal;
+            },
+        }
+        try output.append(allocator, source[index]);
+        index += 1;
+    }
+    return output.toOwnedSlice(allocator);
+}
+
+fn keywordAfter(source: []const u8, start: usize, keyword: []const u8) ?usize {
+    var index = start;
+    while (index < source.len and std.ascii.isWhitespace(source[index])) : (index += 1) {}
+    if (index >= source.len or !isIdentStart(source[index])) return null;
+    var end = index + 1;
+    while (end < source.len and isIdentContinue(source[end])) : (end += 1) {}
+    return if (std.ascii.eqlIgnoreCase(source[index..end], keyword)) end else null;
+}
+
+fn isTrailingTableOption(source: []const u8, start: usize, end: usize) bool {
+    var before = start;
+    while (before > 0 and std.ascii.isWhitespace(source[before - 1])) : (before -= 1) {}
+    if (before == 0 or (source[before - 1] != ')' and source[before - 1] != ',')) return false;
+    var after = end;
+    while (after < source.len and std.ascii.isWhitespace(source[after])) : (after += 1) {}
+    return after == source.len or source[after] == ',' or source[after] == ';';
+}
+
+fn appendMasked(output: *std.ArrayList(u8), allocator: std.mem.Allocator, source: []const u8) !void {
+    for (source) |c| try output.append(allocator, if (c == '\n' or c == '\r') c else ' ');
+}
+
 fn isIdentStart(c: u8) bool {
     return std.ascii.isAlphabetic(c) or c == '_';
 }
