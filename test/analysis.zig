@@ -168,3 +168,30 @@ test "infers arithmetic over scalar COUNT subqueries" {
     try std.testing.expect(!result.columns[0].nullable);
     try std.testing.expectEqual(analysis.ScalarType.integer, result.parameters[0].scalar_type);
 }
+
+test "resolves recursive CTE output and parameter types" {
+    var schema_sql = try parser.parse(
+        std.testing.allocator,
+        "CREATE TABLE roles (id BIGINT PRIMARY KEY, child_id BIGINT)",
+    );
+    defer schema_sql.deinit();
+    var schema = catalog.Catalog.init(std.testing.allocator);
+    defer schema.deinit();
+    try schema.applyParserJson(schema_sql.ast_json);
+    var parsed = try parser.parse(
+        std.testing.allocator,
+        "WITH RECURSIVE held(id, depth) AS (" ++
+            "SELECT id, 0 FROM roles WHERE id=:role UNION ALL " ++
+            "SELECT r.id, h.depth+1 FROM roles r JOIN held h ON r.child_id=h.id " ++
+            "WHERE h.depth<:depth) SELECT id, depth FROM held ORDER BY depth",
+    );
+    defer parsed.deinit();
+    var query = try ir.adapt(std.testing.allocator, parsed.ast_json, parsed.rewritten.names);
+    defer query.deinit();
+    var result = try analysis.analyze(std.testing.allocator, &schema, &query);
+    defer result.deinit();
+    try std.testing.expectEqual(analysis.ScalarType.integer, result.columns[0].scalar_type);
+    try std.testing.expectEqual(analysis.ScalarType.integer, result.columns[1].scalar_type);
+    try std.testing.expectEqual(analysis.ScalarType.integer, result.parameters[0].scalar_type);
+    try std.testing.expectEqual(analysis.ScalarType.integer, result.parameters[1].scalar_type);
+}

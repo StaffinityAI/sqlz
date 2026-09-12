@@ -35,8 +35,13 @@ pub const Error = error{
 } || std.mem.Allocator.Error;
 
 const ResolvedColumn = struct {
-    column: *const catalog.Column,
-    relation_nullable: bool,
+    scalar_type: ScalarType,
+    nullable: bool,
+};
+
+const VirtualCte = struct {
+    name: []const u8,
+    columns: []const ResultColumn,
 };
 
 pub fn analyze(
@@ -48,8 +53,30 @@ pub fn analyze(
     errdefer arena.deinit();
     const storage = arena.allocator();
 
+    const ctes = try storage.alloc(VirtualCte, query.ctes.len);
+    for (query.ctes, ctes) |cte, *virtual| {
+        const cte_columns = try storage.alloc(ResultColumn, cte.columns.len);
+        for (cte.columns, cte_columns) |projection, *result| {
+            result.* = .{
+                .name = try storage.dupe(u8, projection.name),
+                .scalar_type = .unknown,
+                .nullable = true,
+            };
+            if (projection.column) |reference| {
+                const resolved = try resolvePhysicalColumn(schema, query.relation_bindings, reference);
+                result.scalar_type = resolved.scalar_type;
+                result.nullable = resolved.nullable;
+            } else if (projection.hint) |hint| {
+                result.scalar_type = fromHint(hint.scalar_type);
+                result.nullable = hint.nullable;
+            }
+        }
+        virtual.* = .{ .name = cte.name, .columns = cte_columns };
+    }
+
     for (query.relation_bindings) |binding| {
-        if (schema.table(binding.name) == null) return error.MissingRelation;
+        if (schema.table(binding.name) == null and findCte(ctes, binding.name) == null)
+            return error.MissingRelation;
     }
 
     const columns = try storage.alloc(ResultColumn, query.projections.len);
@@ -60,17 +87,11 @@ pub fn analyze(
             .nullable = true,
         };
         if (projection.column) |reference| {
-            const resolved = try resolveColumn(schema, query.relation_bindings, reference);
-            result.scalar_type = scalarType(resolved.column.database_type);
-            result.nullable = resolved.column.nullable or resolved.relation_nullable;
+            const resolved = try resolveColumn(schema, ctes, query.top_level_bindings, reference, false);
+            result.scalar_type = resolved.scalar_type;
+            result.nullable = resolved.nullable;
         } else if (projection.hint) |hint| {
-            result.scalar_type = switch (hint.scalar_type) {
-                .integer => .integer,
-                .real => .real,
-                .text => .text,
-                .blob => .blob,
-                .boolean => .boolean,
-            };
+            result.scalar_type = fromHint(hint.scalar_type);
             result.nullable = hint.nullable;
         }
     }
@@ -82,29 +103,32 @@ pub fn analyze(
             .nullable = !use.integer_hint,
         };
         const reference = use.column orelse continue;
-        const resolved = try resolveParameterColumn(schema, query.relation_bindings, reference);
-        result.scalar_type = scalarType(resolved.column.database_type);
-        result.nullable = resolved.column.nullable;
+        const resolved = try resolveColumn(schema, ctes, query.relation_bindings, reference, true);
+        result.scalar_type = resolved.scalar_type;
+        result.nullable = resolved.nullable;
     }
     return .{ .arena = arena, .columns = columns, .parameters = parameters };
 }
 
-fn resolveParameterColumn(
+fn resolvePhysicalColumn(
     schema: *const catalog.Catalog,
     bindings: []const ir.Relation,
     reference: ir.ColumnReference,
 ) Error!ResolvedColumn {
-    if (reference.qualifier != null) return resolveColumn(schema, bindings, reference);
     var found: ?ResolvedColumn = null;
     for (bindings) |binding| {
-        const table = schema.table(binding.name) orelse return error.MissingRelation;
+        if (reference.qualifier) |qualifier| {
+            const alias_match = if (binding.alias) |alias| std.mem.eql(u8, alias, qualifier) else false;
+            if (!alias_match and !std.mem.eql(u8, binding.name, qualifier)) continue;
+        }
+        const table = schema.table(binding.name) orelse continue;
         const column = table.columns.getPtr(reference.name) orelse continue;
         if (found) |prior| {
-            if (!std.ascii.eqlIgnoreCase(prior.column.database_type, column.database_type) or
-                prior.column.nullable != column.nullable)
+            if (prior.scalar_type != scalarType(column.database_type) or
+                prior.nullable != column.nullable)
                 return error.AmbiguousColumn;
         } else {
-            found = .{ .column = column, .relation_nullable = false };
+            found = .{ .scalar_type = scalarType(column.database_type), .nullable = column.nullable };
         }
     }
     return found orelse error.MissingColumn;
@@ -112,8 +136,10 @@ fn resolveParameterColumn(
 
 fn resolveColumn(
     schema: *const catalog.Catalog,
+    ctes: []const VirtualCte,
     bindings: []const ir.Relation,
     reference: ir.ColumnReference,
+    compatible_duplicates: bool,
 ) Error!ResolvedColumn {
     var found: ?ResolvedColumn = null;
     for (bindings) |binding| {
@@ -124,15 +150,46 @@ fn resolveColumn(
                 false;
             if (!matches_alias and !std.mem.eql(u8, binding.name, qualifier)) continue;
         }
-        const table = schema.table(binding.name) orelse return error.MissingRelation;
-        const column = table.columns.getPtr(reference.name) orelse {
+        const candidate: ?ResolvedColumn = if (schema.table(binding.name)) |table| blk: {
+            const column = table.columns.getPtr(reference.name) orelse break :blk null;
+            break :blk .{
+                .scalar_type = scalarType(column.database_type),
+                .nullable = column.nullable or binding.nullable,
+            };
+        } else if (findCte(ctes, binding.name)) |cte| blk: {
+            for (cte.columns) |column| {
+                if (std.mem.eql(u8, column.name, reference.name)) break :blk .{
+                    .scalar_type = column.scalar_type,
+                    .nullable = column.nullable or binding.nullable,
+                };
+            }
+            break :blk null;
+        } else return error.MissingRelation;
+        const resolved = candidate orelse {
             if (reference.qualifier != null) return error.MissingColumn;
             continue;
         };
-        if (found != null) return error.AmbiguousColumn;
-        found = .{ .column = column, .relation_nullable = binding.nullable };
+        if (found) |prior| {
+            if (!compatible_duplicates or prior.scalar_type != resolved.scalar_type or
+                prior.nullable != resolved.nullable) return error.AmbiguousColumn;
+        } else found = resolved;
     }
     return found orelse error.MissingColumn;
+}
+
+fn findCte(ctes: []const VirtualCte, name: []const u8) ?*const VirtualCte {
+    for (ctes) |*cte| if (std.mem.eql(u8, cte.name, name)) return cte;
+    return null;
+}
+
+fn fromHint(hint: ir.TypeHint) ScalarType {
+    return switch (hint) {
+        .integer => .integer,
+        .real => .real,
+        .text => .text,
+        .blob => .blob,
+        .boolean => .boolean,
+    };
 }
 
 fn scalarType(database_type: []const u8) ScalarType {

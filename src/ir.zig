@@ -32,12 +32,19 @@ pub const ParameterUse = struct {
     integer_hint: bool = false,
 };
 
+pub const Cte = struct {
+    name: []const u8,
+    columns: []const Projection,
+};
+
 pub const Query = struct {
     arena: std.heap.ArenaAllocator,
     kind: StatementKind,
     mutation_target: ?[]const u8,
     relations: []const []const u8,
     relation_bindings: []const Relation,
+    top_level_bindings: []const Relation,
+    ctes: []const Cte,
     parameters: []const []const u8,
     parameter_uses: []const ParameterUse,
     result_columns: []const []const u8,
@@ -86,6 +93,13 @@ pub fn adapt(
     var relations: std.ArrayList([]const u8) = .empty;
     var relation_bindings: std.ArrayList(Relation) = .empty;
     try collectRelations(storage, statement, &relations, &relation_bindings, false);
+    var top_names: std.ArrayList([]const u8) = .empty;
+    var top_level_bindings: std.ArrayList(Relation) = .empty;
+    if (kind == .select) {
+        if (field(statement, "fromClause")) |from|
+            try collectRelations(storage, from, &top_names, &top_level_bindings, false);
+    }
+    const ctes = try collectCtes(storage, statement);
 
     var parameters: std.ArrayList([]const u8) = .empty;
     const parameter_uses = try storage.alloc(ParameterUse, parameter_names.len);
@@ -132,6 +146,11 @@ pub fn adapt(
                 .nullable = false,
             });
         }
+        try top_level_bindings.append(storage, .{
+            .name = try storage.dupe(u8, target),
+            .alias = null,
+            .nullable = false,
+        });
     }
 
     return .{
@@ -140,11 +159,43 @@ pub fn adapt(
         .mutation_target = mutation_target,
         .relations = try relations.toOwnedSlice(storage),
         .relation_bindings = try relation_bindings.toOwnedSlice(storage),
+        .top_level_bindings = try top_level_bindings.toOwnedSlice(storage),
+        .ctes = ctes,
         .parameters = try parameters.toOwnedSlice(storage),
         .parameter_uses = parameter_uses,
         .result_columns = try result_columns.toOwnedSlice(storage),
         .projections = try projections.toOwnedSlice(storage),
     };
+}
+
+fn collectCtes(allocator: std.mem.Allocator, statement: std.json.Value) Error![]const Cte {
+    const with_clause = field(statement, "withClause") orelse return &.{};
+    const values = field(with_clause, "ctes") orelse return error.InvalidAst;
+    if (values != .array) return error.InvalidAst;
+    const ctes = try allocator.alloc(Cte, values.array.items.len);
+    for (values.array.items, ctes) |value, *cte| {
+        const node = field(value, "CommonTableExpr") orelse return error.InvalidAst;
+        const name = field(node, "ctename") orelse return error.InvalidAst;
+        const aliases = field(node, "aliascolnames") orelse return error.InvalidAst;
+        const query_value = field(node, "ctequery") orelse return error.InvalidAst;
+        if (name != .string or aliases != .array) return error.InvalidAst;
+        const query = field(query_value, "SelectStmt") orelse query_value;
+        const base = if (field(query, "larg")) |left| left else query;
+        const targets = field(base, "targetList") orelse return error.InvalidAst;
+        if (targets != .array or targets.array.items.len != aliases.array.items.len)
+            return error.InvalidAst;
+        const columns = try allocator.alloc(Projection, targets.array.items.len);
+        for (targets.array.items, aliases.array.items, columns) |target_value, alias_value, *column| {
+            const target = field(target_value, "ResTarget") orelse return error.InvalidAst;
+            column.* = .{
+                .name = try allocator.dupe(u8, try stringField(alias_value)),
+                .column = try columnReference(allocator, target),
+                .hint = try expressionHint(target),
+            };
+        }
+        cte.* = .{ .name = try allocator.dupe(u8, name.string), .columns = columns };
+    }
+    return ctes;
 }
 
 fn expressionHint(result: std.json.Value) Error!?ExpressionHint {

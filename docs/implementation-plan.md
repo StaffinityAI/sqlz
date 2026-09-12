@@ -26,7 +26,8 @@ this slice.
 | Checker | Resolve projected columns, scalar types, and nullability | Complete |
 | Checker | Infer parameters from comparisons, writes, and pagination | Complete |
 | Checker | Infer literals, common functions, arithmetic, casts, and scalar subqueries | Complete |
-| Checker | Resolve CTE/set-operation shapes and conflicting constraints | In progress |
+| Checker | Resolve recursive CTE output shapes used by the samples | Complete |
+| Checker | General set-operation typing and conflicting constraints | In progress |
 | Inputs | Parse and deterministically discover named `.sql` files | Complete |
 | Inputs | Discover and validate embedded Zig declarations | Not started |
 | Generator | Deterministic, Zig-AST-validated binding source emission | Complete |
