@@ -33,7 +33,7 @@ this slice.
 | Inputs | Discover and validate embedded Zig declarations | Not started |
 | Generator | Deterministic, Zig-AST-validated binding source emission | Complete |
 | Generator | Deterministic root/path namespace assembly | Complete |
-| Generator | Build-cache module integration | In progress |
+| Generator | Build-cache module integration | Complete |
 | Acceptance | Convert examples to generated checked bindings | Not started |
 | Hardening | Complete diagnostics, resource limits, and dependency matrix | Not started |
 | Deferred | PostgreSQL runtime backend | Deferred |
@@ -41,7 +41,6 @@ this slice.
 
 ## Current next steps
 
-1. Wire the assembled checked-query source into one build-cache module.
-2. Complete the remaining SQLite 0.1 DDL subset and dialect gates.
-3. Convert the examples to generated bindings and add embedded-Zig discovery.
-4. Harden diagnostics, source limits, and the supported dependency matrix.
+1. Complete the remaining SQLite 0.1 DDL subset and dialect gates.
+2. Convert the examples to generated bindings and add embedded-Zig discovery.
+3. Harden diagnostics, source limits, and the supported dependency matrix.

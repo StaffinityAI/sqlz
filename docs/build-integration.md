@@ -21,52 +21,34 @@ is no implicit default backend or runtime `AnyDatabase`.
 
 ## Build API
 
-The proposed Zig 0.16 contract is:
+The current Zig 0.16 checked-query contract is:
 
 ```zig
 const tool = sqlz_build.addTool(b, .{ .dependency = sqlz_dep });
 const app_db = tool.addProject(.{
     .name = "app",
     .config = b.path("sqlz.ziggy"),
-    .dependency = sqlz_dep,
-    .runtime_backends = .{ .sqlite = true },
-    .codec_bindings = &.{
-        .{ .id = "uuid", .module = domain, .declaration = "UuidCodec" },
-    },
 });
 
 exe.root_module.addImport("sqlz", sqlz_dep.module("sqlz"));
 exe.root_module.addImport("app_queries", app_db.queries_module);
-exe.root_module.addImport("app_migrations", app_db.migrations_module);
 exe.step.dependOn(app_db.check_step);
 ```
 
 The exported shapes are:
 
 ```zig
-pub const Backends = struct { sqlite: bool = false, postgres: bool = false };
-
 pub const ToolOptions = struct {
     dependency: *std.Build.Dependency,
-};
-
-pub const CodecBinding = struct {
-    id: []const u8,
-    module: *std.Build.Module,
-    declaration: []const u8,
 };
 
 pub const ProjectOptions = struct {
     name: []const u8,
     config: std.Build.LazyPath,
-    dependency: *std.Build.Dependency,
-    runtime_backends: Backends = .{},
-    codec_bindings: []const CodecBinding = &.{},
 };
 
 pub const Project = struct {
     queries_module: *std.Build.Module,
-    migrations_module: *std.Build.Module,
     check_step: *std.Build.Step,
 };
 
@@ -77,9 +59,10 @@ pub const Tool = struct {
 pub fn addTool(b: *std.Build, options: ToolOptions) *Tool;
 ```
 
-`addTool` creates one unified `sqlz` top-level command. `addProject` requires a
-unique name and returns generated query and embedded-migration modules plus an
-internal check step.
+The current SQLite-first slice has this smaller build contract. `addProject`
+requires a unique name and returns a generated query module plus its internal
+check step. Runtime-backend/codec registration and the embedded-migration module
+will extend these structures in later phases.
 
 `sqlz.ziggy` owns paths, profile selection, root aliases, supplements, limits,
 project identity, and database codec patterns. Build registration owns only Zig

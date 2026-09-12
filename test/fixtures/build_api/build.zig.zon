@@ -1,0 +1,10 @@
+.{
+    .name = .sqlz_build_fixture,
+    .version = "0.0.0",
+    .dependencies = .{
+        .sqlz_build = .{ .path = "../../.." },
+    },
+    .minimum_zig_version = "0.16.0",
+    .paths = .{""},
+    .fingerprint = 0xe4c7e29caa85f4d,
+}

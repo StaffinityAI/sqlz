@@ -14,6 +14,11 @@ pub const CheckedInput = struct {
     checked: *const checker.CheckedQuery,
 };
 
+pub const RootInput = struct {
+    alias: []const u8,
+    inputs: []const CheckedInput,
+};
+
 pub fn generateQuery(
     allocator: std.mem.Allocator,
     source: *const query_files.Source,
@@ -34,7 +39,41 @@ pub fn generateModule(
     root_alias: []const u8,
     inputs: []const CheckedInput,
 ) Error![]u8 {
-    if (!isIdentifier(root_alias)) return error.InvalidNamespace;
+    return generateProjectModule(allocator, &.{.{ .alias = root_alias, .inputs = inputs }});
+}
+
+pub fn generateProjectModule(allocator: std.mem.Allocator, roots: []const RootInput) Error![]u8 {
+    const sorted_roots = try allocator.dupe(RootInput, roots);
+    defer allocator.free(sorted_roots);
+    std.mem.sort(RootInput, sorted_roots, {}, struct {
+        fn lessThan(_: void, lhs: RootInput, rhs: RootInput) bool {
+            return std.mem.lessThan(u8, lhs.alias, rhs.alias);
+        }
+    }.lessThan);
+    for (sorted_roots, 0..) |root, index| {
+        if (!isIdentifier(root.alias)) return error.InvalidNamespace;
+        if (index > 0 and std.mem.eql(u8, sorted_roots[index - 1].alias, root.alias))
+            return error.NamespaceCollision;
+    }
+
+    var output: std.ArrayList(u8) = .empty;
+    errdefer output.deinit(allocator);
+    try output.appendSlice(allocator,
+        \\const sqlz = @import("sqlz");
+        \\
+        \\// Generated checked queries; do not edit.
+        \\
+    );
+    for (sorted_roots) |root| try writeRoot(&output, allocator, root.alias, root.inputs);
+    return output.toOwnedSlice(allocator);
+}
+
+fn writeRoot(
+    output: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    root_alias: []const u8,
+    inputs: []const CheckedInput,
+) Error!void {
     const entries = try allocator.alloc(Entry, inputs.len);
     defer {
         for (entries) |entry| allocator.free(entry.directories);
@@ -45,14 +84,6 @@ pub fn generateModule(
     std.mem.sort(Entry, entries, {}, Entry.lessThan);
     try validateNamespaces(entries);
 
-    var output: std.ArrayList(u8) = .empty;
-    errdefer output.deinit(allocator);
-    try output.appendSlice(allocator,
-        \\const sqlz = @import("sqlz");
-        \\
-        \\// Generated checked queries; do not edit.
-        \\
-    );
     try output.print(allocator, "pub const {s} = struct {{\n", .{root_alias});
     var previous: []const []const u8 = &.{};
     for (entries) |entry| {
@@ -60,24 +91,23 @@ pub fn generateModule(
         var close_index = previous.len;
         while (close_index > common) {
             close_index -= 1;
-            try writeIndent(&output, allocator, close_index + 1);
+            try writeIndent(output, allocator, close_index + 1);
             try output.appendSlice(allocator, "};\n");
         }
         for (entry.directories[common..], common..) |directory, depth| {
-            try writeIndent(&output, allocator, depth + 1);
+            try writeIndent(output, allocator, depth + 1);
             try output.print(allocator, "pub const {s} = struct {{\n", .{directory});
         }
-        try writeQuery(&output, allocator, entry.input.source, entry.input.checked, entry.directories.len + 1);
+        try writeQuery(output, allocator, entry.input.source, entry.input.checked, entry.directories.len + 1);
         previous = entry.directories;
     }
     var close_index = previous.len;
     while (close_index > 0) {
         close_index -= 1;
-        try writeIndent(&output, allocator, close_index + 1);
+        try writeIndent(output, allocator, close_index + 1);
         try output.appendSlice(allocator, "};\n");
     }
     try output.appendSlice(allocator, "};\n");
-    return output.toOwnedSlice(allocator);
 }
 
 const Entry = struct {

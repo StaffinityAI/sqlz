@@ -1,8 +1,18 @@
 const std = @import("std");
+const sqlz_build = @import("build/sqlz_build.zig");
+
+pub const addTool = sqlz_build.addTool;
+pub const Tool = sqlz_build.Tool;
+pub const ToolOptions = sqlz_build.ToolOptions;
+pub const Project = sqlz_build.Project;
+pub const ProjectOptions = sqlz_build.ProjectOptions;
 
 pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
+    const host_target = b.graph.host;
     const optimize = b.standardOptimizeOption(.{});
+
+    _ = b.addModule("sqlz_build", .{ .root_source_file = b.path("build/sqlz_build.zig") });
 
     const core_mod = b.addModule("sqlz_core", .{
         .root_source_file = b.path("src/core.zig"),
@@ -10,12 +20,12 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
     });
     const ziggy_dep = b.dependency("ziggy", .{
-        .target = target,
+        .target = host_target,
         .optimize = optimize,
     });
     const config_mod = b.addModule("sqlz_config", .{
         .root_source_file = b.path("src/config.zig"),
-        .target = target,
+        .target = host_target,
         .optimize = optimize,
         .imports = &.{.{ .name = "ziggy", .module = ziggy_dep.module("ziggy") }},
     });
@@ -30,7 +40,7 @@ pub fn build(b: *std.Build) !void {
     // instead of relying on a platform-specific prebuilt archive.
     const libpg_query_root = b.path("zig-pkg/N-V-__8AABam8AGXKt6JaO4YJhtbE2eALOH3ykvUnCh-FnLG");
     const libpg_query_mod = b.createModule(.{
-        .target = target,
+        .target = host_target,
         .optimize = optimize,
         .link_libc = true,
     });
@@ -57,7 +67,7 @@ pub fn build(b: *std.Build) !void {
     });
     const translate_pg_query = b.addTranslateC(.{
         .root_source_file = b.path("src/libpg_query_wrapper.h"),
-        .target = target,
+        .target = host_target,
         .optimize = optimize,
         .link_libc = true,
     });
@@ -66,7 +76,7 @@ pub fn build(b: *std.Build) !void {
     const pg_query_bindings = translate_pg_query.createModule();
     const parser_mod = b.addModule("sqlz_parser", .{
         .root_source_file = b.path("src/parser.zig"),
-        .target = target,
+        .target = host_target,
         .optimize = optimize,
         .link_libc = true,
         .imports = &.{
@@ -76,25 +86,25 @@ pub fn build(b: *std.Build) !void {
     parser_mod.linkLibrary(libpg_query);
     const catalog_mod = b.addModule("sqlz_catalog", .{
         .root_source_file = b.path("src/catalog.zig"),
-        .target = target,
+        .target = host_target,
         .optimize = optimize,
         .imports = &.{.{ .name = "sqlz_parser", .module = parser_mod }},
     });
     const migrations_mod = b.addModule("sqlz_migrations", .{
         .root_source_file = b.path("src/migrations.zig"),
-        .target = target,
+        .target = host_target,
         .optimize = optimize,
         .imports = &.{.{ .name = "ziggy", .module = ziggy_dep.module("ziggy") }},
     });
     const ir_mod = b.addModule("sqlz_ir", .{
         .root_source_file = b.path("src/ir.zig"),
-        .target = target,
+        .target = host_target,
         .optimize = optimize,
         .imports = &.{.{ .name = "libpg_query", .module = pg_query_bindings }},
     });
     const analysis_mod = b.addModule("sqlz_analysis", .{
         .root_source_file = b.path("src/analysis.zig"),
-        .target = target,
+        .target = host_target,
         .optimize = optimize,
         .imports = &.{
             .{ .name = "sqlz_ir", .module = ir_mod },
@@ -103,12 +113,12 @@ pub fn build(b: *std.Build) !void {
     });
     const query_files_mod = b.addModule("sqlz_query_files", .{
         .root_source_file = b.path("src/query_files.zig"),
-        .target = target,
+        .target = host_target,
         .optimize = optimize,
     });
     const checker_mod = b.addModule("sqlz_checker", .{
         .root_source_file = b.path("src/checker.zig"),
-        .target = target,
+        .target = host_target,
         .optimize = optimize,
         .imports = &.{
             .{ .name = "sqlz_parser", .module = parser_mod },
@@ -121,7 +131,7 @@ pub fn build(b: *std.Build) !void {
     });
     const generator_mod = b.addModule("sqlz_generator", .{
         .root_source_file = b.path("src/generator.zig"),
-        .target = target,
+        .target = host_target,
         .optimize = optimize,
         .imports = &.{
             .{ .name = "sqlz_checker", .module = checker_mod },
@@ -129,6 +139,29 @@ pub fn build(b: *std.Build) !void {
             .{ .name = "sqlz_query_files", .module = query_files_mod },
         },
     });
+    const codegen_mod = b.addModule("sqlz_codegen", .{
+        .root_source_file = b.path("src/codegen.zig"),
+        .target = host_target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "ziggy", .module = ziggy_dep.module("ziggy") },
+            .{ .name = "sqlz_config", .module = config_mod },
+            .{ .name = "sqlz_migrations", .module = migrations_mod },
+            .{ .name = "sqlz_query_files", .module = query_files_mod },
+            .{ .name = "sqlz_checker", .module = checker_mod },
+            .{ .name = "sqlz_generator", .module = generator_mod },
+        },
+    });
+    const codegen_exe = b.addExecutable(.{
+        .name = "sqlz-codegen",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/codegen_main.zig"),
+            .target = host_target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "sqlz_codegen", .module = codegen_mod }},
+        }),
+    });
+    b.installArtifact(codegen_exe);
 
     const zqlite_dep = b.lazyDependency("zqlite", .{
         .target = target,
@@ -154,7 +187,7 @@ pub fn build(b: *std.Build) !void {
     const parser_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("test/parser.zig"),
-            .target = target,
+            .target = host_target,
             .optimize = optimize,
             .link_libc = true,
             .imports = &.{.{ .name = "sqlz_parser", .module = parser_mod }},
@@ -166,7 +199,7 @@ pub fn build(b: *std.Build) !void {
     const config_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("test/config.zig"),
-            .target = target,
+            .target = host_target,
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "sqlz_config", .module = config_mod },
@@ -182,7 +215,7 @@ pub fn build(b: *std.Build) !void {
     const catalog_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("test/catalog.zig"),
-            .target = target,
+            .target = host_target,
             .optimize = optimize,
             .link_libc = true,
             .imports = &.{
@@ -199,7 +232,7 @@ pub fn build(b: *std.Build) !void {
     const migration_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("test/migrations.zig"),
-            .target = target,
+            .target = host_target,
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "sqlz_migrations", .module = migrations_mod },
@@ -215,7 +248,7 @@ pub fn build(b: *std.Build) !void {
     const checker_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("test/checker.zig"),
-            .target = target,
+            .target = host_target,
             .optimize = optimize,
             .link_libc = true,
             .imports = &.{
@@ -234,7 +267,7 @@ pub fn build(b: *std.Build) !void {
     const ir_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("test/ir.zig"),
-            .target = target,
+            .target = host_target,
             .optimize = optimize,
             .link_libc = true,
             .imports = &.{
@@ -251,7 +284,7 @@ pub fn build(b: *std.Build) !void {
     const analysis_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("test/analysis.zig"),
-            .target = target,
+            .target = host_target,
             .optimize = optimize,
             .link_libc = true,
             .imports = &.{
@@ -270,7 +303,7 @@ pub fn build(b: *std.Build) !void {
     const query_file_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("test/query_files.zig"),
-            .target = target,
+            .target = host_target,
             .optimize = optimize,
             .imports = &.{.{ .name = "sqlz_query_files", .module = query_files_mod }},
         }),
@@ -283,7 +316,7 @@ pub fn build(b: *std.Build) !void {
     const generator_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("test/generator.zig"),
-            .target = target,
+            .target = host_target,
             .optimize = optimize,
             .link_libc = true,
             .imports = &.{
@@ -298,6 +331,33 @@ pub fn build(b: *std.Build) !void {
     test_step.dependOn(&run_generator.step);
     const generator_step = b.step("test-generator", "Run checked binding generator tests");
     generator_step.dependOn(&run_generator.step);
+
+    const run_codegen = b.addRunArtifact(codegen_exe);
+    run_codegen.addFileArg(b.path("test/fixtures/codegen/sqlz.ziggy"));
+    const generated_queries = run_codegen.addOutputFileArg("fixture_queries.zig");
+    _ = try run_codegen.step.addDirectoryWatchInput(b.path("test/fixtures/codegen"));
+    const generated_module = b.createModule(.{
+        .root_source_file = generated_queries,
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "sqlz", .module = sqlz_mod }},
+    });
+    const generated_module_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/generated_module.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "queries", .module = generated_module }},
+        }),
+    });
+    const run_generated_module = b.addRunArtifact(generated_module_tests);
+    test_step.dependOn(&run_generated_module.step);
+
+    const build_api_test = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "--summary", "all" });
+    build_api_test.setCwd(b.path("test/fixtures/build_api"));
+    test_step.dependOn(&build_api_test.step);
+    const build_api_step = b.step("test-build-api", "Run the external build integration fixture");
+    build_api_step.dependOn(&build_api_test.step);
 
     if (zqlite_dep) |dep| {
         sqlz_mod.addImport("zqlite", dep.module("zqlite"));
