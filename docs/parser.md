@@ -28,11 +28,17 @@ checks. A narrow SQLite syntax layer handles SQLite-only forms such as pragmas,
 `INSERT OR IGNORE`, and table options; those forms are not presented unchanged to
 the PostgreSQL parser.
 
-The current SQLite layer masks `AUTOINCREMENT`, trailing `STRICT`, and
-`WITHOUT ROWID` for host-side structural analysis, and maps `INSERT OR IGNORE`
-to its plain insert shape. Masking preserves byte positions; generated/runtime
-SQL remains the original SQLite text. Capability validation is still expanded
-incrementally and never changes the SQL sent to SQLite.
+The SQLite layer masks `AUTOINCREMENT`, trailing `STRICT`, and `WITHOUT ROWID`
+for host-side structural analysis, and maps `INSERT OR IGNORE` to its plain
+insert shape. It also normalizes numeric separators for profiles 3.46 and newer.
+Masking and normalization preserve byte positions; generated/runtime SQL remains
+the original SQLite text.
+
+Validation rejects PostgreSQL-only forms before semantic checking, including
+`SELECT INTO`, row-locking clauses, `DISTINCT ON`, `GROUP BY DISTINCT`, `::`
+casts, `ILIKE`, `SIMILAR TO`, insert overriding clauses, `DELETE USING`, and CTE
+search/cycle clauses. These gates inspect the unpacked protobuf-C AST wherever
+the distinction is structural; no secondary serialized AST is produced.
 
 The adapted AST preserves qualification, aliases, joins, conflict clauses,
 returning clauses, casts, null tests, ordering, and source locations. Identifier

@@ -116,3 +116,56 @@ test "SQLite normalization accepts real-world conflict and table options" {
     defer identifier.deinit();
     try std.testing.expectEqual(@as(usize, 1), identifier.tree.n_stmts);
 }
+
+test "SQLite numeric separators are gated by the selected profile" {
+    try std.testing.expectError(
+        error.UnsupportedSqliteFeature,
+        parser.parseSqliteWithDialect(
+            std.testing.allocator,
+            "SELECT 1_000 AS total",
+            .{ .profile = .v3_45 },
+        ),
+    );
+
+    var parsed = try parser.parseSqliteWithDialect(
+        std.testing.allocator,
+        "SELECT 1_000 AS total, '2_000' AS label -- 3_000\n",
+        .{ .profile = .v3_46 },
+    );
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings(
+        "SELECT 10000 AS total, '2_000' AS label -- 3_000\n",
+        parsed.rewritten.sql,
+    );
+}
+
+test "SQLite validation rejects PostgreSQL-only query clauses" {
+    const unsupported = [_][]const u8{
+        "SELECT id INTO archived_users FROM users",
+        "SELECT id FROM users FOR UPDATE",
+        "SELECT DISTINCT ON (name) name FROM users",
+        "SELECT name::text FROM users",
+        "SELECT name ILIKE 'a%' AS matches FROM users",
+        "SELECT name SIMILAR TO 'a%' AS matches FROM users",
+        "INSERT INTO users(id) OVERRIDING SYSTEM VALUE VALUES (1)",
+        "DELETE FROM users USING archived_users WHERE users.id = archived_users.id",
+    };
+    for (unsupported) |source| {
+        try std.testing.expectError(
+            error.UnsupportedSqliteFeature,
+            parser.parseSqlite(std.testing.allocator, source),
+        );
+    }
+
+    var distinct = try parser.parseSqlite(
+        std.testing.allocator,
+        "SELECT DISTINCT name FROM users",
+    );
+    defer distinct.deinit();
+
+    var quoted = try parser.parseSqlite(
+        std.testing.allocator,
+        "SELECT \"ilike\", 'value::text' FROM users",
+    );
+    defer quoted.deinit();
+}

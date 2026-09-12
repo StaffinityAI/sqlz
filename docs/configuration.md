@@ -63,8 +63,9 @@ The 0.1 profiles are SQLite 3.45 through 3.53 and PostgreSQL 15 through 18. New
 projects default to SQLite 3.53 and PostgreSQL 15 compatibility. A PostgreSQL
 profile means “use syntax and catalog behavior no newer than this major.” SQLite
 uses an explicit capability profile because compile-time options materially change
-the language. `bundled` is known by sqlz; custom or system SQLite builds declare
-capabilities and sqlz verifies runtime compile options where SQLite exposes them.
+the language. The 0.1 checker accepts the reviewed `bundled` capability manifest;
+unknown manifest IDs are rejected. Custom and system manifests require reviewed
+catalog entries in a later release.
 
 At connection and migration time, sqlz rejects a database older than the selected
 profile and a version newer than its tested range. `allow_untested_version` permits

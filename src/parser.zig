@@ -19,6 +19,33 @@ pub const RewrittenSql = struct {
 
 const ParameterStyle = enum { sqlite, postgres };
 
+pub const SqliteProfile = enum(u8) {
+    v3_45,
+    v3_46,
+    v3_47,
+    v3_48,
+    v3_49,
+    v3_50,
+    v3_51,
+    v3_52,
+    v3_53,
+
+    pub fn fromString(value: []const u8) ?SqliteProfile {
+        const values = [_][]const u8{
+            "3.45", "3.46", "3.47", "3.48", "3.49",
+            "3.50", "3.51", "3.52", "3.53",
+        };
+        for (values, 0..) |candidate, index| {
+            if (std.mem.eql(u8, value, candidate)) return @enumFromInt(index);
+        }
+        return null;
+    }
+};
+
+pub const SqliteDialect = struct {
+    profile: SqliteProfile = .v3_53,
+};
+
 pub fn rewriteSqlite(allocator: std.mem.Allocator, source: []const u8) !RewrittenSql {
     return rewriteParameters(allocator, source, .sqlite);
 }
@@ -122,7 +149,7 @@ fn rewriteParameters(
     };
 }
 
-pub const ParseError = error{ EmptyInput, ParseError } || std.mem.Allocator.Error;
+pub const ParseError = error{ EmptyInput, ParseError, UnsupportedSqliteFeature } || std.mem.Allocator.Error;
 
 pub const ParseResult = struct {
     rewritten: RewrittenSql,
@@ -206,12 +233,99 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) ParseError!ParseR
 }
 
 pub fn parseSqlite(allocator: std.mem.Allocator, source: []const u8) ParseError!ParseResult {
-    const normalized = try normalizeSqlite(allocator, source);
-    defer allocator.free(normalized);
-    return parse(allocator, normalized);
+    return parseSqliteWithDialect(allocator, source, .{});
 }
 
-fn normalizeSqlite(allocator: std.mem.Allocator, source: []const u8) std.mem.Allocator.Error![]u8 {
+pub fn parseSqliteWithDialect(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    dialect: SqliteDialect,
+) ParseError!ParseResult {
+    const normalized = try normalizeSqlite(allocator, source, dialect);
+    defer allocator.free(normalized);
+    var parsed = try parse(allocator, normalized);
+    errdefer parsed.deinit();
+    try validateSqliteTree(parsed.tree);
+    return parsed;
+}
+
+fn validateSqliteTree(tree: *const libpg_query.PgQuery__ParseResult) error{UnsupportedSqliteFeature}!void {
+    for (tree.stmts[0..tree.n_stmts]) |raw| {
+        if (raw == null or raw.*.stmt == null) continue;
+        try validateSqliteNode(raw.*.stmt);
+    }
+}
+
+fn validateSqliteNode(node: [*c]libpg_query.PgQuery__Node) error{UnsupportedSqliteFeature}!void {
+    if (node == null) return;
+    switch (node.*.node_case) {
+        libpg_query.PG_QUERY__NODE__NODE_SELECT_STMT => try validateSqliteSelect(node.*.unnamed_0.select_stmt),
+        libpg_query.PG_QUERY__NODE__NODE_INSERT_STMT => {
+            const statement = node.*.unnamed_0.insert_stmt;
+            if (statement == null) return;
+            if (statement.*.override != libpg_query.PG_QUERY__OVERRIDING_KIND__OVERRIDING_KIND_UNDEFINED and
+                statement.*.override != libpg_query.PG_QUERY__OVERRIDING_KIND__OVERRIDING_NOT_SET)
+                return error.UnsupportedSqliteFeature;
+            try validateSqliteNode(statement.*.select_stmt);
+            try validateSqliteWith(statement.*.with_clause);
+        },
+        libpg_query.PG_QUERY__NODE__NODE_UPDATE_STMT => {
+            const statement = node.*.unnamed_0.update_stmt;
+            if (statement != null) try validateSqliteWith(statement.*.with_clause);
+        },
+        libpg_query.PG_QUERY__NODE__NODE_DELETE_STMT => {
+            const statement = node.*.unnamed_0.delete_stmt;
+            if (statement == null) return;
+            if (statement.*.n_using_clause != 0) return error.UnsupportedSqliteFeature;
+            try validateSqliteWith(statement.*.with_clause);
+        },
+        libpg_query.PG_QUERY__NODE__NODE_VIEW_STMT => {
+            const statement = node.*.unnamed_0.view_stmt;
+            if (statement != null) try validateSqliteNode(statement.*.query);
+        },
+        else => {},
+    }
+}
+
+fn validateSqliteSelect(
+    statement: [*c]libpg_query.PgQuery__SelectStmt,
+) error{UnsupportedSqliteFeature}!void {
+    if (statement == null) return;
+    if (statement.*.into_clause != null or statement.*.n_locking_clause != 0 or
+        statement.*.group_distinct != 0)
+        return error.UnsupportedSqliteFeature;
+    if (statement.*.n_distinct_clause != 0) {
+        for (statement.*.distinct_clause[0..statement.*.n_distinct_clause]) |item| {
+            if (item != null and item.*.node_case != libpg_query.PG_QUERY__NODE__NODE__NOT_SET)
+                return error.UnsupportedSqliteFeature;
+        }
+    }
+    try validateSqliteWith(statement.*.with_clause);
+    if (statement.*.larg != null) try validateSqliteSelect(statement.*.larg);
+    if (statement.*.rarg != null) try validateSqliteSelect(statement.*.rarg);
+}
+
+fn validateSqliteWith(
+    clause: [*c]libpg_query.PgQuery__WithClause,
+) error{UnsupportedSqliteFeature}!void {
+    if (clause == null) return;
+    if (clause.*.n_ctes == 0) return;
+    for (clause.*.ctes[0..clause.*.n_ctes]) |node| {
+        if (node == null or node.*.node_case != libpg_query.PG_QUERY__NODE__NODE_COMMON_TABLE_EXPR)
+            continue;
+        const cte = node.*.unnamed_0.common_table_expr;
+        if (cte == null) continue;
+        if (cte.*.search_clause != null or cte.*.cycle_clause != null)
+            return error.UnsupportedSqliteFeature;
+        try validateSqliteNode(cte.*.ctequery);
+    }
+}
+
+fn normalizeSqlite(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    dialect: SqliteDialect,
+) (error{UnsupportedSqliteFeature} || std.mem.Allocator.Error)![]u8 {
     var output: std.ArrayList(u8) = .empty;
     errdefer output.deinit(allocator);
     const State = enum { normal, single, double, backtick, bracket, line_comment, block_comment };
@@ -219,10 +333,27 @@ fn normalizeSqlite(allocator: std.mem.Allocator, source: []const u8) std.mem.All
     var index: usize = 0;
     while (index < source.len) {
         const c = source[index];
+        if (state == .normal and c == ':' and index + 1 < source.len and source[index + 1] == ':')
+            return error.UnsupportedSqliteFeature;
+        if (state == .normal and c == '_' and index > 0 and index + 1 < source.len and
+            std.ascii.isDigit(source[index - 1]) and std.ascii.isDigit(source[index + 1]))
+        {
+            if (@intFromEnum(dialect.profile) < @intFromEnum(SqliteProfile.v3_46))
+                return error.UnsupportedSqliteFeature;
+            // libpg_query does not recognize SQLite's separator. A digit keeps
+            // the token numeric and preserves every source offset; runtime SQL
+            // remains the original text.
+            try output.append(allocator, '0');
+            index += 1;
+            continue;
+        }
         if (state == .normal and isIdentStart(c)) {
             var end = index + 1;
             while (end < source.len and isIdentContinue(source[end])) : (end += 1) {}
             const word = source[index..end];
+            if (std.ascii.eqlIgnoreCase(word, "ILIKE") or
+                (std.ascii.eqlIgnoreCase(word, "SIMILAR") and keywordAfter(source, end, "TO") != null))
+                return error.UnsupportedSqliteFeature;
             if (std.ascii.eqlIgnoreCase(word, "AUTOINCREMENT") or
                 (std.ascii.eqlIgnoreCase(word, "STRICT") and isTrailingTableOption(source, index, end)))
             {

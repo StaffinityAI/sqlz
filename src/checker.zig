@@ -6,6 +6,9 @@ const ir = @import("sqlz_ir");
 const analysis = @import("sqlz_analysis");
 const query_files = @import("sqlz_query_files");
 
+pub const SqliteDialect = parser.SqliteDialect;
+pub const SqliteProfile = parser.SqliteProfile;
+
 pub const MigrationInput = struct {
     revision: migrations.Revision,
     common_sql: []const u8 = "",
@@ -36,8 +39,17 @@ pub fn checkNamedSqlite(
     schema: *const catalog.Catalog,
     source: *const query_files.Source,
 ) Error!CheckedQuery {
+    return checkNamedSqliteWithDialect(allocator, schema, source, .{});
+}
+
+pub fn checkNamedSqliteWithDialect(
+    allocator: std.mem.Allocator,
+    schema: *const catalog.Catalog,
+    source: *const query_files.Source,
+    dialect: SqliteDialect,
+) Error!CheckedQuery {
     if (!source.backends.sqlite) return error.BackendNotSelected;
-    var parsed = try parser.parseSqlite(allocator, source.sql);
+    var parsed = try parser.parseSqliteWithDialect(allocator, source.sql, dialect);
     errdefer parsed.deinit();
     var query = try ir.adapt(allocator, parsed.tree, parsed.rewritten.names);
     errdefer query.deinit();
@@ -52,6 +64,14 @@ pub fn replaySqlite(
     allocator: std.mem.Allocator,
     inputs: []const MigrationInput,
 ) Error!catalog.Catalog {
+    return replaySqliteWithDialect(allocator, inputs, .{});
+}
+
+pub fn replaySqliteWithDialect(
+    allocator: std.mem.Allocator,
+    inputs: []const MigrationInput,
+    dialect: SqliteDialect,
+) Error!catalog.Catalog {
     const revisions = try allocator.alloc(migrations.Revision, inputs.len);
     defer allocator.free(revisions);
     for (inputs, revisions) |input, *revision| revision.* = input.revision;
@@ -63,11 +83,12 @@ pub fn replaySqlite(
     errdefer schema.deinit();
     for (order.indices) |index| {
         const input = inputs[index];
-        try applySqliteRevisionAtomic(
+        try applySqliteRevisionAtomicWithDialect(
             &schema,
             allocator,
             input.common_sql,
             input.sqlite_sql,
+            dialect,
         );
     }
     return schema;
@@ -76,6 +97,14 @@ pub fn replaySqlite(
 pub fn replayDiscoveredSqlite(
     allocator: std.mem.Allocator,
     discovery: *const migrations.Discovery,
+) Error!catalog.Catalog {
+    return replayDiscoveredSqliteWithDialect(allocator, discovery, .{});
+}
+
+pub fn replayDiscoveredSqliteWithDialect(
+    allocator: std.mem.Allocator,
+    discovery: *const migrations.Discovery,
+    dialect: SqliteDialect,
 ) Error!catalog.Catalog {
     const inputs = try allocator.alloc(MigrationInput, discovery.revisions.len);
     defer allocator.free(inputs);
@@ -87,7 +116,7 @@ pub fn replayDiscoveredSqlite(
             .sqlite_sql = revision.sqlite_up,
         };
     }
-    return replaySqlite(allocator, inputs);
+    return replaySqliteWithDialect(allocator, inputs, dialect);
 }
 
 pub fn applySqliteRevisionAtomic(
@@ -96,10 +125,20 @@ pub fn applySqliteRevisionAtomic(
     common_sql: []const u8,
     sqlite_sql: []const u8,
 ) (parser.ParseError || catalog.Error)!void {
+    return applySqliteRevisionAtomicWithDialect(schema, allocator, common_sql, sqlite_sql, .{});
+}
+
+pub fn applySqliteRevisionAtomicWithDialect(
+    schema: *catalog.Catalog,
+    allocator: std.mem.Allocator,
+    common_sql: []const u8,
+    sqlite_sql: []const u8,
+    dialect: SqliteDialect,
+) (parser.ParseError || catalog.Error)!void {
     var staged = try schema.clone(allocator);
     errdefer staged.deinit();
-    try parseAndApply(&staged, allocator, common_sql, false);
-    try parseAndApply(&staged, allocator, sqlite_sql, true);
+    try parseAndApply(&staged, allocator, common_sql, false, dialect);
+    try parseAndApply(&staged, allocator, sqlite_sql, true, dialect);
 
     schema.deinit();
     schema.* = staged;
@@ -110,10 +149,11 @@ fn parseAndApply(
     allocator: std.mem.Allocator,
     sql: []const u8,
     sqlite: bool,
+    dialect: SqliteDialect,
 ) (parser.ParseError || catalog.Error)!void {
     if (std.mem.trim(u8, sql, &std.ascii.whitespace).len == 0) return;
     var parsed = if (sqlite)
-        try parser.parseSqlite(allocator, sql)
+        try parser.parseSqliteWithDialect(allocator, sql, dialect)
     else
         try parser.parse(allocator, sql);
     defer parsed.deinit();

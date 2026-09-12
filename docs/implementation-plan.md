@@ -21,7 +21,7 @@ this slice.
 | Migrations | Parse manifests and discover revision inputs | Complete |
 | Catalog | Deterministic, atomic common + SQLite migration replay | Complete |
 | Catalog | Remaining SQLite 0.1 DDL objects and constraints | Complete |
-| Parser | SQLite-only syntax validation and capability gates | In progress |
+| Parser | SQLite-only syntax validation and capability gates | Complete |
 | Checker | Adapt statements, relations, parameters, and result names into IR | Complete |
 | Checker | Column-reference expression IR with aliases and outer-join facts | Complete |
 | Checker | Resolve projected columns, scalar types, and nullability | Complete |
@@ -41,6 +41,5 @@ this slice.
 
 ## Current next steps
 
-1. Complete the remaining SQLite 0.1 DDL subset and dialect gates.
-2. Convert the examples to generated bindings and add embedded-Zig discovery.
-3. Harden diagnostics, source limits, and the supported dependency matrix.
+1. Convert the examples to generated bindings and add embedded-Zig discovery.
+2. Harden diagnostics, source limits, and the supported dependency matrix.

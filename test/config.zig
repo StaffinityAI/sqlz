@@ -61,3 +61,21 @@ test "semantic validation rejects unsafe project configuration" {
         config.parse(std.testing.allocator, bad_uuid, &meta),
     );
 }
+
+test "rejects unknown SQLite capability manifests" {
+    var meta: ziggy.Deserializer.Meta = .init;
+    const replaced = try std.mem.replaceOwned(
+        u8,
+        std.testing.allocator,
+        valid,
+        ".{ .profile = \"3.53\" }",
+        ".{ .profile = \"3.53\", .capabilities = \"custom\" }",
+    );
+    defer std.testing.allocator.free(replaced);
+    const source = try std.testing.allocator.dupeZ(u8, replaced);
+    defer std.testing.allocator.free(source);
+    try std.testing.expectError(
+        error.UnsupportedSqliteCapabilities,
+        config.parse(std.testing.allocator, source, &meta),
+    );
+}

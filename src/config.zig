@@ -54,6 +54,7 @@ pub const ValidationError = error{
     InvalidSqlRootAlias,
     InvalidPath,
     UnsupportedSqliteProfile,
+    UnsupportedSqliteCapabilities,
     UnsupportedPostgresProfile,
     InvalidLimit,
 };
@@ -107,6 +108,8 @@ pub fn validate(config: *const Config) ValidationError!void {
 
     if (config.backends.sqlite) |sqlite| {
         if (!std.mem.eql(u8, sqlite.database, "main")) return error.InvalidPath;
+        if (!std.mem.eql(u8, sqlite.capabilities, "bundled"))
+            return error.UnsupportedSqliteCapabilities;
         const supported = [_][]const u8{
             "3.45", "3.46", "3.47", "3.48", "3.49",
             "3.50", "3.51", "3.52", "3.53",

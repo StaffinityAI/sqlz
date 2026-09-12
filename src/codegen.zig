@@ -39,14 +39,21 @@ pub fn generateProject(
     var loaded = try config.parse(allocator, config_source, &meta);
     defer loaded.deinit();
     const project = loaded.config();
-    if (project.backends.sqlite == null) return error.SqliteBackendRequired;
+    const sqlite = project.backends.sqlite orelse return error.SqliteBackendRequired;
+    const dialect: checker.SqliteDialect = .{
+        .profile = checker.SqliteProfile.fromString(sqlite.profile) orelse unreachable,
+    };
     const source_limit = std.math.cast(usize, project.limits.source_bytes) orelse return error.InvalidLimit;
 
     var migration_dir = try project_dir.openDir(io, project.migrations, .{ .iterate = true });
     defer migration_dir.close(io);
     var migration_discovery = try migrations.discover(allocator, io, migration_dir, source_limit);
     defer migration_discovery.deinit();
-    var schema = try checker.replayDiscoveredSqlite(allocator, &migration_discovery);
+    var schema = try checker.replayDiscoveredSqliteWithDialect(
+        allocator,
+        &migration_discovery,
+        dialect,
+    );
     defer schema.deinit();
 
     const root_count = project.sql_roots.fields.count();
@@ -80,7 +87,12 @@ pub fn generateProject(
         errdefer allocator.free(inputs);
         for (discovery.sources) |*source| {
             if (!source.backends.sqlite) continue;
-            checked[checked_count] = try checker.checkNamedSqlite(allocator, &schema, source);
+            checked[checked_count] = try checker.checkNamedSqliteWithDialect(
+                allocator,
+                &schema,
+                source,
+                dialect,
+            );
             inputs[checked_count] = .{ .source = source, .checked = &checked[checked_count] };
             checked_count += 1;
         }

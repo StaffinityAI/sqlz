@@ -189,3 +189,25 @@ test "replays SQLite table options and checks INSERT OR IGNORE" {
     defer checked.deinit();
     try std.testing.expectEqual(@as(usize, 2), checked.analysis.parameters.len);
 }
+
+test "uses the selected SQLite profile for checked queries" {
+    var schema = catalog.Catalog.init(std.testing.allocator);
+    defer schema.deinit();
+    var source = try query_files.parse(std.testing.allocator, "profile_literal.sql",
+        \\-- sqlz.name: profile_literal
+        \\-- sqlz.backends: sqlite
+        \\-- sqlz.cardinality: one
+        \\SELECT 1_000 AS total
+    );
+    defer source.deinit();
+
+    try std.testing.expectError(
+        error.UnsupportedSqliteFeature,
+        checker.checkNamedSqliteWithDialect(
+            std.testing.allocator,
+            &schema,
+            &source,
+            .{ .profile = .v3_45 },
+        ),
+    );
+}
