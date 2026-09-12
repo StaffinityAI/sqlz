@@ -77,6 +77,11 @@ pub fn build(b: *std.Build) !void {
         .target = target,
         .optimize = optimize,
     });
+    const migrations_mod = b.addModule("sqlz_migrations", .{
+        .root_source_file = b.path("src/migrations.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
 
     const zqlite_dep = b.lazyDependency("zqlite", .{
         .target = target,
@@ -143,6 +148,21 @@ pub fn build(b: *std.Build) !void {
     test_step.dependOn(&run_catalog.step);
     const catalog_step = b.step("test-catalog", "Run offline catalog replay tests");
     catalog_step.dependOn(&run_catalog.step);
+
+    const migration_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/migrations.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "sqlz_migrations", .module = migrations_mod },
+            },
+        }),
+    });
+    const run_migrations = b.addRunArtifact(migration_tests);
+    test_step.dependOn(&run_migrations.step);
+    const migrations_step = b.step("test-migrations", "Run migration graph tests");
+    migrations_step.dependOn(&run_migrations.step);
 
     if (zqlite_dep) |dep| {
         sqlz_mod.addImport("zqlite", dep.module("zqlite"));
