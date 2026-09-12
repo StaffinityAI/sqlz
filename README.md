@@ -51,6 +51,7 @@ The evolving specification lives in [`docs/`](docs/README.md):
   [performance](docs/performance.md), and [security](docs/security.md)
 - [Design completeness audit](docs/design-audit.md) and
   [architecture decision records](docs/adr/README.md)
+- [Live implementation plan](docs/implementation-plan.md)
 
 These documents define the intended 0.1 behavior and implementation milestones;
 the current slice implements only the subset described below.

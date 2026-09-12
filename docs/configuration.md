@@ -7,25 +7,23 @@ the file. A build may register several named projects.
 ## Configuration shape
 
 ```ziggy
-{
-  format_version: 1,
-  project_id: "550e8400-e29b-41d4-a716-446655440000",
-  migrations: "migrations",
-  sql_roots: { app: "queries", admin: "admin-queries" },
-  zig_roots: ["src"],
-  backends: {
-    sqlite: { profile: "3.53", database: "main", capabilities: "bundled" },
-    postgres: { profile: "15", search_path: ["app", "public"] },
-  },
-  catalog_supplements: ["sqlz/catalog.ziggy"],
-  codecs: {
-    uuid: { sqlite_types: ["BLOB"], postgres_types: ["pg_catalog.uuid"] },
-  },
-  limits: {},
-  migration_lock_timeout_ms: 30000,
-  warnings_as_errors: false,
-  allow_untested_version: false,
-}
+.format_version = 1,
+.project_id = "550e8400-e29b-41d4-a716-446655440000",
+.migrations = "migrations",
+.sql_roots = .{ .app = "queries", .admin = "admin-queries" },
+.zig_roots = ["src"],
+.backends = .{
+  .sqlite = .{ .profile = "3.53", .database = "main", .capabilities = "bundled" },
+  .postgres = .{ .profile = "15", .search_path = ["app", "public"] },
+},
+.catalog_supplements = ["sqlz/catalog.ziggy"],
+.codecs = .{
+  .uuid = .{ .sqlite_types = ["BLOB"], .postgres_types = ["pg_catalog.uuid"] },
+},
+.limits = .{},
+.migration_lock_timeout_ms = 30000,
+.warnings_as_errors = false,
+.allow_untested_version = false,
 ```
 
 The configuration parser rejects unknown required fields, duplicate root aliases,

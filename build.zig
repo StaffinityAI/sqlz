@@ -4,10 +4,26 @@ pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const core_mod = b.addModule("sqlz_core", .{
+        .root_source_file = b.path("src/core.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const ziggy_dep = b.dependency("ziggy", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const config_mod = b.addModule("sqlz_config", .{
+        .root_source_file = b.path("src/config.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "ziggy", .module = ziggy_dep.module("ziggy") }},
+    });
     const sqlz_mod = b.addModule("sqlz", .{
         .root_source_file = b.path("src/sqlz.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{.{ .name = "sqlz_core", .module = core_mod }},
     });
     // libpg_query does not ship a Zig manifest. Zig still fetches its pinned
     // source package into zig-pkg; compile those sources for the selected target
@@ -46,8 +62,21 @@ pub fn build(b: *std.Build) !void {
         .link_libc = true,
     });
     translate_pg_query.addIncludePath(libpg_query_root);
-    sqlz_mod.addImport("libpg_query", translate_pg_query.createModule());
-    sqlz_mod.linkLibrary(libpg_query);
+    const parser_mod = b.addModule("sqlz_parser", .{
+        .root_source_file = b.path("src/parser.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "libpg_query", .module = translate_pg_query.createModule() },
+        },
+    });
+    parser_mod.linkLibrary(libpg_query);
+    const catalog_mod = b.addModule("sqlz_catalog", .{
+        .root_source_file = b.path("src/catalog.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
 
     const zqlite_dep = b.lazyDependency("zqlite", .{
         .target = target,
@@ -63,13 +92,57 @@ pub fn build(b: *std.Build) !void {
             .root_source_file = b.path("test/core.zig"),
             .target = target,
             .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{.{ .name = "sqlz", .module = sqlz_mod }},
+            .imports = &.{.{ .name = "sqlz", .module = core_mod }},
         }),
     });
     const run_core = b.addRunArtifact(core_tests);
     core_step.dependOn(&run_core.step);
     test_step.dependOn(&run_core.step);
+
+    const parser_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/parser.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "sqlz_parser", .module = parser_mod }},
+        }),
+    });
+    const run_parser = b.addRunArtifact(parser_tests);
+    test_step.dependOn(&run_parser.step);
+
+    const config_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/config.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "sqlz_config", .module = config_mod },
+                .{ .name = "ziggy", .module = ziggy_dep.module("ziggy") },
+            },
+        }),
+    });
+    const run_config = b.addRunArtifact(config_tests);
+    test_step.dependOn(&run_config.step);
+    const config_step = b.step("test-config", "Run project configuration tests");
+    config_step.dependOn(&run_config.step);
+
+    const catalog_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/catalog.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "sqlz_parser", .module = parser_mod },
+                .{ .name = "sqlz_catalog", .module = catalog_mod },
+            },
+        }),
+    });
+    const run_catalog = b.addRunArtifact(catalog_tests);
+    test_step.dependOn(&run_catalog.step);
+    const catalog_step = b.step("test-catalog", "Run offline catalog replay tests");
+    catalog_step.dependOn(&run_catalog.step);
 
     if (zqlite_dep) |dep| {
         sqlz_mod.addImport("zqlite", dep.module("zqlite"));
