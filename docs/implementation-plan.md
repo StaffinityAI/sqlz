@@ -10,6 +10,9 @@ this slice.
 | Acceptance | Red test checkpoint before implementation | Complete |
 | Runtime | Backend-neutral query contracts and owned-value helpers | Complete |
 | Runtime | SQLite connections, cardinalities, rows, errors, and transactions | Complete |
+| Runtime | Application-supplied `std.Io` at connection initialization | Complete |
+| Runtime | Compatibility coverage for third-party `std.Io` runtimes (zio) | Complete |
+| Boundaries | Host pipeline verified runtime-agnostic on a non-std `std.Io` | Complete |
 | Boundaries | Core-only target without database driver or parser linkage | Complete |
 | Boundaries | Host parser separated from SQLite runtime | Complete |
 | Configuration | Pin and use Ziggy for strict project configuration | Complete |

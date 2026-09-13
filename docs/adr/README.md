@@ -42,3 +42,4 @@ be replaced only by a new ADR. Records use [0000-template.md](0000-template.md).
 | [0029](0029-supported-platform-and-conformance-matrix.md) | Platform and conformance matrix | Accepted |
 | [0030](0030-documentation-authority-adr-governance-and-performance-gates.md) | Documentation governance and performance | Accepted |
 | [0031](0031-libpg-query-parser.md) | libpg_query parser boundary | Accepted |
+| [0032](0032-std-io-at-runtime-initialization.md) | `std.Io` at runtime initialization | Accepted |

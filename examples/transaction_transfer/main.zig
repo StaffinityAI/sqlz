@@ -9,8 +9,8 @@ const transfer = sqlz.Query(.{
     .params = struct { new_owner: i64, workspace: i64, old_owner: i64 },
 });
 
-pub fn run(allocator: std.mem.Allocator) !void {
-    var conn = try support.openMemory(allocator);
+pub fn run(allocator: std.mem.Allocator, io: std.Io) !void {
+    var conn = try support.openMemory(allocator, io);
     defer conn.deinit();
     try conn.raw().execNoArgs("CREATE TABLE workspaces(id INTEGER PRIMARY KEY, owner_id INTEGER NOT NULL); INSERT INTO workspaces VALUES(7,1);");
     var tx = try support.unwrap(conn.begin());
@@ -21,5 +21,5 @@ pub fn run(allocator: std.mem.Allocator) !void {
 }
 
 pub fn main(init: std.process.Init) !void {
-    try run(init.gpa);
+    try run(init.gpa, init.io);
 }

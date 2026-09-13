@@ -10,8 +10,8 @@ const find_session = sqlz.Query(.{
     .row = struct { id: i64, name: []const u8, csrf_token: []const u8 },
 });
 
-pub fn run(allocator: std.mem.Allocator) !void {
-    var conn = try support.openMemory(allocator);
+pub fn run(allocator: std.mem.Allocator, io: std.Io) !void {
+    var conn = try support.openMemory(allocator, io);
     defer conn.deinit();
     try conn.raw().execNoArgs("CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT NOT NULL); CREATE TABLE sessions(token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL, csrf_token TEXT NOT NULL, expires_at INTEGER NOT NULL); INSERT INTO users VALUES(1,'Ada'); INSERT INTO sessions VALUES('valid',1,'csrf',200);");
     var row = (try support.unwrap(find_session.fetchOptional(&conn, .{ .token = "valid", .now = 100 }))).?;
@@ -21,5 +21,5 @@ pub fn run(allocator: std.mem.Allocator) !void {
 }
 
 pub fn main(init: std.process.Init) !void {
-    try run(init.gpa);
+    try run(init.gpa, init.io);
 }

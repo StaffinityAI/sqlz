@@ -10,8 +10,8 @@ const save = sqlz.Query(.{
     .row = struct { user_id: i64, value: []const u8 },
 });
 
-pub fn run(allocator: std.mem.Allocator) !void {
-    var conn = try support.openMemory(allocator);
+pub fn run(allocator: std.mem.Allocator, io: std.Io) !void {
+    var conn = try support.openMemory(allocator, io);
     defer conn.deinit();
     try conn.raw().execNoArgs("CREATE TABLE preferences(user_id INTEGER PRIMARY KEY, value TEXT NOT NULL);");
     var first = try support.unwrap(save.fetchOne(&conn, .{ .user_id = 1, .value = "light" }));
@@ -22,5 +22,5 @@ pub fn run(allocator: std.mem.Allocator) !void {
 }
 
 pub fn main(init: std.process.Init) !void {
-    try run(init.gpa);
+    try run(init.gpa, init.io);
 }

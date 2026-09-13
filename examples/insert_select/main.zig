@@ -9,8 +9,8 @@ const copy_permission = sqlz.Query(.{
     .params = struct { new_key: []const u8, old_key: []const u8 },
 });
 
-pub fn run(allocator: std.mem.Allocator) !void {
-    var conn = try support.openMemory(allocator);
+pub fn run(allocator: std.mem.Allocator, io: std.Io) !void {
+    var conn = try support.openMemory(allocator, io);
     defer conn.deinit();
     try conn.raw().execNoArgs("CREATE TABLE role_permissions(role_id INTEGER NOT NULL, permission_key TEXT NOT NULL, PRIMARY KEY(role_id, permission_key)); INSERT INTO role_permissions VALUES(7,'read');");
     const first = try support.unwrap(copy_permission.execute(&conn, .{ .new_key = "share", .old_key = "read" }));
@@ -19,5 +19,5 @@ pub fn run(allocator: std.mem.Allocator) !void {
 }
 
 pub fn main(init: std.process.Init) !void {
-    try run(init.gpa);
+    try run(init.gpa, init.io);
 }

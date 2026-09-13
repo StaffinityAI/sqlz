@@ -174,6 +174,13 @@ pub fn build(b: *std.Build) !void {
         .target = target,
         .optimize = optimize,
     });
+    // zio is an alternative `std.Io` implementation. sqlz never depends on it;
+    // it is pulled in only to prove the runtime initialization works with a
+    // non-std implementation of the interface.
+    const zio_dep = b.lazyDependency("zio", .{
+        .target = target,
+        .optimize = optimize,
+    });
 
     const test_step = b.step("test", "Run the complete sqlz test suite");
     const core_step = b.step("test-core", "Run backend-neutral tests");
@@ -370,6 +377,29 @@ pub fn build(b: *std.Build) !void {
     const run_generated_module = b.addRunArtifact(generated_module_tests);
     test_step.dependOn(&run_generated_module.step);
 
+    if (zio_dep) |zio| {
+        // The host pipeline reads every input through the caller's `std.Io`;
+        // prove that half is runtime-agnostic too, not just the connections.
+        const zio_host_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("test/zio_host.zig"),
+                .target = host_target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "sqlz_codegen", .module = codegen_mod },
+                    .{ .name = "zio", .module = zio.module("zio") },
+                },
+            }),
+        });
+        const run_zio_host = b.addRunArtifact(zio_host_tests);
+        run_zio_host.setCwd(b.path("."));
+        _ = try run_zio_host.step.addDirectoryWatchInput(b.path("test/fixtures/codegen"));
+        test_step.dependOn(&run_zio_host.step);
+        const zio_host_step = b.step("test-zio-host", "Run the zio host-pipeline tests");
+        zio_host_step.dependOn(&run_zio_host.step);
+    }
+
     const build_api_test = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "--summary", "all" });
     build_api_test.setCwd(b.path("test/fixtures/build_api"));
     test_step.dependOn(&build_api_test.step);
@@ -392,6 +422,27 @@ pub fn build(b: *std.Build) !void {
         });
         const run_sqlite = b.addRunArtifact(sqlite_tests);
         test_step.dependOn(&run_sqlite.step);
+
+        if (zio_dep) |zio| {
+            const zio_tests = b.addTest(.{
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("test/zio.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .link_libc = true,
+                    .imports = &.{
+                        .{ .name = "sqlz", .module = sqlz_mod },
+                        .{ .name = "zio", .module = zio.module("zio") },
+                    },
+                }),
+            });
+            const run_zio = b.addRunArtifact(zio_tests);
+            test_step.dependOn(&run_zio.step);
+            const zio_step = b.step("test-zio", "Run the zio std.Io compatibility tests");
+            zio_step.dependOn(&run_zio.step);
+        } else {
+            test_step.dependOn(&b.addFail("zio is required for the complete test suite").step);
+        }
 
         const support_mod = b.createModule(.{
             .root_source_file = b.path("examples/support.zig"),

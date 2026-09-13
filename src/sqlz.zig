@@ -20,6 +20,11 @@ pub const blob = zqlite.blob;
 pub const sqlite = struct {
     pub const Conn = struct {
         allocator: std.mem.Allocator,
+        /// Retained from initialization so every handle derived from this
+        /// connection reaches the same `std.Io` implementation the caller
+        /// selected. SQLite itself is a blocking in-process library, but the
+        /// executor interface is shared with backends that do perform I/O.
+        io: std.Io,
         conn: zqlite.Conn,
         owned: bool = true,
 
@@ -56,15 +61,24 @@ pub const sqlite = struct {
 
         pub fn fetch(self: *Conn, comptime Row: type, sql: []const u8, args: anytype) Result(Rows(Row)) {
             const native = self.conn.rows(sql, args) catch |cause| return .{ .err = makeError(self.allocator, self.conn, .fetch, cause) };
-            return .{ .ok = .{ .allocator = self.allocator, .conn = self.conn, .native = native } };
+            return .{ .ok = .{ .allocator = self.allocator, .io = self.io, .conn = self.conn, .native = native } };
         }
     };
 
-    pub fn open(allocator: std.mem.Allocator, path: []const u8) !Conn {
+    /// Opens an owned SQLite connection. `io` is the `std.Io` implementation
+    /// the application runs on (`std.Io.Threaded`, or a third-party runtime
+    /// such as zio); it is stored on the connection rather than passed per
+    /// call so generated bindings keep a single executor argument.
+    pub fn open(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !Conn {
         const path_z = try allocator.dupeZ(u8, path);
         defer allocator.free(path_z);
         const conn = try zqlite.open(path_z.ptr, zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
-        return .{ .allocator = allocator, .conn = conn };
+        return .{ .allocator = allocator, .io = io, .conn = conn };
+    }
+
+    /// Wraps a connection the caller continues to own; `deinit` never closes it.
+    pub fn borrow(allocator: std.mem.Allocator, io: std.Io, conn: zqlite.Conn) Conn {
+        return .{ .allocator = allocator, .io = io, .conn = conn, .owned = false };
     }
 
     pub fn Single(comptime Row: type) type {
@@ -111,6 +125,11 @@ pub const sqlite = struct {
     pub fn Rows(comptime Row: type) type {
         return struct {
             allocator: std.mem.Allocator,
+            /// Streaming iterators outlive the call that produced them, so they
+            /// carry the connection's interface rather than reaching back for
+            /// it. A SQLite cursor never uses it; a PostgreSQL cursor advances
+            /// over a socket and will.
+            io: std.Io,
             conn: zqlite.Conn,
             native: zqlite.Rows,
             finished: bool = false,
@@ -159,6 +178,10 @@ pub const sqlite = struct {
 
         pub fn raw(self: *Transaction) zqlite.Conn {
             return self.connection.conn;
+        }
+
+        pub fn io(self: *Transaction) std.Io {
+            return self.connection.io;
         }
 
         pub fn commit(self: *Transaction) Result(void) {

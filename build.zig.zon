@@ -20,6 +20,11 @@
             .hash = "pg-0.0.0-Wp_7gVzCBgDIFbqjSA6I7bJQj0gh66KzpmDxvx1Nn4PV",
             .lazy = true,
         },
+        .zio = .{
+            .url = "git+https://github.com/lalinsky/zio?ref=v0.17.0#9711d68104946a457f151776000210d8adca3f3e",
+            .hash = "zio-0.17.0-xHbVVI_jJQC3YbgU7JydwAV7MuASkOTd73YqBaKlFFUz",
+            .lazy = true,
+        },
     },
     .minimum_zig_version = "0.16.0",
     .paths = .{""},

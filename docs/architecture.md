@@ -97,9 +97,10 @@ helpers, migration targets, and migration reports. It has no import of
 When enabled, `sqlz.sqlite` and `sqlz.postgres` expose adapters around native
 connections, pools, transactions, statements, rows, and driver errors. Adapters
 must expose access to the underlying driver value for unchecked operations.
-They do not attempt to make connection construction identical: PostgreSQL needs
-`std.Io` and authentication/network options, while SQLite needs a path and open
-flags.
+They do not attempt to make connection construction identical beyond the shared
+`std.Io` argument: every backend is initialized with the application's
+interface and retains it, then PostgreSQL adds authentication/network options
+while SQLite adds a path and open flags.
 
 ## Query build flow
 
@@ -134,7 +135,7 @@ codec implementation, but never an SQL syntax or schema error.
 
 | Concern | SQLite / `zqlite` | PostgreSQL / `pg.zig` | Shared guarantee |
 | --- | --- | --- | --- |
-| Connection setup | file/URI and open flags | `std.Io`, network and auth options | setup remains backend-specific |
+| Connection setup | file/URI and open flags | network and auth options | `std.Io` supplied at initialization; the rest stays backend-specific |
 | Pools | native zqlite pool wrapper | native pg.zig pool wrapper | sqlz adds no pool implementation |
 | Parameters | `?N` generated from `:name` | `$N` generated from `:name` | one typed argument struct |
 | Row storage | SQLite statement-owned values | result-buffer-owned values | row views never outlive their result |

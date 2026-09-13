@@ -17,8 +17,8 @@ const list = sqlz.Query(.{
     .row = User,
 });
 
-pub fn run(allocator: std.mem.Allocator) !void {
-    var conn = try support.openMemory(allocator);
+pub fn run(allocator: std.mem.Allocator, io: std.Io) !void {
+    var conn = try support.openMemory(allocator, io);
     defer conn.deinit();
     try conn.raw().execNoArgs("CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT NOT NULL);");
     var inserted = try support.unwrap(create.fetchOne(&conn, .{ .name = "Ada" }));
@@ -30,5 +30,5 @@ pub fn run(allocator: std.mem.Allocator) !void {
 }
 
 pub fn main(init: std.process.Init) !void {
-    try run(init.gpa);
+    try run(init.gpa, init.io);
 }

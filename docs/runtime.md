@@ -4,6 +4,47 @@ sqlz provides thin typed wrappers over `zqlite` and `pg.zig`. Drivers continue t
 own sockets, wire protocols, preparation, statement caches, and pooling. sqlz owns
 checked bindings, decoding, consistent result/error shapes, and migration behavior.
 
+## `std.Io` and runtimes
+
+sqlz does not own an I/O runtime and never selects one. Every connection is
+initialized with the `std.Io` the application already runs on, and the handle
+retains it:
+
+```zig
+var conn = try sqlz.sqlite.open(allocator, io, "app.db");
+defer conn.deinit();
+```
+
+`io` may be `std.Io.Threaded` or any third-party implementation of the
+interface, such as [zio](https://github.com/lalinsky/zio):
+
+```zig
+const runtime = try zio.Runtime.init(allocator, .{});
+defer runtime.deinit();
+
+var conn = try sqlz.sqlite.open(allocator, runtime.io(), "app.db");
+```
+
+The interface is stored on the connection rather than passed per call because
+generated bindings take exactly one executor argument. Handles derived from a
+connection reach the same implementation: `Transaction.io()` returns the
+connection's, streaming `Rows` carry a copy because they outlive the call that
+produced them, and the field is readable as `conn.io` for escape hatches.
+Materialized handles — `Single` and `Owned` rows — deliberately do not carry
+it: their remaining work is memory, not I/O.
+
+`std.Io.Evented` is not a supported target on Zig 0.16.0. It resolves to
+`std.Io.Dispatch` on macOS, whose `deinit` does not compile in that release, so
+sqlz makes no claim about it.
+
+SQLite is an in-process blocking library, so the SQLite backend performs no
+`std.Io` operations of its own; a long SQLite call occupies whichever task
+invokes it. Runtimes that offer a blocking-work escape hatch (for example
+zio's `spawnBlocking` and `blockInPlace`) can keep the scheduler responsive.
+The PostgreSQL backend does perform socket I/O and will use the retained
+interface, which is why it is required at initialization now rather than added
+later as a breaking change.
+
 ## Handles and ownership
 
 Each backend exposes distinct borrowed and owned connection wrappers. An owned

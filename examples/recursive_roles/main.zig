@@ -10,8 +10,8 @@ const effective = sqlz.Query(.{
     .row = struct { id: i64, depth: i64 },
 });
 
-pub fn run(allocator: std.mem.Allocator) !void {
-    var conn = try support.openMemory(allocator);
+pub fn run(allocator: std.mem.Allocator, io: std.Io) !void {
+    var conn = try support.openMemory(allocator, io);
     defer conn.deinit();
     try conn.raw().execNoArgs("CREATE TABLE roles(id INTEGER PRIMARY KEY, child_id INTEGER); INSERT INTO roles VALUES(1,NULL),(2,1),(3,2);");
     var rows = try support.unwrap(effective.fetch(&conn, .{ .role = 1, .depth = 8 }));
@@ -22,5 +22,5 @@ pub fn run(allocator: std.mem.Allocator) !void {
 }
 
 pub fn main(init: std.process.Init) !void {
-    try run(init.gpa);
+    try run(init.gpa, init.io);
 }

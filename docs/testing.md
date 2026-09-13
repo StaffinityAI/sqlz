@@ -16,6 +16,10 @@ behavior, and migration safety fail independently.
   native pools, arrays, non-STRICT SQLite validation, and error ownership;
 - build-matrix tests proving core-only, SQLite-only, PostgreSQL-only, and both
   backends fetch and link only selected runtime dependencies;
+- `std.Io` tests covering both halves on a non-std implementation: connections,
+  transactions, and streaming cursors retain the supplied interface, and the
+  host pipeline emits byte-identical bindings regardless of which one reads the
+  inputs;
 - CLI human/JSON golden tests, stdout/stderr separation, exit codes, and destructive
   confirmation tests.
 

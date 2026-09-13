@@ -10,8 +10,8 @@ const lookup = sqlz.Query(.{
     .row = struct { name: []const u8, label: ?[]const u8 },
 });
 
-pub fn run(allocator: std.mem.Allocator) !void {
-    var conn = try support.openMemory(allocator);
+pub fn run(allocator: std.mem.Allocator, io: std.Io) !void {
+    var conn = try support.openMemory(allocator, io);
     defer conn.deinit();
     try conn.raw().execNoArgs("CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT NOT NULL); CREATE TABLE profiles(user_id INTEGER PRIMARY KEY, label TEXT); INSERT INTO users VALUES(1,'Ada');");
     var result = (try support.unwrap(lookup.fetchOptional(&conn, .{ .id = 1 }))).?;
@@ -20,5 +20,5 @@ pub fn run(allocator: std.mem.Allocator) !void {
 }
 
 pub fn main(init: std.process.Init) !void {
-    try run(init.gpa);
+    try run(init.gpa, init.io);
 }

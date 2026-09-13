@@ -1,3 +1,4 @@
+const std = @import("std");
 const sqlz = @import("sqlz");
 
 pub fn unwrap(result: anytype) !@TypeOf(result.ok) {
@@ -10,6 +11,6 @@ pub fn unwrap(result: anytype) !@TypeOf(result.ok) {
     };
 }
 
-pub fn openMemory(allocator: @import("std").mem.Allocator) !sqlz.sqlite.Conn {
-    return sqlz.sqlite.open(allocator, ":memory:");
+pub fn openMemory(allocator: std.mem.Allocator, io: std.Io) !sqlz.sqlite.Conn {
+    return sqlz.sqlite.open(allocator, io, ":memory:");
 }

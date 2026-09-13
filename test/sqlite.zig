@@ -77,7 +77,7 @@ const membership = sqlz.Query(.{
 });
 
 test "all four cardinalities execute through SQLite" {
-    var conn = try sqlz.sqlite.open(std.testing.allocator, ":memory:");
+    var conn = try sqlz.sqlite.open(std.testing.allocator, std.testing.io, ":memory:");
     defer conn.deinit();
     try conn.raw().execNoArgs(
         "CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE, active INTEGER NOT NULL CHECK(active IN (0,1)));",
@@ -102,7 +102,7 @@ test "all four cardinalities execute through SQLite" {
 }
 
 test "optional and one preserve distinct empty-result behavior" {
-    var conn = try sqlz.sqlite.open(std.testing.allocator, ":memory:");
+    var conn = try sqlz.sqlite.open(std.testing.allocator, std.testing.io, ":memory:");
     defer conn.deinit();
     try conn.raw().execNoArgs(
         "CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE, active INTEGER NOT NULL);",
@@ -124,7 +124,7 @@ test "optional and one preserve distinct empty-result behavior" {
 }
 
 test "upsert returning exposes the winning row" {
-    var conn = try sqlz.sqlite.open(std.testing.allocator, ":memory:");
+    var conn = try sqlz.sqlite.open(std.testing.allocator, std.testing.io, ":memory:");
     defer conn.deinit();
     try conn.raw().execNoArgs(
         "CREATE TABLE preferences(user_id INTEGER PRIMARY KEY, theme TEXT NOT NULL, updated_at INTEGER NOT NULL);",
@@ -138,7 +138,7 @@ test "upsert returning exposes the winning row" {
 }
 
 test "left joins decode nullable fields and owned rows survive result cleanup" {
-    var conn = try sqlz.sqlite.open(std.testing.allocator, ":memory:");
+    var conn = try sqlz.sqlite.open(std.testing.allocator, std.testing.io, ":memory:");
     defer conn.deinit();
     try conn.raw().execNoArgs(
         "CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE, active INTEGER NOT NULL);" ++
@@ -154,7 +154,7 @@ test "left joins decode nullable fields and owned rows survive result cleanup" {
 }
 
 test "recursive CTE streams a bounded hierarchy" {
-    var conn = try sqlz.sqlite.open(std.testing.allocator, ":memory:");
+    var conn = try sqlz.sqlite.open(std.testing.allocator, std.testing.io, ":memory:");
     defer conn.deinit();
     try conn.raw().execNoArgs(
         "CREATE TABLE nodes(id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES nodes(id));" ++
@@ -168,7 +168,7 @@ test "recursive CTE streams a bounded hierarchy" {
 }
 
 test "transaction deinit rolls back and commit persists" {
-    var conn = try sqlz.sqlite.open(std.testing.allocator, ":memory:");
+    var conn = try sqlz.sqlite.open(std.testing.allocator, std.testing.io, ":memory:");
     defer conn.deinit();
     try conn.raw().execNoArgs("CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE, active INTEGER NOT NULL);");
     {
@@ -186,6 +186,24 @@ test "transaction deinit rolls back and commit persists" {
         try unwrap(tx.commit());
     }
     var found = (try unwrap(find_user.fetchOptional(&conn, .{ .email = "ada@example.test" }))).?;
+    defer found.deinit();
+}
+
+test "a borrowed connection keeps the caller's handle and io" {
+    var owner = try sqlz.sqlite.open(std.testing.allocator, std.testing.io, ":memory:");
+    defer owner.deinit();
+    try owner.raw().execNoArgs("CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE, active INTEGER NOT NULL);");
+
+    {
+        var borrowed = sqlz.sqlite.borrow(std.testing.allocator, std.testing.io, owner.raw());
+        // `deinit` must not close a handle the caller still owns.
+        defer borrowed.deinit();
+        try std.testing.expectEqual(std.testing.io.vtable, borrowed.io.vtable);
+        var inserted = try unwrap(create_user.fetchOne(&borrowed, .{ .name = "Ada", .email = "ada@example.test", .active = true }));
+        inserted.deinit();
+    }
+
+    var found = (try unwrap(find_user.fetchOptional(&owner, .{ .email = "ada@example.test" }))).?;
     defer found.deinit();
 }
 

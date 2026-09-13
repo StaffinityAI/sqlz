@@ -15,6 +15,9 @@ generated type-safe bindings, and revision-based migrations.
 - PostgreSQL support through [`pg.zig`](https://github.com/karlseguin/pg.zig).
 - Lazy backend dependencies, with neither backend enabled by default and support
   for enabling either or both.
+- Runtime handles initialized with the application's `std.Io`, so sqlz runs on
+  `std.Io.Threaded` or a third-party runtime such as
+  [zio](https://github.com/lalinsky/zio) without depending on either.
 - Checked queries authored as named `.sql` files or typed Zig declarations.
 - A host-side checker using pinned `libpg_query` for shared SQL syntax, with a
   narrow SQLite extension layer—no SQL parsing or semantic analysis at comptime.
@@ -63,6 +66,8 @@ many cardinalities; borrowed and owned rows; nullable joins; recursive CTEs;
 upserts with RETURNING; transaction commit/rollback; portable named-parameter
 rewriting; and `libpg_query` parsing. Each scenario under `examples/` is also an
 independently runnable executable, for example `zig build run-account_crud`.
+`zig build test-zio` and `zig build test-zio-host` repeat the runtime and host
+coverage on a zio-backed `std.Io`.
 
 The immediate next milestone is the offline semantic checker and binding
 generator on top of this parser/runtime foundation. See the

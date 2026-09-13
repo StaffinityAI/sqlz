@@ -10,8 +10,8 @@ const counts = sqlz.Query(.{
     .row = struct { total: i64 },
 });
 
-pub fn run(allocator: std.mem.Allocator) !void {
-    var conn = try support.openMemory(allocator);
+pub fn run(allocator: std.mem.Allocator, io: std.Io) !void {
+    var conn = try support.openMemory(allocator, io);
     defer conn.deinit();
     try conn.raw().execNoArgs("CREATE TABLE organization_members(user_id INTEGER NOT NULL); CREATE TABLE workspace_members(user_id INTEGER NOT NULL); INSERT INTO organization_members VALUES(1); INSERT INTO workspace_members VALUES(1),(1),(2);");
     var row = try support.unwrap(counts.fetchOne(&conn, .{ .user = 1 }));
@@ -20,5 +20,5 @@ pub fn run(allocator: std.mem.Allocator) !void {
 }
 
 pub fn main(init: std.process.Init) !void {
-    try run(init.gpa);
+    try run(init.gpa, init.io);
 }

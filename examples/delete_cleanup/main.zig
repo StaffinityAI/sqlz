@@ -9,8 +9,8 @@ const cleanup = sqlz.Query(.{
     .params = struct { now: i64 },
 });
 
-pub fn run(allocator: std.mem.Allocator) !void {
-    var conn = try support.openMemory(allocator);
+pub fn run(allocator: std.mem.Allocator, io: std.Io) !void {
+    var conn = try support.openMemory(allocator, io);
     defer conn.deinit();
     try conn.raw().execNoArgs("CREATE TABLE sessions(id INTEGER PRIMARY KEY, expires_at INTEGER NOT NULL); INSERT INTO sessions VALUES(1,10),(2,20),(3,30);");
     const result = try support.unwrap(cleanup.execute(&conn, .{ .now = 20 }));
@@ -18,5 +18,5 @@ pub fn run(allocator: std.mem.Allocator) !void {
 }
 
 pub fn main(init: std.process.Init) !void {
-    try run(init.gpa);
+    try run(init.gpa, init.io);
 }
