@@ -400,7 +400,9 @@ pub fn build(b: *std.Build) !void {
         zio_host_step.dependOn(&run_zio_host.step);
     }
 
-    const build_api_test = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "--summary", "all" });
+    // `--summary failures` keeps the nested build quiet on success; a failing
+    // fixture still prints its own step tree.
+    const build_api_test = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "--summary", "failures" });
     build_api_test.setCwd(b.path("test/fixtures/build_api"));
     test_step.dependOn(&build_api_test.step);
     const build_api_step = b.step("test-build-api", "Run the external build integration fixture");

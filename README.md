@@ -74,6 +74,21 @@ generator on top of this parser/runtime foundation. See the
 [implementation roadmap](docs/README.md#implementation-roadmap) for the complete
 sequence and acceptance gates.
 
+## Development
+
+Formatting and the pre-commit pipeline run through [hk](https://hk.jdx.dev),
+configured in [`hk.pkl`](hk.pkl). hk reads its config with
+[pkl](https://pkl-lang.org), so install both, then wire the git hook:
+
+```sh
+mise use -g hk pkl
+hk install
+```
+
+`hk check` runs `zig fmt --check` over the tracked Zig and ZON sources and then
+the full `zig build test` suite; `hk fix` formats in place. The same two steps
+run on every commit.
+
 ## License
 
 See [LICENSE](LICENSE).

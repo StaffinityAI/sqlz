@@ -1,0 +1,37 @@
+amends "package://github.com/jdx/hk/releases/download/v1.56.1/hk@1.56.1#/Config.pkl"
+
+min_hk_version = "1.56.1"
+
+local projectSteps = new Mapping<String, Step> {
+  // `zig fmt` also formats `.zon`. Running it over the files hk passes in keeps
+  // the ignored dependency trees (`zig-pkg/`, `.zig-cache/`, `zig-out/`, and the
+  // nested `test/fixtures/build_api/zig-pkg/`) out of the check.
+  ["fmt"] {
+    glob = List("**/*.zig", "**/*.zon")
+    stage = List("**/*.zig", "**/*.zon")
+    check = "zig fmt --check {{files}}"
+    fix = "zig fmt {{files}}"
+  }
+  // `zig build test` is the whole suite: core, parser, config, catalog,
+  // migrations, checker, generator, sqlite, zio, examples, and the external
+  // build-API fixture. It is a single whole-project command, so no `glob`, and
+  // `exclusive` keeps it from racing the formatter for the build cache.
+  ["test"] {
+    check = "zig build test"
+    exclusive = true
+    depends = "fmt"
+  }
+}
+
+hooks {
+  ["pre-commit"] {
+    stash = "git"
+    steps = projectSteps
+  }
+  ["check"] {
+    steps = projectSteps
+  }
+  ["fix"] {
+    steps = projectSteps
+  }
+}
