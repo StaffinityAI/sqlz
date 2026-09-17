@@ -75,19 +75,21 @@ explicit locking behavior, and a connection pool. The driver handle behind
 `raw()` stays available for features sqlz does not model, but ordinary
 application work never reaches for it.
 
-Every scenario under `examples/` runs through generated checked bindings: the
-examples are one sqlz project whose schema lives in `examples/migrations` and
-whose SQL lives in `examples/queries`, checked offline and compiled into the
-build cache. Each is also an independently runnable executable, for example
-`zig build run-account_crud`. Three of them demonstrate the runtime surface an
-application needs beyond query execution — `enum_roles` maps a column and a
-parameter onto a Zig enum through a registered codec, `arena_rows` collects a
-result set into an arena scope with no per-row cleanup, and `pooled_reads` runs
-checked queries straight against a connection pool.
+Every scenario under `examples/` is checked offline: the examples are one sqlz
+project whose schema lives in `examples/migrations`, whose SQL lives in
+`examples/queries`, and whose Zig-declared queries live in
+`examples/embedded_declarations`. Each is also an independently runnable
+executable, for example `zig build run-account_crud`. Four of them demonstrate
+the surface an application needs beyond plain query execution — `enum_roles`
+maps a column and a parameter onto a Zig enum through a registered codec,
+`arena_rows` collects a result set into an arena scope with no per-row cleanup,
+`pooled_reads` runs checked queries straight against a connection pool, and
+`embedded_declarations` declares its queries in Zig instead of `.sql` files.
 
-Queries authored as Zig declarations are checked too: their `.params` and
-`.row` structs are compared against the SQL for field names, order,
-nullability, and type, so a declaration cannot drift from the query beside it.
+Queries authored as Zig declarations are checked the same way, and their
+`.params` and `.row` structs are compared against the SQL for field names,
+order, nullability, and type, so a declaration cannot drift from the query it
+sits beside.
 
 The immediate next milestone is diagnostics and resource-limit hardening. See the
 [implementation roadmap](docs/README.md#implementation-roadmap) for the complete

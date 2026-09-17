@@ -89,12 +89,14 @@ Backend-specific escape hatches are explicit methods returning the native handle
 and give up sqlz portability guarantees for that operation.
 
 0.1 offers no portable cancellation, query timeout, fetch-size, or generic query
-options API. Applications use an explicit backend escape hatch when needed.
+options API. Applications use an explicit backend escape hatch when needed. The
+SQLite busy timeout in `OpenOptions` is connection setup, not a portable
+per-query timeout: it governs how long the driver waits for a lock.
 
 ## Rows and streams
 
 Borrowed row values remain valid only until the next cursor advance, statement
-reset, or owning result deinitialization. `row.toOwned(allocator)` copies all
+reset, or owning result deinitialization. `result.toOwned(allocator)` copies all
 borrowed text, blobs, arrays, and codec-owned data and requires `deinit`. Streaming
 iterators own or borrow the executing handle exactly as stated by their type and
 must be finalized.

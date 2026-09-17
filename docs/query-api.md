@@ -284,16 +284,21 @@ an infallible destructor.
 
 ### Owned rows
 
-Every generated row view with borrowed fields exposes:
+Owned conversion is exposed by the result handle that owns the borrowed
+storage, not by the row value:
 
 ```zig
-pub fn toOwned(row: Row, allocator: ?std.mem.Allocator) sqlz.Result(OwnedRow);
+pub fn toOwned(result: *Single(Row), allocator: ?std.mem.Allocator) sqlz.Result(Owned(Row));
+pub fn nextOwned(rows: *Rows(Row), allocator: ?std.mem.Allocator) sqlz.Result(?Owned(Row));
+pub fn collectOwned(rows: *Rows(Row), allocator: ?std.mem.Allocator) sqlz.Result(OwnedRows(Row));
 ```
 
 `null` uses the connection's owned-row scope and is an `invalid_data` error when
-no scope is open; an explicit allocator always owns the copy. Streaming results
-expose `nextOwned(allocator)` and `collectOwned(allocator)` with the same rule.
-`OwnedRow.deinit` frees nothing when the scope releases wholesale.
+no scope is open; an explicit allocator always owns the copy. `Owned(Row)`
+exposes `row()` and `deinit()`, and `deinit` frees nothing when the scope
+releases wholesale. Converting does not finalize the statement: the result
+handle still needs its own `deinit`, which is what makes a conversion before
+`commit` the way to hold onto a `RETURNING` row.
 
 `OwnedRow` duplicates text, blob, JSON, and codec-declared borrowed fields.
 Scalars are copied. It exposes `deinit(allocator)` and is independent of the

@@ -27,7 +27,10 @@ the file. A build may register several named projects.
 ```
 
 The configuration parser rejects unknown required fields, duplicate root aliases,
-invalid paths, unsupported format versions, and codec IDs not bound by the build.
+invalid paths, unsupported format versions, codec IDs that are not Zig
+identifiers, and codec entries with no database pattern. A codec ID without a
+build binding, or a binding the file never declares, fails the project check
+instead, since only the build knows the bindings.
 Relative paths resolve from the configuration file. Paths are normalized and may
 not escape the project root unless the build explicitly supplies an allowed lazy
 path.

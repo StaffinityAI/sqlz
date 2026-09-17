@@ -2,7 +2,7 @@
 .project_id = "8f1f2f7c-6f2a-4f5a-9a4a-1d6f3b5c7e21",
 .migrations = "migrations",
 .sql_roots = .{ .app = "queries" },
-.zig_roots = [],
+.zig_roots = ["embedded_declarations"],
 .backends = .{ .sqlite = .{ .profile = "3.53" } },
 .codecs = .{
   .tier = .{ .sqlite_types = ["INTEGER"] },

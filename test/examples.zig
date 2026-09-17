@@ -51,3 +51,7 @@ test "arena rows example" {
 test "pooled reads example" {
     try @import("pooled_reads").run(std.testing.allocator, std.testing.io);
 }
+
+test "embedded declarations example" {
+    try @import("embedded_declarations").run(std.testing.allocator, std.testing.io);
+}

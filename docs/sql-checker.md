@@ -32,7 +32,10 @@ Successful output contains:
 - a Zig module for named `.sql` queries;
 - backend SQL and checked metadata needed by embedded declarations;
 - an embedded migration bundle when requested;
-- a dependency manifest listing every file read;
+- a dependency manifest listing every file read, for a consumer that drives the
+  tool outside `sqlz_build`; the build integration instead registers the
+  project's candidate inputs at configure time, which also catches files that
+  were added or removed;
 - a versioned metadata file used for cache validation.
 
 No generated output is replaced when checking fails.

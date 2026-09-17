@@ -16,6 +16,6 @@ do not copy application modules or substantial SQL from their references.
   [SQLite.swift](https://github.com/stephencelis/SQLite.swift/blob/master/Documentation/Index.md).
 - `paginated_search` represents the ordered limit/offset query shapes used in
   [sqlc's end-to-end examples](https://github.com/sqlc-dev/sqlc/tree/main/internal/endtoend/testdata).
-- `enum_roles`, `arena_rows`, and `pooled_reads` are original examples for the
-  sqlz runtime surface itself: codec-mapped enums, arena-scoped owned rows, and
-  pooled connections.
+- `enum_roles`, `arena_rows`, `pooled_reads`, and `embedded_declarations` are
+  original examples for the sqlz surface itself: codec-mapped enums,
+  arena-scoped owned rows, pooled connections, and queries declared in Zig.

@@ -1,8 +1,12 @@
 # Design completeness audit
 
-This audit is the exhaustive 0.1 design-document gap register as of 2026-09-03.
-“Resolved” means a normative design document and an Accepted ADR exist; it does
-not imply an implementation exists. No known architectural decision remains open.
+This audit is the exhaustive 0.1 design-document gap register as of 2026-09-03,
+reviewed 2026-09-17 when ADRs 0033–0035 added connection-scoped owned rows,
+typed SQLite connection settings with the native-pool wrapper, and derived enum
+codecs. “Resolved” means a normative design document and an Accepted ADR exist;
+it does not imply an implementation exists — see
+[implementation-plan.md](implementation-plan.md) for what is built and where code
+still trails these documents. No known architectural decision remains open.
 
 | Area | Required decision/detail | Resolution | Normative document | Milestone |
 | --- | --- | --- | --- | --- |
@@ -33,7 +37,8 @@ not imply an implementation exists. No known architectural decision remains open
 - live-database query introspection and SQL parsing during Zig comptime;
 - checking queries against several rolling-deploy migration revisions;
 - portable cancellation, timeouts, fetch sizing, and generic query options;
-- a sqlz-owned pool or statement cache;
+- a sqlz-owned pool or statement cache; the `sqlz.sqlite.Pool` wrapper in
+  [runtime.md](runtime.md) delegates to the driver's pool and is not one;
 - automatic proof of DML convergence at merge revisions;
 - direct generated mapping of named `.sql` rows into arbitrary domain structs;
 - Windows runtime support guarantees.

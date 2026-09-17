@@ -6,7 +6,7 @@ this slice.
 
 | Phase | Work item | Status |
 | --- | --- | --- |
-| Acceptance | Ten independently runnable, test-reused real-world examples | Complete |
+| Acceptance | Independently runnable, test-reused real-world examples | Complete |
 | Acceptance | Red test checkpoint before implementation | Complete |
 | Runtime | Backend-neutral query contracts and owned-value helpers | Complete |
 | Runtime | SQLite connections, cardinalities, rows, errors, and transactions | Complete |
@@ -45,9 +45,29 @@ this slice.
 | Codecs | Registered codec IDs resolved into generated bindings | Complete |
 | Runtime | Unchecked scripts, transaction behavior, and scalar widening so applications need no driver handle | Complete |
 | Acceptance | Convert examples to generated checked bindings | Complete |
+| Acceptance | Example runs all four cardinalities through generated and embedded queries (M3 gate) | Complete |
 | Hardening | Complete diagnostics, resource limits, and dependency matrix | Not started |
 | Deferred | PostgreSQL runtime backend | Deferred |
 | Deferred | Migration execution and full CLI | Deferred |
+
+## Tracked divergences
+
+These are places where the normative documents promise more than the code
+currently does. They are listed so the gap stays deliberate rather than becoming
+an undocumented rule, per [README.md](README.md).
+
+| Promise | Document | State |
+| --- | --- | --- |
+| Diagnostics with stable codes, source spans, labels, and JSON rendering | [sql-checker.md](sql-checker.md) | checker failures are Zig error values today |
+| Named `Row` and `OwnedRow` types per row-returning query | [sql-checker.md](sql-checker.md) | generated bindings carry an anonymous `.row` struct; the runtime supplies `Single(Row)`/`Owned(Row)` |
+| General codec interface: `Binder`/`Decoder`, `borrows_result`, ownership hooks | [query-api.md](query-api.md) | only enum codecs are derived; `sqlz.assertCodec` rejects any other declaration |
+| `sqlz.Uuid` built-in mapping | [query-api.md](query-api.md) | not implemented |
+| Storage-class validation for non-STRICT SQLite | [type-system.md](type-system.md) | decoding range-checks integers; storage class is unchecked |
+| Rollback failure poisons and discards the connection | [runtime.md](runtime.md) | the rollback result is currently ignored |
+| Telemetry callbacks for lifecycle events | [errors-and-observability.md](errors-and-observability.md) | not implemented |
+| Resource limits beyond `source_bytes` | [configuration.md](configuration.md) | declared and validated, not yet enforced |
+| Automated build-input invalidation test | [testing.md](testing.md) | inputs are registered and verified by hand; no test yet |
+| Generated metadata for embedded declarations, and a versioned cache-metadata file | [sql-checker.md](sql-checker.md) | embedded declarations run their own SQL, which SQLite accepts with named parameters; PostgreSQL will need the metadata |
 
 ## Current next steps
 

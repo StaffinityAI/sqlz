@@ -46,3 +46,13 @@ nullability relations, and array-element relationships. Complex PostgreSQL
 builtins use reviewed checker intrinsics; sqlz does not attempt the complete server
 polymorphism model in 0.1. Custom codec IDs connect database patterns in Ziggy to
 one build-time Zig implementation and participate in the same constraint system.
+
+A codec bound to a Zig enum needs no implementation: sqlz derives the conversion
+from the enum's stored representation and reports an out-of-range database value
+as a decode error. See
+[ADR 0035](adr/0035-derived-enum-codecs.md).
+
+Zig width is a runtime concern rather than a checker decision. The checker
+resolves a column to a scalar kind; a hand-written row or parameter struct may
+declare any integer or float width for it, and decoding range-checks the stored
+value. Generated bindings still name only the portable spelling.

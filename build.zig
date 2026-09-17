@@ -511,6 +511,7 @@ pub fn build(b: *std.Build) !void {
             "paginated_search",
             "delete_cleanup",
             "enum_roles",
+            "embedded_declarations",
             "arena_rows",
             "pooled_reads",
         };

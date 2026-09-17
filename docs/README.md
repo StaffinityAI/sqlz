@@ -1,6 +1,9 @@
 # sqlz design documents
 
-Status: pre-implementation design for sqlz 0.1.
+Status: normative design for sqlz 0.1. The checker, generator, and SQLite
+runtime are implemented; PostgreSQL, migration execution, and the CLI are not.
+[implementation-plan.md](implementation-plan.md) is the authority on what exists
+today, including the places where code still trails these documents.
 
 These documents define the first implementation of sqlz: a Zig SQL toolkit with
 offline-checked queries, generated typed bindings, and revision-based migrations.
@@ -40,8 +43,11 @@ lifetimes.
 - Complete grammar parity with every SQLite or PostgreSQL extension.
 - A runtime-selected `AnyDatabase` abstraction.
 
-Unchecked or extension-specific operations remain possible through the raw
-`zqlite` and `pg.zig` handles exposed by their sqlz adapters.
+Unchecked SQL remains possible through the adapters themselves: a single
+statement is `execute`/`fetch*` with SQL the checker never saw, and a
+parameterless multi-statement script is `executeScript`. The raw `zqlite` and
+`pg.zig` handles stay exposed for driver features sqlz does not model at all,
+not for ordinary schema or PRAGMA work.
 
 ## Design index
 
@@ -80,8 +86,15 @@ Unchecked or extension-specific operations remain possible through the raw
   that can run a checked query.
 - **Row view**: decoded values whose borrowed slices remain valid only while the
   owning query result is valid and has not advanced.
-- **Owned row**: a generated value that duplicates borrowed data with a caller-
-  supplied allocator.
+- **Owned row**: a generated value that duplicates borrowed data with an
+  allocator, either named per call or taken from the connection's owned-row
+  scope.
+- **Owned-row scope**: a connection-level allocator that allocator-less
+  conversions use; a scope that releases wholesale makes each row's `deinit` a
+  no-op.
+- **Codec**: a stable ID whose database patterns live in `sqlz.ziggy` and whose
+  Zig declaration is bound once in `build.zig`, letting checked queries name an
+  application type.
 - **Catalog**: the checker's in-memory description of schemas, tables, columns,
   constraints, indexes, and database types.
 - **Revision**: one migration node with an opaque ID and zero or more parents.
