@@ -76,9 +76,9 @@ explicit locking behavior, and a connection pool. The driver handle behind
 application work never reaches for it.
 
 Every scenario under `examples/` is checked offline: the examples are one sqlz
-project whose schema lives in `examples/migrations`, whose SQL lives in
-`examples/queries`, and whose Zig-declared queries live in
-`examples/embedded_declarations`. Each is also an independently runnable
+project whose schema lives in `examples/migrations` and whose SQL lives in
+`examples/queries`, with every example directory registered as a Zig root, so a
+query declared in Zig anywhere under `examples/` is checked too. Each is also an independently runnable
 executable, for example `zig build run-account_crud`. Four of them demonstrate
 the surface an application needs beyond plain query execution — `enum_roles`
 maps a column and a parameter onto a Zig enum through a registered codec,

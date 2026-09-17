@@ -157,6 +157,10 @@ fn contains(haystack: []const []const u8, needle: []const u8) bool {
 
 fn validatePath(path: []const u8) ValidationError!void {
     if (path.len == 0 or std.fs.path.isAbsolute(path)) return error.InvalidPath;
+    // The project root is a legitimate root — a project whose Zig sources sit
+    // beside `sqlz.ziggy` has no other way to spell it — but `.` as a component
+    // of a longer path is still an unnormalized spelling.
+    if (std.mem.eql(u8, path, ".")) return;
     var components = std.mem.splitScalar(u8, path, '/');
     while (components.next()) |component| {
         if (component.len == 0 or

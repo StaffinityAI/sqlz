@@ -105,3 +105,35 @@ test "codec entries need an identifier ID and a database pattern" {
         config.parse(std.testing.allocator, patternless, &meta),
     );
 }
+
+test "the project root is a valid source root, unlike a dot component" {
+    var meta: ziggy.Deserializer.Meta = .init;
+
+    const only_root =
+        \\.format_version = 1,
+        \\.project_id = "550e8400-e29b-41d4-a716-446655440000",
+        \\.migrations = "migrations",
+        \\.sql_roots = .{ .app = "queries" },
+        \\.zig_roots = ["."],
+        \\.backends = .{ .sqlite = .{ .profile = "3.53" } },
+    ;
+    const accepted = try std.testing.allocator.dupeZ(u8, only_root);
+    defer std.testing.allocator.free(accepted);
+    var loaded = try config.parse(std.testing.allocator, accepted, &meta);
+    defer loaded.deinit();
+    try std.testing.expectEqualStrings(".", loaded.config().zig_roots[0]);
+
+    const unnormalized = try std.testing.allocator.dupeZ(u8,
+        \\.format_version = 1,
+        \\.project_id = "550e8400-e29b-41d4-a716-446655440000",
+        \\.migrations = "migrations",
+        \\.sql_roots = .{ .app = "queries" },
+        \\.zig_roots = ["src/./queries"],
+        \\.backends = .{ .sqlite = .{ .profile = "3.53" } },
+    );
+    defer std.testing.allocator.free(unnormalized);
+    try std.testing.expectError(
+        error.InvalidPath,
+        config.parse(std.testing.allocator, unnormalized, &meta),
+    );
+}

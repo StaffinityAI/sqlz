@@ -21,6 +21,9 @@ behavior, and migration safety fail independently.
   built-in field;
 - an application-layer suite compiled with `sqlz` as its only import, so any
   ordinary database work that still required the driver handle fails to build;
+- an example project whose roots cover every example directory, so an example
+  query — in a `.sql` file or declared in Zig — cannot reach the runtime without
+  passing the checker;
 - build-input tests proving an edited, added, or removed query invalidates the
   generated module instead of reporting a cache hit;
 - build-matrix tests proving core-only, SQLite-only, PostgreSQL-only, and both
