@@ -68,6 +68,13 @@ rewriting; and `libpg_query` parsing. `zig build test-zio` and
 `zig build test-zio-host` repeat the runtime and host coverage on a zio-backed
 `std.Io`.
 
+`zig build test-consumer` builds an application layer whose only import is
+`sqlz` — schema scripts, PRAGMAs, typed connection options, enum columns, blobs,
+narrow integer and float columns, arena-scoped owned rows, transactions with
+explicit locking behavior, and a connection pool. The driver handle behind
+`raw()` stays available for features sqlz does not model, but ordinary
+application work never reaches for it.
+
 Every scenario under `examples/` runs through generated checked bindings: the
 examples are one sqlz project whose schema lives in `examples/migrations` and
 whose SQL lives in `examples/queries`, checked offline and compiled into the

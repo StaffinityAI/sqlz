@@ -70,6 +70,17 @@ Transactions are move-only logical handles. `commit` and `rollback` return detai
 results. `deinit` rolls back an active transaction; if rollback fails, the
 connection is poisoned and discarded rather than returned to a pool.
 
+`conn.begin(.{ .behavior = .immediate })` states the locking behavior, because
+SQLite's default defers the write lock until the first write — which turns a
+read-then-write transaction into a failure instead of a wait the busy timeout
+would have absorbed. `.deferred`, `.immediate`, and `.exclusive` map to the
+corresponding `BEGIN` forms.
+
+Schema scripts, PRAGMAs, and seed data are parameterless multi-statement SQL,
+which no checked query can express; `conn.executeScript(sql)` runs them through
+the adapter so applications do not need the driver handle for their own DDL. See
+[the query API](query-api.md) for the unchecked-statement rules.
+
 ## Executors
 
 Generated queries accept a sealed sqlz executor interface implemented by sqlz

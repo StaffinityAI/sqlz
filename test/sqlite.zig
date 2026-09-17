@@ -79,9 +79,9 @@ const membership = sqlz.Query(.{
 test "all four cardinalities execute through SQLite" {
     var conn = try sqlz.sqlite.open(std.testing.allocator, std.testing.io, ":memory:", .{});
     defer conn.deinit();
-    try conn.raw().execNoArgs(
+    try unwrap(conn.executeScript(
         "CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE, active INTEGER NOT NULL CHECK(active IN (0,1)));",
-    );
+    ));
 
     var inserted = try unwrap(create_user.fetchOne(&conn, .{ .name = "Ada", .email = "ada@example.test", .active = true }));
     defer inserted.deinit();
@@ -104,9 +104,9 @@ test "all four cardinalities execute through SQLite" {
 test "optional and one preserve distinct empty-result behavior" {
     var conn = try sqlz.sqlite.open(std.testing.allocator, std.testing.io, ":memory:", .{});
     defer conn.deinit();
-    try conn.raw().execNoArgs(
+    try unwrap(conn.executeScript(
         "CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE, active INTEGER NOT NULL);",
-    );
+    ));
 
     try std.testing.expect((try unwrap(find_user.fetchOptional(&conn, .{ .email = "missing@example.test" }))) == null);
     const result = must_find_user.fetchOne(&conn, .{ .email = "missing@example.test" });
@@ -126,9 +126,9 @@ test "optional and one preserve distinct empty-result behavior" {
 test "upsert returning exposes the winning row" {
     var conn = try sqlz.sqlite.open(std.testing.allocator, std.testing.io, ":memory:", .{});
     defer conn.deinit();
-    try conn.raw().execNoArgs(
+    try unwrap(conn.executeScript(
         "CREATE TABLE preferences(user_id INTEGER PRIMARY KEY, theme TEXT NOT NULL, updated_at INTEGER NOT NULL);",
-    );
+    ));
     var first = try unwrap(upsert_preference.fetchOne(&conn, .{ .user_id = 7, .theme = "light", .updated_at = 1 }));
     first.deinit();
     var second = try unwrap(upsert_preference.fetchOne(&conn, .{ .user_id = 7, .theme = "dark", .updated_at = 2 }));
@@ -140,11 +140,11 @@ test "upsert returning exposes the winning row" {
 test "left joins decode nullable fields and owned rows survive result cleanup" {
     var conn = try sqlz.sqlite.open(std.testing.allocator, std.testing.io, ":memory:", .{});
     defer conn.deinit();
-    try conn.raw().execNoArgs(
+    try unwrap(conn.executeScript(
         "CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE, active INTEGER NOT NULL);" ++
             "CREATE TABLE memberships(user_id INTEGER PRIMARY KEY REFERENCES users(id), label TEXT);" ++
             "INSERT INTO users(id,name,email,active) VALUES(1,'Ada','ada@example.test',1);",
-    );
+    ));
     var single = try unwrap(membership.fetchOne(&conn, .{ .id = 1 }));
     var owned = try unwrap(single.toOwned(std.testing.allocator));
     single.deinit();
@@ -156,10 +156,10 @@ test "left joins decode nullable fields and owned rows survive result cleanup" {
 test "recursive CTE streams a bounded hierarchy" {
     var conn = try sqlz.sqlite.open(std.testing.allocator, std.testing.io, ":memory:", .{});
     defer conn.deinit();
-    try conn.raw().execNoArgs(
+    try unwrap(conn.executeScript(
         "CREATE TABLE nodes(id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES nodes(id));" ++
             "INSERT INTO nodes VALUES(1,NULL),(2,1),(3,2),(4,3);",
-    );
+    ));
     var rows = try unwrap(list_children.fetch(&conn, .{ .root = 1, .max_depth = 2 }));
     defer rows.deinit();
     var expected: i64 = 1;
@@ -170,16 +170,16 @@ test "recursive CTE streams a bounded hierarchy" {
 test "transaction deinit rolls back and commit persists" {
     var conn = try sqlz.sqlite.open(std.testing.allocator, std.testing.io, ":memory:", .{});
     defer conn.deinit();
-    try conn.raw().execNoArgs("CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE, active INTEGER NOT NULL);");
+    try unwrap(conn.executeScript("CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE, active INTEGER NOT NULL);"));
     {
-        var tx = try unwrap(conn.begin());
+        var tx = try unwrap(conn.begin(.{}));
         defer tx.deinit();
         var inserted = try unwrap(create_user.fetchOne(&tx, .{ .name = "Ada", .email = "ada@example.test", .active = true }));
         inserted.deinit();
     }
     try std.testing.expect((try unwrap(find_user.fetchOptional(&conn, .{ .email = "ada@example.test" }))) == null);
     {
-        var tx = try unwrap(conn.begin());
+        var tx = try unwrap(conn.begin(.{}));
         defer tx.deinit();
         var inserted = try unwrap(create_user.fetchOne(&tx, .{ .name = "Ada", .email = "ada@example.test", .active = true }));
         inserted.deinit();
@@ -192,7 +192,7 @@ test "transaction deinit rolls back and commit persists" {
 test "a borrowed connection keeps the caller's handle and io" {
     var owner = try sqlz.sqlite.open(std.testing.allocator, std.testing.io, ":memory:", .{});
     defer owner.deinit();
-    try owner.raw().execNoArgs("CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE, active INTEGER NOT NULL);");
+    try unwrap(owner.executeScript("CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE, active INTEGER NOT NULL);"));
 
     {
         var borrowed = sqlz.sqlite.borrow(std.testing.allocator, std.testing.io, owner.raw());
@@ -205,6 +205,143 @@ test "a borrowed connection keeps the caller's handle and io" {
 
     var found = (try unwrap(find_user.fetchOptional(&owner, .{ .email = "ada@example.test" }))).?;
     defer found.deinit();
+}
+
+const read_user_version = sqlz.Query(.{
+    .sql = "PRAGMA user_version",
+    .backends = .{ .sqlite = true },
+    .cardinality = .one,
+    .params = struct {},
+    .row = struct { version: i64 },
+});
+
+const NarrowRow = struct {
+    small: u8,
+    medium: u32,
+    ratio: f64,
+    single: f32,
+    maybe: ?u16,
+};
+
+const read_narrow = sqlz.Query(.{
+    .sql = "SELECT small, medium, ratio, single, maybe FROM narrow WHERE id=:id",
+    .backends = .{ .sqlite = true },
+    .cardinality = .one,
+    .params = struct { id: i64 },
+    .row = NarrowRow,
+});
+
+test "an immediate transaction takes its write lock up front" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try tempDatabasePath(std.testing.allocator, &tmp.sub_path);
+    defer std.testing.allocator.free(path);
+
+    var writer = try sqlz.sqlite.open(std.testing.allocator, std.testing.io, path, .{
+        .journal_mode = .wal,
+        .busy_timeout_ms = 50,
+    });
+    defer writer.deinit();
+    try unwrap(writer.executeScript(user_schema));
+
+    var contender = try sqlz.sqlite.open(std.testing.allocator, std.testing.io, path, .{
+        .busy_timeout_ms = 50,
+    });
+    defer contender.deinit();
+
+    var held = try unwrap(writer.begin(.{ .behavior = .immediate }));
+    defer held.deinit();
+    _ = try unwrap(deactivate_user.execute(&held, .{ .id = 1 }));
+
+    // The lock is already held, so a second writer is told so rather than
+    // discovering it halfway through its own transaction.
+    switch (contender.execute("UPDATE users SET active=0 WHERE id=2", .{})) {
+        .ok => return error.ExpectedBusyDatabase,
+        .err => |*err| {
+            defer err.deinit();
+            try std.testing.expectEqual(sqlz.ErrorClass.unavailable, err.class);
+        },
+    }
+    try unwrap(held.commit());
+}
+
+test "scripts run several statements without reaching for the driver" {
+    var conn = try sqlz.sqlite.open(std.testing.allocator, std.testing.io, ":memory:", .{});
+    defer conn.deinit();
+
+    try unwrap(conn.executeScript(user_schema));
+    var rows = try unwrap(list_users.fetch(&conn, .{}));
+    defer rows.deinit();
+    var counted: usize = 0;
+    while ((try unwrap(rows.next())) != null) counted += 1;
+    try std.testing.expectEqual(@as(usize, 3), counted);
+}
+
+test "a failing script reports the sqlite diagnosis" {
+    var conn = try sqlz.sqlite.open(std.testing.allocator, std.testing.io, ":memory:", .{});
+    defer conn.deinit();
+
+    switch (conn.executeScript("CREATE TABLE ok(id INTEGER); CREATE TABLE ok(id INTEGER);")) {
+        .ok => return error.ExpectedScriptFailure,
+        .err => |*err| {
+            defer err.deinit();
+            try std.testing.expect(err.code != null);
+            try std.testing.expect(std.mem.indexOf(u8, err.message, "ok") != null);
+        },
+    }
+}
+
+test "PRAGMA state is readable and writable through sqlz alone" {
+    var conn = try sqlz.sqlite.open(std.testing.allocator, std.testing.io, ":memory:", .{
+        .foreign_keys = true,
+    });
+    defer conn.deinit();
+
+    var enabled = try unwrap(pragma_foreign_keys.fetchOne(&conn, .{}));
+    defer enabled.deinit();
+    try std.testing.expectEqual(@as(i64, 1), enabled.row().enabled);
+
+    // A PRAGMA sqlz does not name is still an ordinary statement.
+    _ = try unwrap(conn.execute("PRAGMA user_version = 7", .{}));
+    var version = try unwrap(read_user_version.fetchOne(&conn, .{}));
+    defer version.deinit();
+    try std.testing.expectEqual(@as(i64, 7), version.row().version);
+}
+
+test "narrow integers and floats decode into their declared types" {
+    var conn = try sqlz.sqlite.open(std.testing.allocator, std.testing.io, ":memory:", .{});
+    defer conn.deinit();
+    try unwrap(conn.executeScript(
+        "CREATE TABLE narrow(id INTEGER PRIMARY KEY, small INTEGER NOT NULL, medium INTEGER NOT NULL," ++
+            " ratio REAL NOT NULL, single REAL NOT NULL, maybe INTEGER);" ++
+            "INSERT INTO narrow VALUES(1, 200, 70000, 0.25, 0.5, NULL), (2, 200, 70000, 0.25, 0.5, 9);" ++
+            "INSERT INTO narrow VALUES(3, 99999, 70000, 0.25, 0.5, NULL);",
+    ));
+
+    var row = try unwrap(read_narrow.fetchOne(&conn, .{ .id = 1 }));
+    defer row.deinit();
+    try std.testing.expectEqual(@as(u8, 200), row.row().small);
+    try std.testing.expectEqual(@as(u32, 70000), row.row().medium);
+    try std.testing.expectEqual(@as(f64, 0.25), row.row().ratio);
+    try std.testing.expectEqual(@as(f32, 0.5), row.row().single);
+    try std.testing.expectEqual(@as(?u16, null), row.row().maybe);
+
+    var present = try unwrap(read_narrow.fetchOne(&conn, .{ .id = 2 }));
+    defer present.deinit();
+    try std.testing.expectEqual(@as(?u16, 9), present.row().maybe);
+
+    // 99999 does not fit the declared `u8`, so it is reported, not truncated.
+    switch (read_narrow.fetchOne(&conn, .{ .id = 3 })) {
+        .ok => |*value| {
+            var single = value.*;
+            single.deinit();
+            return error.ExpectedRangeFailure;
+        },
+        .err => |*err| {
+            defer err.deinit();
+            try std.testing.expectEqual(sqlz.ErrorClass.invalid_data, err.class);
+        },
+    }
 }
 
 const pragma_foreign_keys = sqlz.Query(.{
@@ -234,7 +371,7 @@ test "a pool hands out connections and takes them back" {
     {
         var conn = try pool.acquire();
         defer conn.deinit();
-        try conn.raw().execNoArgs(user_schema);
+        try unwrap(conn.executeScript(user_schema));
 
         // The typed options reached every pooled connection.
         var pragma = try unwrap(pragma_foreign_keys.fetchOne(&conn, .{}));
@@ -267,7 +404,7 @@ test "a pool executes checked queries and releases with the result" {
     {
         var conn = try pool.acquire();
         defer conn.deinit();
-        try conn.raw().execNoArgs(user_schema);
+        try unwrap(conn.executeScript(user_schema));
     }
 
     // A pool of one proves each handle returns its connection on deinit:
@@ -303,7 +440,7 @@ const select_active = sqlz.Query(.{
 test "execution metadata reports writes and stays quiet about reads" {
     var conn = try sqlz.sqlite.open(std.testing.allocator, std.testing.io, ":memory:", .{});
     defer conn.deinit();
-    try conn.raw().execNoArgs(user_schema);
+    try unwrap(conn.executeScript(user_schema));
 
     var created = try unwrap(create_user.fetchOne(&conn, .{
         .name = "Dee",
@@ -328,7 +465,7 @@ test "execution metadata reports writes and stays quiet about reads" {
 test "constraint failures carry the extended result code" {
     var conn = try sqlz.sqlite.open(std.testing.allocator, std.testing.io, ":memory:", .{});
     defer conn.deinit();
-    try conn.raw().execNoArgs(user_schema);
+    try unwrap(conn.executeScript(user_schema));
 
     switch (create_user.fetchOne(&conn, .{
         .name = "Duplicate",
@@ -357,7 +494,7 @@ const user_schema =
 test "an arena scope owns whole result sets without per-row deinit" {
     var conn = try sqlz.sqlite.open(std.testing.allocator, std.testing.io, ":memory:", .{});
     defer conn.deinit();
-    try conn.raw().execNoArgs(user_schema);
+    try unwrap(conn.executeScript(user_schema));
 
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -379,7 +516,7 @@ test "an arena scope owns whole result sets without per-row deinit" {
 test "scopes nest and restore the allocator they replaced" {
     var conn = try sqlz.sqlite.open(std.testing.allocator, std.testing.io, ":memory:", .{});
     defer conn.deinit();
-    try conn.raw().execNoArgs(user_schema);
+    try unwrap(conn.executeScript(user_schema));
 
     var outer = conn.ownedScope(std.testing.allocator, .{});
     defer outer.deinit();
@@ -407,7 +544,7 @@ test "scopes nest and restore the allocator they replaced" {
 test "streamed rows convert one at a time" {
     var conn = try sqlz.sqlite.open(std.testing.allocator, std.testing.io, ":memory:", .{});
     defer conn.deinit();
-    try conn.raw().execNoArgs(user_schema);
+    try unwrap(conn.executeScript(user_schema));
 
     var rows = try unwrap(list_users.fetch(&conn, .{}));
     defer rows.deinit();
@@ -424,7 +561,7 @@ test "streamed rows convert one at a time" {
 test "an owned conversion without an allocator is refused" {
     var conn = try sqlz.sqlite.open(std.testing.allocator, std.testing.io, ":memory:", .{});
     defer conn.deinit();
-    try conn.raw().execNoArgs(user_schema);
+    try unwrap(conn.executeScript(user_schema));
 
     var single = try unwrap(must_find_user.fetchOne(&conn, .{ .email = "ada@example.test" }));
     defer single.deinit();
@@ -475,7 +612,7 @@ const find_account = sqlz.Query(.{
 test "enums bind and decode through their stored representation" {
     var conn = try sqlz.sqlite.open(std.testing.allocator, std.testing.io, ":memory:", .{});
     defer conn.deinit();
-    try conn.raw().execNoArgs(account_schema);
+    try unwrap(conn.executeScript(account_schema));
 
     _ = try unwrap(insert_account.execute(&conn, .{
         .id = 1,
@@ -508,8 +645,8 @@ test "enums bind and decode through their stored representation" {
 test "a database value outside the enum is reported, not trapped" {
     var conn = try sqlz.sqlite.open(std.testing.allocator, std.testing.io, ":memory:", .{});
     defer conn.deinit();
-    try conn.raw().execNoArgs(account_schema ++
-        "INSERT INTO accounts(id,tier,shade,fallback,avatar) VALUES(1,9,'dark',NULL,NULL);");
+    try unwrap(conn.executeScript(account_schema ++
+        "INSERT INTO accounts(id,tier,shade,fallback,avatar) VALUES(1,9,'dark',NULL,NULL);"));
 
     switch (find_account.fetchOne(&conn, .{ .tier = .premium, .shade = .dark })) {
         .ok => |*value| {

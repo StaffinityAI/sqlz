@@ -11,6 +11,7 @@ pub const Error = core.Error;
 pub const Operation = core.Operation;
 pub const Result = core.Result;
 pub const Query = core.Query;
+pub const unwrap = core.unwrap;
 pub const cloneRow = core.cloneRow;
 pub const deinitOwnedRow = core.deinitOwnedRow;
 pub const Storage = core.Storage;
@@ -76,8 +77,18 @@ pub const sqlite = struct {
             return scope;
         }
 
-        pub fn begin(self: *Conn) Result(Transaction) {
-            self.conn.transaction() catch |cause| return .{ .err = makeError(self.allocator, self.conn, .transaction, cause) };
+        /// Begins a transaction. The behavior is explicit because SQLite's
+        /// default defers the write lock to the first write, which is how a
+        /// read-then-write transaction ends up failing instead of waiting out
+        /// the busy timeout.
+        pub fn begin(self: *Conn, options: BeginOptions) Result(Transaction) {
+            const statement = switch (options.behavior) {
+                .deferred => "begin",
+                .immediate => "begin immediate",
+                .exclusive => "begin exclusive",
+            };
+            self.conn.execNoArgs(statement) catch |cause|
+                return .{ .err = makeError(self.allocator, self.conn, .transaction, cause) };
             return .{ .ok = .{ .connection = self } };
         }
 
@@ -97,6 +108,24 @@ pub const sqlite = struct {
             return .{ .ok = .{
                 .rows_affected = if (readonly) null else @intCast(self.conn.changes()),
             } };
+        }
+
+        /// Runs one or more parameterless statements: schema scripts, PRAGMAs,
+        /// seed data. Checked queries are single-statement by contract, so this
+        /// is the unchecked path — it keeps a script inside sqlz rather than
+        /// sending applications to the driver handle for their own DDL.
+        pub fn executeScript(self: *Conn, sql: []const u8) Result(void) {
+            const script = self.allocator.dupeZ(u8, sql) catch
+                return .{ .err = staticError(.other, .execute, "unable to allocate script text") };
+            defer self.allocator.free(script);
+            var message: [*c]u8 = null;
+            const rc = zqlite.c.sqlite3_exec(self.conn.conn, script.ptr, null, null, &message);
+            // sqlite allocates the message; the text we report comes from
+            // `lastError`, so release it either way.
+            if (message != null) zqlite.c.sqlite3_free(message);
+            if (rc != zqlite.c.SQLITE_OK)
+                return .{ .err = nativeError(self.allocator, self.conn, .execute, classifyCode(rc)) };
+            return .{ .ok = {} };
         }
 
         /// SQLite's `last_insert_rowid`. Portable code should prefer
@@ -189,6 +218,12 @@ pub const sqlite = struct {
 
     pub const Ownership = enum { owned, borrowed, pooled };
 
+    pub const TransactionBehavior = enum { deferred, immediate, exclusive };
+
+    pub const BeginOptions = struct {
+        behavior: TransactionBehavior = .deferred,
+    };
+
     pub const JournalMode = enum { delete, truncate, persist, memory, wal, off };
     pub const Synchronous = enum { off, normal, full, extra };
 
@@ -198,6 +233,9 @@ pub const sqlite = struct {
     pub const OpenOptions = struct {
         create: bool = true,
         read_only: bool = false,
+        /// Interpret the path as a SQLite URI filename (`file:...`), which is
+        /// how shared caches and per-open query parameters are selected.
+        uri: bool = false,
         foreign_keys: ?bool = null,
         journal_mode: ?JournalMode = null,
         synchronous: ?Synchronous = null,
@@ -206,6 +244,7 @@ pub const sqlite = struct {
 
     fn openFlags(options: OpenOptions) c_int {
         var flags: c_int = zqlite.OpenFlags.EXResCode;
+        if (options.uri) flags |= zqlite.OpenFlags.Uri;
         if (options.read_only) return flags | zqlite.OpenFlags.ReadOnly;
         flags |= zqlite.OpenFlags.ReadWrite;
         if (options.create) flags |= zqlite.OpenFlags.Create;
@@ -319,6 +358,12 @@ pub const sqlite = struct {
             var conn = self.acquire() catch |cause| return .{ .err = acquireError(cause) };
             defer conn.deinit();
             return conn.execute(sql, args);
+        }
+
+        pub fn executeScript(self: *Pool, sql: []const u8) Result(void) {
+            var conn = self.acquire() catch |cause| return .{ .err = acquireError(cause) };
+            defer conn.deinit();
+            return conn.executeScript(sql);
         }
 
         pub fn fetchOne(self: *Pool, comptime Row: type, sql: []const u8, args: anytype) Result(Single(Row)) {
@@ -603,6 +648,10 @@ pub const sqlite = struct {
             return self.connection.fetch(Row, sql, args);
         }
 
+        pub fn executeScript(self: *Transaction, sql: []const u8) Result(void) {
+            return self.connection.executeScript(sql);
+        }
+
         pub fn lastInsertRowId(self: *Transaction) i64 {
             return self.connection.lastInsertRowId();
         }
@@ -658,9 +707,13 @@ pub const sqlite = struct {
         }
         switch (@typeInfo(T)) {
             .@"enum" => return decodeEnum(T, native, index),
-            .optional => |optional| {
-                if (@typeInfo(optional.child) != .@"enum") return native.get(T, index);
-                switch (comptime core.enumStorage(optional.child)) {
+            // SQLite stores one signed 64-bit integer and one f64; narrower
+            // application types are range-checked here rather than forcing an
+            // `i64` field and a cast at the call site.
+            .int => return decodeInt(T, native.get(i64, index)),
+            .float => return @floatCast(native.get(f64, index)),
+            .optional => |optional| switch (@typeInfo(optional.child)) {
+                .@"enum" => switch (comptime core.enumStorage(optional.child)) {
                     .integer => {
                         const stored = native.get(?i64, index) orelse return null;
                         return try intToEnum(optional.child, stored);
@@ -669,10 +722,23 @@ pub const sqlite = struct {
                         const stored = native.get(?[]const u8, index) orelse return null;
                         return try nameToEnum(optional.child, stored);
                     },
-                }
+                },
+                .int => {
+                    const stored = native.get(?i64, index) orelse return null;
+                    return try decodeInt(optional.child, stored);
+                },
+                .float => {
+                    const stored = native.get(?f64, index) orelse return null;
+                    return @floatCast(stored);
+                },
+                else => return native.get(T, index),
             },
             else => return native.get(T, index),
         }
+    }
+
+    fn decodeInt(comptime T: type, stored: i64) DecodeError!T {
+        return std.math.cast(T, stored) orelse error.ValueOutOfRange;
     }
 
     fn decodeEnum(comptime E: type, native: zqlite.Row, index: usize) DecodeError!E {
@@ -691,7 +757,7 @@ pub const sqlite = struct {
     }
 };
 
-const DecodeError = error{InvalidEnumValue};
+const DecodeError = error{ InvalidEnumValue, ValueOutOfRange };
 
 fn decodeError(cause: DecodeError) Error {
     return switch (cause) {
@@ -699,6 +765,11 @@ fn decodeError(cause: DecodeError) Error {
             .invalid_data,
             .fetch,
             "column value is not a member of the declared enum",
+        ),
+        error.ValueOutOfRange => staticError(
+            .invalid_data,
+            .fetch,
+            "column value does not fit the declared type",
         ),
     };
 }
@@ -708,20 +779,43 @@ fn staticError(class: ErrorClass, operation: Operation, message: []const u8) Err
 }
 
 fn makeError(allocator: std.mem.Allocator, conn: zqlite.Conn, operation: Operation, cause: anyerror) Error {
+    return nativeError(allocator, conn, operation, classify(cause));
+}
+
+/// Builds an error from whatever the connection last reported, so a failure
+/// raised by a raw sqlite call carries the same class, code, and message as one
+/// raised through zqlite's error set.
+fn nativeError(
+    allocator: std.mem.Allocator,
+    conn: zqlite.Conn,
+    operation: Operation,
+    class: ErrorClass,
+) Error {
     // Connections are opened with EXResCode, so this is the extended code.
     const code: i32 = @intCast(zqlite.c.sqlite3_extended_errcode(conn.conn));
     const message = allocator.dupe(u8, std.mem.span(conn.lastError())) catch {
-        var fallback = staticError(classify(cause), operation, @errorName(cause));
+        var fallback = staticError(class, operation, "sqlite reported a failure");
         fallback.code = code;
         return fallback;
     };
     return .{
         .allocator = allocator,
-        .class = classify(cause),
+        .class = class,
         .backend = .sqlite,
         .operation = operation,
         .code = code,
         .message = message,
+    };
+}
+
+fn classifyCode(rc: c_int) ErrorClass {
+    return switch (rc) {
+        zqlite.c.SQLITE_CONSTRAINT => .constraint,
+        zqlite.c.SQLITE_BUSY, zqlite.c.SQLITE_LOCKED => .unavailable,
+        zqlite.c.SQLITE_INTERRUPT => .cancelled,
+        zqlite.c.SQLITE_PROTOCOL => .protocol,
+        zqlite.c.SQLITE_MISMATCH => .invalid_data,
+        else => .other,
     };
 }
 

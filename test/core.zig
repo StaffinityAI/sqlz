@@ -95,3 +95,17 @@ test "parameters without enums are passed through unchanged" {
     const args = .{ .id = @as(i64, 4), .name = "Ada" };
     try std.testing.expectEqual(@TypeOf(args), sqlz.BoundArgs(@TypeOf(args)));
 }
+
+test "unwrap releases the error payload it discards" {
+    const failed: sqlz.Result(u32) = .{ .err = .{
+        .allocator = std.testing.allocator,
+        .class = .constraint,
+        .backend = .sqlite,
+        .operation = .execute,
+        .message = try std.testing.allocator.dupe(u8, "UNIQUE constraint failed"),
+    } };
+    try std.testing.expectError(error.SqlzFailed, sqlz.unwrap(failed));
+
+    const worked: sqlz.Result(u32) = .{ .ok = 7 };
+    try std.testing.expectEqual(@as(u32, 7), try sqlz.unwrap(worked));
+}

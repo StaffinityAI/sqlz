@@ -309,8 +309,12 @@ an explicit override; widening to optional is safe but should remain visible in
 the declaration.
 
 Unsigned integers have no default portable mapping because PostgreSQL lacks
-matching integer types and SQLite stores signed 64-bit integers. Applications
-may use a checked custom codec.
+matching integer types and SQLite stores signed 64-bit integers, so the checker
+never infers one and generated bindings never name one. A hand-written row or
+parameter struct may still declare any Zig integer or float width: SQLite stores
+one signed 64-bit integer and one `f64`, and decoding range-checks the stored
+value, reporting `invalid_data` when it does not fit the declared type. A
+portable contract wants a checked custom codec instead.
 
 SQLite type analysis uses declared type names, affinity, constraints, expression
 rules, and explicit casts. It never claims stronger runtime typing than those
@@ -403,6 +407,24 @@ converts them at the boundary. See
 Codec callbacks are internal adapter contracts and may use narrow Zig error
 unions; the generated public operation converts them into an owned `sqlz.Error`
 inside `sqlz.Result`.
+
+## Unchecked statements
+
+Checked queries are single-statement by contract, which leaves schema scripts,
+PRAGMAs, and seed data outside them. Those run through the adapter itself rather
+than the driver handle:
+
+```zig
+try sqlz.unwrap(conn.executeScript(schema));   // several statements, no parameters
+_ = try sqlz.unwrap(conn.execute("PRAGMA user_version = 7", .{}));
+```
+
+`executeScript` takes no parameters and reports failure as an ordinary
+`sqlz.Error` with the backend's class, code, and message. A single unchecked
+statement — including a PRAGMA that returns rows — is just `execute`, `fetchOne`,
+`fetchOptional`, or `fetch` with SQL the checker never saw. `raw()` therefore
+remains available for driver features sqlz does not model, but ordinary
+application work, schema included, does not need it.
 
 ## Executors, connections, and transactions
 

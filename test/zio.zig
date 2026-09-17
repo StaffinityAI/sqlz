@@ -45,7 +45,7 @@ fn workload(allocator: std.mem.Allocator, io: std.Io) !void {
     try std.testing.expectEqual(io.userdata, conn.io.userdata);
     try std.testing.expectEqual(io.vtable, conn.io.vtable);
 
-    try conn.raw().execNoArgs("CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT NOT NULL);");
+    try unwrap(conn.executeScript("CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT NOT NULL);"));
 
     {
         // Finalize the RETURNING statement before the transaction below: SQLite
@@ -56,7 +56,7 @@ fn workload(allocator: std.mem.Allocator, io: std.Io) !void {
     }
 
     {
-        var tx = try unwrap(conn.begin());
+        var tx = try unwrap(conn.begin(.{}));
         defer tx.deinit();
         try std.testing.expectEqual(io.vtable, tx.io().vtable);
         _ = try unwrap(tx.execute("INSERT INTO users(name) VALUES (:name)", .{"Grace"}));
@@ -104,7 +104,7 @@ test "the retained std.Io stays usable for file system work" {
 
     var conn = try sqlz.sqlite.open(std.testing.allocator, runtime.io(), path, .{});
     defer conn.deinit();
-    try conn.raw().execNoArgs("CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT NOT NULL);");
+    try unwrap(conn.executeScript("CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT NOT NULL);"));
 
     // Reach the file sqlite just created through the connection's own `std.Io`,
     // proving the stored interface is a live zio-backed implementation.
@@ -125,10 +125,10 @@ fn poolWorkload(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !voi
         var conn = try pool.acquire();
         defer conn.deinit();
         try std.testing.expectEqual(io.vtable, conn.io.vtable);
-        try conn.raw().execNoArgs(
+        try unwrap(conn.executeScript(
             "CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT NOT NULL);" ++
                 "INSERT INTO users(id,name) VALUES(1,'Ada'),(2,'Grace');",
-        );
+        ));
     }
 
     var rows = try unwrap(list_users.fetch(&pool, .{}));

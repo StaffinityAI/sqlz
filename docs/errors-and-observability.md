@@ -12,6 +12,11 @@ SQLSTATE or SQLite code, constraint/table/column fields when supplied, and the f
 native diagnostic. Moving or consuming a result transfers ownership; copying it is
 invalid. Convenience APIs may discard detail explicitly.
 
+`sqlz.unwrap(result)` is that explicit discard: it releases the error payload and
+reports `error.SqlzFailed`, for call sites that only need to know whether the
+operation worked. Every site that acts on the class, code, or message switches on
+the `Result` instead.
+
 Full backend messages are available to the caller and may contain SQL fragments,
 identifiers, or user data. They must be treated as sensitive. Migration journals
 store only safe context: category, numeric code or SQLSTATE, revision, direction,

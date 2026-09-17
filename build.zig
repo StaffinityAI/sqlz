@@ -428,6 +428,22 @@ pub fn build(b: *std.Build) !void {
         const sqlite_step = b.step("test-sqlite", "Run the SQLite runtime tests");
         sqlite_step.dependOn(&run_sqlite.step);
 
+        // Imports `sqlz` and nothing else, so an application feature that still
+        // needed the driver handle would fail to compile here.
+        const consumer_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("test/consumer.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "sqlz", .module = sqlz_mod }},
+            }),
+        });
+        const run_consumer = b.addRunArtifact(consumer_tests);
+        test_step.dependOn(&run_consumer.step);
+        const consumer_step = b.step("test-consumer", "Run the sqlz-only consumer tests");
+        consumer_step.dependOn(&run_consumer.step);
+
         if (zio_dep) |zio| {
             const zio_tests = b.addTest(.{
                 .root_module = b.createModule(.{

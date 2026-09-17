@@ -190,6 +190,21 @@ fn bindValue(comptime T: type, value: T) BoundType(T) {
     };
 }
 
+/// Convenience for call sites that only need to know whether an operation
+/// worked: it releases the error payload and reports `error.SqlzFailed`.
+/// Anything that acts on the class, code, or message must switch on the
+/// `Result` itself instead — that is where the diagnosis lives.
+pub fn unwrap(result: anytype) error{SqlzFailed}!@TypeOf(result.ok) {
+    return switch (result) {
+        .ok => |value| value,
+        .err => |*err| {
+            var owned = err.*;
+            owned.deinit();
+            return error.SqlzFailed;
+        },
+    };
+}
+
 pub fn cloneRow(allocator: std.mem.Allocator, value: anytype) !@TypeOf(value) {
     return cloneValue(allocator, @TypeOf(value), value);
 }

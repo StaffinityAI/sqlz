@@ -41,6 +41,7 @@ this slice.
 | Runtime | Connection-scoped owned rows and streaming owned conversion | Complete |
 | Runtime | Typed connection options and the native pool wrapper | Complete |
 | Codecs | Registered codec IDs resolved into generated bindings | Complete |
+| Runtime | Unchecked scripts, transaction behavior, and scalar widening so applications need no driver handle | Complete |
 | Acceptance | Convert examples to generated checked bindings | Complete |
 | Hardening | Complete diagnostics, resource limits, and dependency matrix | Not started |
 | Deferred | PostgreSQL runtime backend | Deferred |
