@@ -184,9 +184,12 @@ Cardinality is an explicit API contract:
 | `many` | `fetch(executor, args)` | `sqlz.Result(Rows(Row))` |
 
 `ExecResult.rows_affected` is `?u64`: both adapters provide a number when their
-driver does, and `null` when the command has no meaningful count. Backend-
-specific information such as SQLite's last inserted row ID stays on the native
-adapter; portable code should use `RETURNING` when it needs generated values.
+driver does, and `null` when the command has no meaningful count — for SQLite
+that is any read-only statement, whose `sqlite3_changes` would otherwise report
+the previous statement's count. Backend-specific information stays on the native
+adapter: `sqlz.sqlite.Conn` exposes `lastInsertRowId()` and `changes()`, and a
+transaction forwards both. Portable code should use `RETURNING` when it needs
+generated values.
 
 `one` and `optional` mean “fetch the first row with the stated empty-result
 behavior.” They do not prove uniqueness. A query that relies on uniqueness must
@@ -266,8 +269,13 @@ an infallible destructor.
 Every generated row view with borrowed fields exposes:
 
 ```zig
-pub fn toOwned(row: Row, allocator: std.mem.Allocator) sqlz.Result(OwnedRow);
+pub fn toOwned(row: Row, allocator: ?std.mem.Allocator) sqlz.Result(OwnedRow);
 ```
+
+`null` uses the connection's owned-row scope and is an `invalid_data` error when
+no scope is open; an explicit allocator always owns the copy. Streaming results
+expose `nextOwned(allocator)` and `collectOwned(allocator)` with the same rule.
+`OwnedRow.deinit` frees nothing when the scope releases wholesale.
 
 `OwnedRow` duplicates text, blob, JSON, and codec-declared borrowed fields.
 Scalars are copied. It exposes `deinit(allocator)` and is independent of the
@@ -381,6 +389,16 @@ fingerprint.
 Enums and ID newtypes should normally use codecs instead of manually converting
 at every call. A codec is responsible for range validation and returns a decode
 error rather than trapping on invalid database data.
+
+sqlz derives the codec when the bound declaration is a Zig enum: no bind/decode
+pair is written, values convert through the enum's integer tag, or through its
+name when the enum declares `pub const sqlz_storage = .text`, and a database
+value outside the enum is an `invalid_data` error. The generated module asserts
+this contract with `sqlz.assertCodec`, which rejects every non-enum declaration
+in the current slice. Hand-written queries need no registration at all — their
+row and parameter structs already name the application's enums, and sqlz
+converts them at the boundary. See
+[ADR 0035](adr/0035-derived-enum-codecs.md).
 
 Codec callbacks are internal adapter contracts and may use narrow Zig error
 unions; the generated public operation converts them into an owned `sqlz.Error`

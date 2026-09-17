@@ -37,12 +37,17 @@ this slice.
 | Generator | Deterministic, Zig-AST-validated binding source emission | Complete |
 | Generator | Deterministic root/path namespace assembly | Complete |
 | Generator | Build-cache module integration | Complete |
-| Acceptance | Convert examples to generated checked bindings | Not started |
+| Runtime | Native enums at the parameter and row boundary | Complete |
+| Runtime | Connection-scoped owned rows and streaming owned conversion | Complete |
+| Runtime | Typed connection options and the native pool wrapper | Complete |
+| Codecs | Registered codec IDs resolved into generated bindings | Complete |
+| Acceptance | Convert examples to generated checked bindings | Complete |
 | Hardening | Complete diagnostics, resource limits, and dependency matrix | Not started |
 | Deferred | PostgreSQL runtime backend | Deferred |
 | Deferred | Migration execution and full CLI | Deferred |
 
 ## Current next steps
 
-1. Convert the examples to generated bindings and add embedded-Zig discovery.
+1. Finish embedded-Zig discovery: verify declared `.params`/`.row` structs and
+   their codec maps against the checker's inferred shapes.
 2. Harden diagnostics, source limits, and the supported dependency matrix.

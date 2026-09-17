@@ -57,6 +57,8 @@ pub const ValidationError = error{
     UnsupportedSqliteCapabilities,
     UnsupportedPostgresProfile,
     InvalidLimit,
+    InvalidCodecId,
+    MissingCodecPatterns,
 };
 
 pub const Error = ziggy.Deserializer.Error || ValidationError;
@@ -124,6 +126,17 @@ pub fn validate(config: *const Config) ValidationError!void {
         for (postgres.search_path) |name| {
             if (!isIdentifier(name)) return error.InvalidSqlRootAlias;
         }
+    }
+
+    var codecs = config.codecs.fields.iterator();
+    while (codecs.next()) |entry| {
+        // The ID is spelled into generated Zig as an import name, so it has to
+        // survive as an identifier, and a codec with no database pattern could
+        // never be matched against a column.
+        if (!isIdentifier(entry.key_ptr.*)) return error.InvalidCodecId;
+        const codec = entry.value_ptr.*;
+        if (codec.sqlite_types.len == 0 and codec.postgres_types.len == 0)
+            return error.MissingCodecPatterns;
     }
 
     const limits = config.limits;

@@ -7,6 +7,13 @@ pub const Backends = struct {
 
 pub const Cardinality = enum { exec, one, optional, many };
 
+/// A `sqlz.param.<name>` or `sqlz.column.<name>` directive: the codec ID the
+/// author pinned to one parameter or result column.
+pub const CodecOverride = struct {
+    name: []const u8,
+    codec: []const u8,
+};
+
 pub const Source = struct {
     allocator: std.mem.Allocator,
     path: []const u8,
@@ -14,14 +21,39 @@ pub const Source = struct {
     backends: Backends,
     cardinality: Cardinality,
     sql: []const u8,
+    param_codecs: []const CodecOverride = &.{},
+    column_codecs: []const CodecOverride = &.{},
 
     pub fn deinit(self: *Source) void {
         self.allocator.free(self.path);
         self.allocator.free(self.name);
         self.allocator.free(self.sql);
+        freeOverrides(self.allocator, self.param_codecs);
+        freeOverrides(self.allocator, self.column_codecs);
         self.* = undefined;
     }
 };
+
+fn freeOverrides(allocator: std.mem.Allocator, overrides: []const CodecOverride) void {
+    for (overrides) |override| {
+        allocator.free(override.name);
+        allocator.free(override.codec);
+    }
+    allocator.free(overrides);
+}
+
+fn appendOverride(
+    allocator: std.mem.Allocator,
+    list: *std.ArrayList(CodecOverride),
+    name: []const u8,
+    codec: []const u8,
+) Error!void {
+    const owned_name = try allocator.dupe(u8, name);
+    errdefer allocator.free(owned_name);
+    const owned_codec = try allocator.dupe(u8, codec);
+    errdefer allocator.free(owned_codec);
+    try list.append(allocator, .{ .name = owned_name, .codec = owned_codec });
+}
 
 pub const Discovery = struct {
     allocator: std.mem.Allocator,
@@ -46,6 +78,7 @@ pub const Error = error{
     InvalidBackend,
     DuplicateBackend,
     InvalidCardinality,
+    InvalidCodecId,
     DuplicateQueryVariant,
 } || std.mem.Allocator.Error;
 
@@ -55,6 +88,10 @@ pub fn parse(allocator: std.mem.Allocator, path: []const u8, contents: []const u
     var cardinality: ?Cardinality = null;
     var seen: std.StringHashMapUnmanaged(void) = .empty;
     defer seen.deinit(allocator);
+    var param_codecs: std.ArrayList(CodecOverride) = .empty;
+    errdefer freeOverrides(allocator, param_codecs.items);
+    var column_codecs: std.ArrayList(CodecOverride) = .empty;
+    errdefer freeOverrides(allocator, column_codecs.items);
 
     var sql_start: ?usize = null;
     var position: usize = 0;
@@ -88,8 +125,12 @@ pub fn parse(allocator: std.mem.Allocator, path: []const u8, contents: []const u
                 return error.InvalidCardinality;
         } else if (std.mem.startsWith(u8, key, "param.")) {
             if (!isIdentifier(key[6..])) return error.InvalidDirective;
+            if (!isIdentifier(value)) return error.InvalidCodecId;
+            try appendOverride(allocator, &param_codecs, key[6..], value);
         } else if (std.mem.startsWith(u8, key, "column.")) {
             if (!isIdentifier(key[7..])) return error.InvalidDirective;
+            if (!isIdentifier(value)) return error.InvalidCodecId;
+            try appendOverride(allocator, &column_codecs, key[7..], value);
         } else {
             return error.UnknownDirective;
         }
@@ -113,6 +154,8 @@ pub fn parse(allocator: std.mem.Allocator, path: []const u8, contents: []const u
         .backends = parsed_backends,
         .cardinality = parsed_cardinality,
         .sql = owned_sql,
+        .param_codecs = try param_codecs.toOwnedSlice(allocator),
+        .column_codecs = try column_codecs.toOwnedSlice(allocator),
     };
 }
 

@@ -42,9 +42,16 @@ pub const ToolOptions = struct {
     dependency: *std.Build.Dependency,
 };
 
+pub const CodecBinding = struct {
+    id: []const u8,
+    module: *std.Build.Module,
+    declaration: []const u8,
+};
+
 pub const ProjectOptions = struct {
     name: []const u8,
     config: std.Build.LazyPath,
+    codecs: []const CodecBinding = &.{},
 };
 
 pub const Project = struct {
@@ -61,8 +68,11 @@ pub fn addTool(b: *std.Build, options: ToolOptions) *Tool;
 
 The current SQLite-first slice has this smaller build contract. `addProject`
 requires a unique name and returns a generated query module plus its internal
-check step. Runtime-backend/codec registration and the embedded-migration module
-will extend these structures in later phases.
+check step. Each codec binding is passed to the checker and added to the
+generated module as an import named `sqlz_codec_<id>`; a configured ID without a
+binding, or a binding the configuration never declares, fails the check.
+Runtime-backend registration and the embedded-migration module will extend these
+structures in later phases.
 
 `sqlz.ziggy` owns paths, profile selection, root aliases, supplements, limits,
 project identity, and database codec patterns. Build registration owns only Zig

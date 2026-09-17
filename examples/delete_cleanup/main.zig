@@ -1,18 +1,13 @@
 const std = @import("std");
-const sqlz = @import("sqlz");
 const support = @import("example_support");
+const queries = @import("queries");
 
-const cleanup = sqlz.Query(.{
-    .sql = "DELETE FROM sessions WHERE expires_at<=:now",
-    .backends = .{ .sqlite = true },
-    .cardinality = .exec,
-    .params = struct { now: i64 },
-});
+const cleanup = queries.app.delete_cleanup.cleanup;
 
 pub fn run(allocator: std.mem.Allocator, io: std.Io) !void {
     var conn = try support.openMemory(allocator, io);
     defer conn.deinit();
-    try conn.raw().execNoArgs("CREATE TABLE sessions(id INTEGER PRIMARY KEY, expires_at INTEGER NOT NULL); INSERT INTO sessions VALUES(1,10),(2,20),(3,30);");
+    try support.seed(&conn, "INSERT INTO sessions VALUES('a',1,'csrf',10),('b',1,'csrf',20),('c',1,'csrf',30);");
     const result = try support.unwrap(cleanup.execute(&conn, .{ .now = 20 }));
     if (result.rows_affected != 2) return error.UnexpectedCleanupCount;
 }

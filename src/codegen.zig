@@ -5,11 +5,22 @@ const migrations = @import("sqlz_migrations");
 const query_files = @import("sqlz_query_files");
 const zig_queries = @import("sqlz_zig_queries");
 const checker = @import("sqlz_checker");
+const analysis = @import("sqlz_analysis");
 const generator = @import("sqlz_generator");
 
 pub const Error = error{
     SqliteBackendRequired,
     PostgresBackendDeferred,
+    UnboundCodec,
+    UnregisteredCodec,
+};
+
+/// A codec binding as the build supplies it: the configured ID, plus the Zig
+/// module and declaration the generated module should name.
+pub const CodecBinding = struct {
+    id: []const u8,
+    import_name: []const u8,
+    declaration: []const u8,
 };
 
 const RootState = struct {
@@ -32,6 +43,16 @@ pub fn generateProject(
     project_dir: std.Io.Dir,
     config_name: []const u8,
 ) ![]u8 {
+    return generateProjectWithCodecs(allocator, io, project_dir, config_name, &.{});
+}
+
+pub fn generateProjectWithCodecs(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    project_dir: std.Io.Dir,
+    config_name: []const u8,
+    bindings: []const CodecBinding,
+) ![]u8 {
     const raw_config = try project_dir.readFileAlloc(io, config_name, allocator, .limited(16 * 1024 * 1024));
     defer allocator.free(raw_config);
     const config_source = try allocator.dupeZ(u8, raw_config);
@@ -45,6 +66,41 @@ pub fn generateProject(
         .profile = checker.SqliteProfile.fromString(sqlite.profile) orelse unreachable,
     };
     const source_limit = std.math.cast(usize, project.limits.source_bytes) orelse return error.InvalidLimit;
+
+    // Codec IDs and build bindings are one to one: the Ziggy file owns the
+    // database patterns, `build.zig` owns the Zig declaration, and neither side
+    // may name a codec the other has not.
+    const codec_count = project.codecs.fields.count();
+    if (codec_count != bindings.len) {
+        if (bindings.len < codec_count) return error.UnboundCodec;
+        return error.UnregisteredCodec;
+    }
+    const codec_infos = try allocator.alloc(checker.CodecInfo, codec_count);
+    defer allocator.free(codec_infos);
+    const generator_codecs = try allocator.alloc(generator.CodecBinding, codec_count);
+    defer allocator.free(generator_codecs);
+    var codec_index: usize = 0;
+    var codec_entries = project.codecs.fields.iterator();
+    while (codec_entries.next()) |entry| : (codec_index += 1) {
+        const id = entry.key_ptr.*;
+        const binding = findBinding(bindings, id) orelse return error.UnboundCodec;
+        var sqlite_type: analysis.ScalarType = .unknown;
+        for (entry.value_ptr.sqlite_types) |pattern| {
+            const resolved = analysis.scalarType(pattern);
+            if (resolved == .unknown) continue;
+            if (sqlite_type != .unknown and sqlite_type != resolved) {
+                sqlite_type = .unknown;
+                break;
+            }
+            sqlite_type = resolved;
+        }
+        codec_infos[codec_index] = .{ .id = id, .sqlite_type = sqlite_type };
+        generator_codecs[codec_index] = .{
+            .id = id,
+            .import_name = binding.import_name,
+            .declaration = binding.declaration,
+        };
+    }
 
     var migration_dir = try project_dir.openDir(io, project.migrations, .{ .iterate = true });
     defer migration_dir.close(io);
@@ -105,11 +161,12 @@ pub fn generateProject(
         errdefer allocator.free(inputs);
         for (discovery.sources) |*source| {
             if (!source.backends.sqlite) continue;
-            checked[checked_count] = try checker.checkNamedSqliteWithDialect(
+            checked[checked_count] = try checker.checkNamedSqliteWithCodecs(
                 allocator,
                 &schema,
                 source,
                 dialect,
+                codec_infos,
             );
             inputs[checked_count] = .{ .source = source, .checked = &checked[checked_count] };
             checked_count += 1;
@@ -122,5 +179,10 @@ pub fn generateProject(
         roots[initialized] = .{ .alias = entry.key_ptr.*, .inputs = inputs };
         initialized += 1;
     }
-    return generator.generateProjectModule(allocator, roots);
+    return generator.generateProjectModuleWithCodecs(allocator, roots, generator_codecs);
+}
+
+fn findBinding(bindings: []const CodecBinding, id: []const u8) ?CodecBinding {
+    for (bindings) |binding| if (std.mem.eql(u8, binding.id, id)) return binding;
+    return null;
 }

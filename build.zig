@@ -156,6 +156,7 @@ pub fn build(b: *std.Build) !void {
             .{ .name = "sqlz_query_files", .module = query_files_mod },
             .{ .name = "sqlz_zig_queries", .module = zig_queries_mod },
             .{ .name = "sqlz_checker", .module = checker_mod },
+            .{ .name = "sqlz_analysis", .module = analysis_mod },
             .{ .name = "sqlz_generator", .module = generator_mod },
         },
     });
@@ -424,6 +425,8 @@ pub fn build(b: *std.Build) !void {
         });
         const run_sqlite = b.addRunArtifact(sqlite_tests);
         test_step.dependOn(&run_sqlite.step);
+        const sqlite_step = b.step("test-sqlite", "Run the SQLite runtime tests");
+        sqlite_step.dependOn(&run_sqlite.step);
 
         if (zio_dep) |zio| {
             const zio_tests = b.addTest(.{
@@ -453,6 +456,30 @@ pub fn build(b: *std.Build) !void {
             .imports = &.{.{ .name = "sqlz", .module = sqlz_mod }},
         });
 
+        // The examples are one checked sqlz project: their SQL lives in
+        // `examples/queries`, their schema in `examples/migrations`, and the
+        // bindings below are generated from both at build time.
+        const example_types_mod = b.createModule(.{
+            .root_source_file = b.path("examples/types.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        const run_example_codegen = b.addRunArtifact(codegen_exe);
+        run_example_codegen.setName("check sqlz example project");
+        run_example_codegen.addFileArg(b.path("examples/sqlz.ziggy"));
+        const example_queries_path = run_example_codegen.addOutputFileArg("example_queries.zig");
+        run_example_codegen.addArgs(&.{ "--codec", "tier", "sqlz_codec_tier", "Tier" });
+        _ = try run_example_codegen.step.addDirectoryWatchInput(b.path("examples"));
+        const example_queries_mod = b.createModule(.{
+            .root_source_file = example_queries_path,
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "sqlz", .module = sqlz_mod },
+                .{ .name = "sqlz_codec_tier", .module = example_types_mod },
+            },
+        });
+
         const example_names = [_][]const u8{
             "account_crud",
             "preferences_upsert",
@@ -464,6 +491,9 @@ pub fn build(b: *std.Build) !void {
             "insert_select",
             "paginated_search",
             "delete_cleanup",
+            "enum_roles",
+            "arena_rows",
+            "pooled_reads",
         };
         var example_imports: [example_names.len]std.Build.Module.Import = undefined;
         inline for (example_names, 0..) |name, i| {
@@ -475,6 +505,8 @@ pub fn build(b: *std.Build) !void {
                 .imports = &.{
                     .{ .name = "sqlz", .module = sqlz_mod },
                     .{ .name = "example_support", .module = support_mod },
+                    .{ .name = "queries", .module = example_queries_mod },
+                    .{ .name = "types", .module = example_types_mod },
                 },
             });
             example_imports[i] = .{ .name = name, .module = example_mod };

@@ -15,12 +15,16 @@ pub const ResultColumn = struct {
     name: []const u8,
     scalar_type: ScalarType,
     nullable: bool,
+    /// Set when a `sqlz.param.<name>` / `sqlz.column.<name>` directive pinned
+    /// this value to a registered codec; the generator then names the codec's
+    /// Zig type instead of the built-in mapping.
+    codec: ?[]const u8 = null,
 };
 
 pub const Analysis = struct {
     arena: std.heap.ArenaAllocator,
-    columns: []const ResultColumn,
-    parameters: []const ResultColumn,
+    columns: []ResultColumn,
+    parameters: []ResultColumn,
 
     pub fn deinit(self: *Analysis) void {
         self.arena.deinit();
@@ -254,7 +258,7 @@ fn fromHint(hint: ir.TypeHint) ScalarType {
     };
 }
 
-fn scalarType(database_type: []const u8) ScalarType {
+pub fn scalarType(database_type: []const u8) ScalarType {
     const integer_types = [_][]const u8{ "int2", "int4", "int8", "integer", "smallint", "bigint" };
     const real_types = [_][]const u8{ "float4", "float8", "numeric", "real", "double" };
     const text_types = [_][]const u8{ "text", "varchar", "bpchar", "char", "name" };

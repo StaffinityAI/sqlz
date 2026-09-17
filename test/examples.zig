@@ -39,3 +39,15 @@ test "paginated search example" {
 test "delete cleanup example" {
     try @import("delete_cleanup").run(std.testing.allocator, std.testing.io);
 }
+
+test "enum roles example" {
+    try @import("enum_roles").run(std.testing.allocator, std.testing.io);
+}
+
+test "arena rows example" {
+    try @import("arena_rows").run(std.testing.allocator, std.testing.io);
+}
+
+test "pooled reads example" {
+    try @import("pooled_reads").run(std.testing.allocator, std.testing.io);
+}

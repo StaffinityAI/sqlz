@@ -7,7 +7,17 @@ pub const Error = error{
     UnsupportedType,
     InvalidNamespace,
     NamespaceCollision,
+    UnknownCodec,
 } || std.mem.Allocator.Error;
+
+/// A codec ID resolved to the Zig declaration the build bound it to. The
+/// generated module imports each bound module under `import_name` and names
+/// `<import_name>.<declaration>` wherever the codec applies.
+pub const CodecBinding = struct {
+    id: []const u8,
+    import_name: []const u8,
+    declaration: []const u8,
+};
 
 pub const CheckedInput = struct {
     source: *const query_files.Source,
@@ -30,7 +40,7 @@ pub fn generateQuery(
         \\const sqlz = @import("sqlz");
         \\
     );
-    try writeQuery(&output, allocator, source, checked, 0);
+    try writeQuery(&output, allocator, source, checked, 0, &.{});
     return output.toOwnedSlice(allocator);
 }
 
@@ -43,6 +53,14 @@ pub fn generateModule(
 }
 
 pub fn generateProjectModule(allocator: std.mem.Allocator, roots: []const RootInput) Error![]u8 {
+    return generateProjectModuleWithCodecs(allocator, roots, &.{});
+}
+
+pub fn generateProjectModuleWithCodecs(
+    allocator: std.mem.Allocator,
+    roots: []const RootInput,
+    codecs: []const CodecBinding,
+) Error![]u8 {
     const sorted_roots = try allocator.dupe(RootInput, roots);
     defer allocator.free(sorted_roots);
     std.mem.sort(RootInput, sorted_roots, {}, struct {
@@ -56,15 +74,36 @@ pub fn generateProjectModule(allocator: std.mem.Allocator, roots: []const RootIn
             return error.NamespaceCollision;
     }
 
+    const sorted_codecs = try allocator.dupe(CodecBinding, codecs);
+    defer allocator.free(sorted_codecs);
+    std.mem.sort(CodecBinding, sorted_codecs, {}, struct {
+        fn lessThan(_: void, lhs: CodecBinding, rhs: CodecBinding) bool {
+            return std.mem.lessThan(u8, lhs.id, rhs.id);
+        }
+    }.lessThan);
+
     var output: std.ArrayList(u8) = .empty;
     errdefer output.deinit(allocator);
     try output.appendSlice(allocator,
         \\const sqlz = @import("sqlz");
         \\
+    );
+    for (sorted_codecs) |codec|
+        try output.print(allocator, "const {s} = @import(\"{s}\");\n", .{ codec.import_name, codec.import_name });
+    if (sorted_codecs.len != 0) {
+        // The build binds an ID to one declaration; this is where a binding
+        // that is not a usable codec fails, at the consumer's compilation.
+        try output.appendSlice(allocator, "\ncomptime {\n");
+        for (sorted_codecs) |codec|
+            try output.print(allocator, "    sqlz.assertCodec({s}.{s});\n", .{ codec.import_name, codec.declaration });
+        try output.appendSlice(allocator, "}\n");
+    }
+    try output.appendSlice(allocator,
+        \\
         \\// Generated checked queries; do not edit.
         \\
     );
-    for (sorted_roots) |root| try writeRoot(&output, allocator, root.alias, root.inputs);
+    for (sorted_roots) |root| try writeRoot(&output, allocator, root.alias, root.inputs, sorted_codecs);
     return output.toOwnedSlice(allocator);
 }
 
@@ -73,6 +112,7 @@ fn writeRoot(
     allocator: std.mem.Allocator,
     root_alias: []const u8,
     inputs: []const CheckedInput,
+    codecs: []const CodecBinding,
 ) Error!void {
     const entries = try allocator.alloc(Entry, inputs.len);
     defer {
@@ -98,7 +138,7 @@ fn writeRoot(
             try writeIndent(output, allocator, depth + 1);
             try output.print(allocator, "pub const {s} = struct {{\n", .{directory});
         }
-        try writeQuery(output, allocator, entry.input.source, entry.input.checked, entry.directories.len + 1);
+        try writeQuery(output, allocator, entry.input.source, entry.input.checked, entry.directories.len + 1, codecs);
         previous = entry.directories;
     }
     var close_index = previous.len;
@@ -127,6 +167,7 @@ fn writeQuery(
     source: *const query_files.Source,
     checked: *const checker.CheckedQuery,
     indent: usize,
+    codecs: []const CodecBinding,
 ) Error!void {
     try writeIndent(output, allocator, indent);
     try output.print(allocator, "// Generated from {s}; do not edit.\n", .{source.path});
@@ -146,7 +187,7 @@ fn writeQuery(
     for (checked.analysis.parameters) |parameter| {
         try writeIndent(output, allocator, indent + 2);
         try output.print(allocator, "{s}: ", .{parameter.name});
-        try writeType(output, allocator, parameter);
+        try writeType(output, allocator, parameter, codecs);
         try output.appendSlice(allocator, ",\n");
     }
     try writeIndent(output, allocator, indent + 1);
@@ -157,7 +198,7 @@ fn writeQuery(
         for (checked.analysis.columns) |column| {
             try writeIndent(output, allocator, indent + 2);
             try output.print(allocator, "{s}: ", .{column.name});
-            try writeType(output, allocator, column);
+            try writeType(output, allocator, column, codecs);
             try output.appendSlice(allocator, ",\n");
         }
         try writeIndent(output, allocator, indent + 1);
@@ -203,6 +244,11 @@ fn commonPrefix(lhs: []const []const u8, rhs: []const []const u8) usize {
     return count;
 }
 
+fn findBinding(codecs: []const CodecBinding, id: []const u8) ?CodecBinding {
+    for (codecs) |codec| if (std.mem.eql(u8, codec.id, id)) return codec;
+    return null;
+}
+
 fn writeIndent(output: *std.ArrayList(u8), allocator: std.mem.Allocator, depth: usize) !void {
     for (0..depth) |_| try output.appendSlice(allocator, "    ");
 }
@@ -217,7 +263,14 @@ fn writeType(
     output: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
     value: analysis.ResultColumn,
+    codecs: []const CodecBinding,
 ) Error!void {
+    if (value.codec) |id| {
+        const binding = findBinding(codecs, id) orelse return error.UnknownCodec;
+        if (value.nullable) try output.append(allocator, '?');
+        try output.print(allocator, "{s}.{s}", .{ binding.import_name, binding.declaration });
+        return;
+    }
     if (value.scalar_type == .unknown) return error.UnsupportedType;
     if (value.nullable) try output.append(allocator, '?');
     try output.appendSlice(allocator, switch (value.scalar_type) {

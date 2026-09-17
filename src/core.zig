@@ -121,22 +121,113 @@ fn ManyQuery(comptime sql: []const u8, comptime Params: type, comptime Row: type
     };
 }
 
+/// How an application enum is stored in the database. An enum declares
+/// `pub const sqlz_storage = .text;` to opt into name storage; the default is
+/// the integer tag, which is what SQLite's INTEGER affinity holds.
+pub const Storage = enum { integer, text };
+
+pub fn enumStorage(comptime E: type) Storage {
+    if (!@hasDecl(E, "sqlz_storage")) return .integer;
+    const declared: Storage = E.sqlz_storage;
+    return declared;
+}
+
+/// The parameter struct a backend driver actually receives: application enums
+/// are lowered to their stored representation, every other field is passed
+/// through unchanged. Field names and tuple-ness survive, because drivers bind
+/// named structs by parameter name and tuples by position.
+pub fn BoundArgs(comptime Args: type) type {
+    const info = @typeInfo(Args);
+    if (info != .@"struct") return Args;
+    const fields = info.@"struct".fields;
+    var names: [fields.len][:0]const u8 = undefined;
+    var types: [fields.len]type = undefined;
+    var lowered = false;
+    for (fields, &names, &types) |field, *name, *Bound| {
+        Bound.* = BoundType(field.type);
+        if (Bound.* != field.type) lowered = true;
+        name.* = field.name;
+    }
+    if (!lowered) return Args;
+    const frozen_names = names;
+    const frozen_types = types;
+    if (info.@"struct".is_tuple) return @Tuple(&frozen_types);
+    return @Struct(.auto, null, &frozen_names, &frozen_types, &@splat(.{}));
+}
+
+pub fn bindArgs(args: anytype) BoundArgs(@TypeOf(args)) {
+    const Args = @TypeOf(args);
+    const Bound = BoundArgs(Args);
+    if (Bound == Args) return args;
+    var bound: Bound = undefined;
+    inline for (@typeInfo(Args).@"struct".fields) |field|
+        @field(bound, field.name) = bindValue(field.type, @field(args, field.name));
+    return bound;
+}
+
+fn BoundType(comptime T: type) type {
+    return switch (@typeInfo(T)) {
+        .@"enum" => switch (enumStorage(T)) {
+            .integer => i64,
+            .text => []const u8,
+        },
+        .optional => |optional| blk: {
+            const Bound = BoundType(optional.child);
+            break :blk if (Bound == optional.child) T else ?Bound;
+        },
+        else => T,
+    };
+}
+
+fn bindValue(comptime T: type, value: T) BoundType(T) {
+    return switch (@typeInfo(T)) {
+        .@"enum" => switch (comptime enumStorage(T)) {
+            .integer => @intCast(@intFromEnum(value)),
+            .text => @tagName(value),
+        },
+        .optional => |optional| if (value) |inner| bindValue(optional.child, inner) else null,
+        else => value,
+    };
+}
+
 pub fn cloneRow(allocator: std.mem.Allocator, value: anytype) !@TypeOf(value) {
     return cloneValue(allocator, @TypeOf(value), value);
 }
 
 fn cloneValue(allocator: std.mem.Allocator, comptime T: type, value: T) !T {
-    if (T == []const u8) return try allocator.dupe(u8, value);
+    if (comptime byteSlice(T)) |pointer| {
+        if (comptime pointer.sentinel()) |terminator| {
+            const copy = try allocator.allocSentinel(u8, value.len, terminator);
+            @memcpy(copy, value);
+            return copy;
+        }
+        return try allocator.dupe(u8, value);
+    }
     return switch (@typeInfo(T)) {
         .optional => |optional| if (value) |inner| try cloneValue(allocator, optional.child, inner) else null,
         .@"struct" => |info| blk: {
             var result: T = undefined;
-            inline for (info.fields) |field|
+            inline for (info.fields, 0..) |field, index| {
+                // A later field failing to allocate must not strand the fields
+                // already copied, so unwind exactly the prefix that succeeded.
+                errdefer inline for (info.fields[0..index]) |copied|
+                    deinitValue(allocator, copied.type, @field(result, copied.name));
                 @field(result, field.name) = try cloneValue(allocator, field.type, @field(value, field.name));
+            }
             break :blk result;
         },
         else => value,
     };
+}
+
+/// Describes `T` when it is a slice of bytes, including sentinel-terminated
+/// spellings such as `[:0]const u8` that SQLite can decode into a row.
+fn byteSlice(comptime T: type) ?std.builtin.Type.Pointer {
+    const info = @typeInfo(T);
+    if (info != .pointer) return null;
+    const pointer = info.pointer;
+    if (pointer.size != .slice or pointer.child != u8) return null;
+    return pointer;
 }
 
 pub fn deinitOwnedRow(allocator: std.mem.Allocator, value: anytype) void {
@@ -144,7 +235,7 @@ pub fn deinitOwnedRow(allocator: std.mem.Allocator, value: anytype) void {
 }
 
 fn deinitValue(allocator: std.mem.Allocator, comptime T: type, value: T) void {
-    if (T == []const u8) {
+    if (comptime byteSlice(T) != null) {
         allocator.free(value);
         return;
     }

@@ -87,6 +87,18 @@ the leaf. This makes identical relative paths in separate roots unambiguous.
 IDs; build code owns Zig declarations. Missing, duplicate, and unused bindings are
 errors.
 
+```zig
+const project = tool.addProject(.{
+    .name = "app",
+    .config = b.path("sqlz.ziggy"),
+    .codecs = &.{.{ .id = "tier", .module = types, .declaration = "Tier" }},
+});
+```
+
+Each binding becomes an import of the generated module named `sqlz_codec_<id>`,
+which is how generated parameters and rows name the application's type. A codec
+ID must be a Zig identifier and must declare at least one database pattern.
+
 ## Resource limits
 
 All limits are configurable. Defaults are 16 MiB per source, 1,000,000 tokens per

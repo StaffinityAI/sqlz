@@ -38,7 +38,7 @@ fn unwrap(result: anytype) !@TypeOf(result.ok) {
 }
 
 fn workload(allocator: std.mem.Allocator, io: std.Io) !void {
-    var conn = try sqlz.sqlite.open(allocator, io, ":memory:");
+    var conn = try sqlz.sqlite.open(allocator, io, ":memory:", .{});
     defer conn.deinit();
 
     // The connection keeps exactly the implementation it was initialized with.
@@ -102,7 +102,7 @@ test "the retained std.Io stays usable for file system work" {
     );
     defer std.testing.allocator.free(path);
 
-    var conn = try sqlz.sqlite.open(std.testing.allocator, runtime.io(), path);
+    var conn = try sqlz.sqlite.open(std.testing.allocator, runtime.io(), path, .{});
     defer conn.deinit();
     try conn.raw().execNoArgs("CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT NOT NULL);");
 
@@ -110,4 +110,48 @@ test "the retained std.Io stays usable for file system work" {
     // proving the stored interface is a live zio-backed implementation.
     const stat = try tmp.dir.statFile(conn.io, "sqlz.db", .{});
     try std.testing.expect(stat.size > 0);
+}
+
+fn poolWorkload(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !void {
+    var pool = try sqlz.sqlite.Pool.init(allocator, io, path, .{ .size = 2 });
+    defer pool.deinit();
+
+    // The pool acquires on the caller's runtime, so every handle it produces
+    // must carry that same implementation.
+    try std.testing.expectEqual(io.userdata, pool.io.userdata);
+    try std.testing.expectEqual(io.vtable, pool.io.vtable);
+
+    {
+        var conn = try pool.acquire();
+        defer conn.deinit();
+        try std.testing.expectEqual(io.vtable, conn.io.vtable);
+        try conn.raw().execNoArgs(
+            "CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT NOT NULL);" ++
+                "INSERT INTO users(id,name) VALUES(1,'Ada'),(2,'Grace');",
+        );
+    }
+
+    var rows = try unwrap(list_users.fetch(&pool, .{}));
+    defer rows.deinit();
+    try std.testing.expectEqual(io.vtable, rows.io.vtable);
+    var count: usize = 0;
+    while (try unwrap(rows.next())) |_| count += 1;
+    try std.testing.expectEqual(@as(usize, 2), count);
+}
+
+test "pooled handles keep the caller's std.Io" {
+    const runtime = try zio.Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fmt.allocPrint(
+        std.testing.allocator,
+        ".zig-cache/tmp/{s}/pool.db",
+        .{tmp.sub_path},
+    );
+    defer std.testing.allocator.free(path);
+
+    var task = try runtime.spawn(poolWorkload, .{ std.testing.allocator, runtime.io(), path });
+    try task.join();
 }

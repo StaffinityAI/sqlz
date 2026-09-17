@@ -52,6 +52,20 @@ wrapper closes/releases its native handle on `deinit`; a borrowed wrapper never
 does. Pool wrappers delegate acquisition and scheduling to the driver's native
 pool and return sqlz connection wrappers with explicit release semantics.
 
+Connection ownership is therefore three-valued: an owned handle closes, a
+borrowed one does nothing, and a pooled one releases to its pool. A pooled
+handle that a pool produced together with a result — `Single` or `Rows` — is
+released by that result's `deinit`, so it must not outlive it.
+
+`sqlz.sqlite.OpenOptions` names the connection settings sqlz applies itself:
+open flags, `foreign_keys`, `journal_mode`, `synchronous`, and
+`busy_timeout_ms`. Each is optional, `null` keeps SQLite's default, and they are
+applied busy timeout first so a contended journal-mode switch waits rather than
+fails. `sqlz.sqlite.Pool` hands the same options to the driver as its
+per-connection callback, so pooled and unpooled connections are configured
+identically. Anything sqlz does not name stays a `raw()` PRAGMA. See
+[ADR 0034](adr/0034-typed-sqlite-connection-options-and-pool-wrapper.md).
+
 Transactions are move-only logical handles. `commit` and `rollback` return detailed
 results. `deinit` rolls back an active transaction; if rollback fails, the
 connection is poisoned and discarded rather than returned to a pool.
@@ -73,6 +87,21 @@ reset, or owning result deinitialization. `row.toOwned(allocator)` copies all
 borrowed text, blobs, arrays, and codec-owned data and requires `deinit`. Streaming
 iterators own or borrow the executing handle exactly as stated by their type and
 must be finalized.
+
+A connection also carries an owned-row scope, so a conversion need not name an
+allocator at every call site:
+
+```zig
+var scope = conn.ownedScope(arena.allocator(), .{ .free_rows = false });
+defer scope.deinit();
+```
+
+`toOwned(null)` then copies into that allocator. `free_rows = false` marks a
+scope that releases wholesale: its rows carry no allocator and their `deinit`
+frees nothing. Statement finalization is unaffected — `Single.deinit` and
+`Rows.deinit` release a statement, not memory, and remain mandatory in every
+mode. Streaming results convert through `nextOwned` and `collectOwned` under the
+same rules. See [ADR 0033](adr/0033-connection-scoped-owned-rows.md).
 
 sqlz does not add a statement cache or promise transparent reprepare. Stable query
 IDs may be passed to drivers that support caching, but preparation behavior and

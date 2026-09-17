@@ -43,3 +43,6 @@ be replaced only by a new ADR. Records use [0000-template.md](0000-template.md).
 | [0030](0030-documentation-authority-adr-governance-and-performance-gates.md) | Documentation governance and performance | Accepted |
 | [0031](0031-libpg-query-parser.md) | libpg_query parser boundary | Accepted |
 | [0032](0032-std-io-at-runtime-initialization.md) | `std.Io` at runtime initialization | Accepted |
+| [0033](0033-connection-scoped-owned-rows.md) | Connection-scoped owned rows | Accepted |
+| [0034](0034-typed-sqlite-connection-options-and-pool-wrapper.md) | Connection options and pool wrapper | Accepted |
+| [0035](0035-derived-enum-codecs.md) | Derived enum codecs | Accepted |

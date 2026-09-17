@@ -1,0 +1,10 @@
+CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+CREATE TABLE profiles(user_id INTEGER PRIMARY KEY, label TEXT);
+CREATE TABLE preferences(user_id INTEGER PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE roles(id INTEGER PRIMARY KEY, child_id INTEGER);
+CREATE TABLE role_permissions(role_id INTEGER NOT NULL, permission_key TEXT NOT NULL, PRIMARY KEY(role_id, permission_key));
+CREATE TABLE workspaces(id INTEGER PRIMARY KEY, owner_id INTEGER NOT NULL);
+CREATE TABLE organization_members(user_id INTEGER NOT NULL);
+CREATE TABLE workspace_members(user_id INTEGER NOT NULL);
+CREATE TABLE sessions(token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL, csrf_token TEXT NOT NULL, expires_at INTEGER NOT NULL);
+CREATE TABLE accounts(id INTEGER PRIMARY KEY, name TEXT NOT NULL, tier INTEGER NOT NULL);

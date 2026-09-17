@@ -79,3 +79,29 @@ test "rejects unknown SQLite capability manifests" {
         config.parse(std.testing.allocator, source, &meta),
     );
 }
+
+test "codec entries need an identifier ID and a database pattern" {
+    var meta: ziggy.Deserializer.Meta = .init;
+
+    const registered = try std.testing.allocator.dupeZ(
+        u8,
+        valid ++ ".codecs = .{ .user_id = .{ .sqlite_types = [\"BLOB\"] } },\n",
+    );
+    defer std.testing.allocator.free(registered);
+    var loaded = try config.parse(std.testing.allocator, registered, &meta);
+    defer loaded.deinit();
+    try std.testing.expectEqualStrings(
+        "BLOB",
+        loaded.config().codecs.fields.get("user_id").?.sqlite_types[0],
+    );
+
+    const patternless = try std.testing.allocator.dupeZ(
+        u8,
+        valid ++ ".codecs = .{ .user_id = .{ .sqlite_types = [], .postgres_types = [] } },\n",
+    );
+    defer std.testing.allocator.free(patternless);
+    try std.testing.expectError(
+        error.MissingCodecPatterns,
+        config.parse(std.testing.allocator, patternless, &meta),
+    );
+}

@@ -1,19 +1,13 @@
 const std = @import("std");
-const sqlz = @import("sqlz");
 const support = @import("example_support");
+const queries = @import("queries");
 
-const page = sqlz.Query(.{
-    .sql = "SELECT id, name FROM users WHERE name LIKE :pattern ORDER BY lower(name), id LIMIT :limit OFFSET :offset",
-    .backends = .{ .sqlite = true },
-    .cardinality = .many,
-    .params = struct { pattern: []const u8, limit: i64, offset: i64 },
-    .row = struct { id: i64, name: []const u8 },
-});
+const page = queries.app.paginated_search.page;
 
 pub fn run(allocator: std.mem.Allocator, io: std.Io) !void {
     var conn = try support.openMemory(allocator, io);
     defer conn.deinit();
-    try conn.raw().execNoArgs("CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT NOT NULL); INSERT INTO users VALUES(1,'Ada'),(2,'Bob'),(3,'Cyd');");
+    try support.seed(&conn, "INSERT INTO users VALUES(1,'Ada'),(2,'Bob'),(3,'Cyd');");
     var rows = try support.unwrap(page.fetch(&conn, .{ .pattern = "%", .limit = 1, .offset = 1 }));
     defer rows.deinit();
     const row = (try support.unwrap(rows.next())).?;

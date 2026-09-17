@@ -1,0 +1,8 @@
+.format_version = 1,
+.revision = "aaaaaaaaaaaa",
+.parents = [],
+.description = "example schema",
+.created_utc = "2026-09-16T12:00:00Z",
+.backends = [.sqlite],
+.reversible = true,
+.transaction = .{ .sqlite = .always },

@@ -17,6 +17,9 @@ pub const MigrationInput = struct {
 
 pub const Error = migrations.Error || parser.ParseError || catalog.Error || ir.Error || analysis.Error || error{
     BackendNotSelected,
+    UnknownCodec,
+    UnknownCodecTarget,
+    IncompatibleCodec,
     UnexpectedResultColumns,
     MissingResultColumns,
 };
@@ -42,11 +45,29 @@ pub fn checkNamedSqlite(
     return checkNamedSqliteWithDialect(allocator, schema, source, .{});
 }
 
+/// One registered codec as the checker sees it: a stable ID plus the scalar
+/// type its declared database patterns resolve to. The Zig declaration behind
+/// the ID is a build-time binding the generator resolves, not a checker input.
+pub const CodecInfo = struct {
+    id: []const u8,
+    sqlite_type: analysis.ScalarType = .unknown,
+};
+
 pub fn checkNamedSqliteWithDialect(
     allocator: std.mem.Allocator,
     schema: *const catalog.Catalog,
     source: *const query_files.Source,
     dialect: SqliteDialect,
+) Error!CheckedQuery {
+    return checkNamedSqliteWithCodecs(allocator, schema, source, dialect, &.{});
+}
+
+pub fn checkNamedSqliteWithCodecs(
+    allocator: std.mem.Allocator,
+    schema: *const catalog.Catalog,
+    source: *const query_files.Source,
+    dialect: SqliteDialect,
+    codecs: []const CodecInfo,
 ) Error!CheckedQuery {
     if (!source.backends.sqlite) return error.BackendNotSelected;
     var parsed = try parser.parseSqliteWithDialect(allocator, source.sql, dialect);
@@ -56,8 +77,58 @@ pub fn checkNamedSqliteWithDialect(
     const produces_rows = query.projections.len != 0;
     if (source.cardinality == .exec and produces_rows) return error.UnexpectedResultColumns;
     if (source.cardinality != .exec and !produces_rows) return error.MissingResultColumns;
-    const analyzed = try analysis.analyze(allocator, schema, &query);
+    var analyzed = try analysis.analyze(allocator, schema, &query);
+    errdefer analyzed.deinit();
+    try applyCodecs(&analyzed, source, codecs);
     return .{ .parsed = parsed, .query = query, .analysis = analyzed };
+}
+
+/// Resolves the query's codec directives against the project's registered
+/// codecs and records them on the analyzed parameters and columns.
+fn applyCodecs(
+    analyzed: *analysis.Analysis,
+    source: *const query_files.Source,
+    codecs: []const CodecInfo,
+) Error!void {
+    const storage = analyzed.arena.allocator();
+    for (source.param_codecs) |override|
+        try applyCodec(storage, analyzed.parameters, override, codecs);
+    for (source.column_codecs) |override|
+        try applyCodec(storage, analyzed.columns, override, codecs);
+}
+
+fn applyCodec(
+    storage: std.mem.Allocator,
+    values: []analysis.ResultColumn,
+    override: query_files.CodecOverride,
+    codecs: []const CodecInfo,
+) Error!void {
+    const codec = findCodec(codecs, override.codec) orelse return error.UnknownCodec;
+    const target = findValue(values, override.name) orelse return error.UnknownCodecTarget;
+    // The codec declares which database types it accepts, so a codec pinned to
+    // a column of another shape is a contradiction, not a coercion. A value the
+    // analyzer could not type is exactly what a codec is there to rescue.
+    if (codec.sqlite_type != .unknown) {
+        if (target.scalar_type == .unknown)
+            target.scalar_type = codec.sqlite_type
+        else if (target.scalar_type != codec.sqlite_type)
+            return error.IncompatibleCodec;
+    }
+    if (target.codec) |existing| {
+        if (!std.mem.eql(u8, existing, codec.id)) return error.IncompatibleCodec;
+        return;
+    }
+    target.codec = try storage.dupe(u8, codec.id);
+}
+
+fn findCodec(codecs: []const CodecInfo, id: []const u8) ?CodecInfo {
+    for (codecs) |codec| if (std.mem.eql(u8, codec.id, id)) return codec;
+    return null;
+}
+
+fn findValue(values: []analysis.ResultColumn, name: []const u8) ?*analysis.ResultColumn {
+    for (values) |*value| if (std.mem.eql(u8, value.name, name)) return value;
+    return null;
 }
 
 pub fn replaySqlite(

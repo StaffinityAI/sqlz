@@ -220,6 +220,14 @@ ambiguous SQLite expressions require an explicit column codec. An inferred
 nullable column cannot map to non-optional Zig. A user may explicitly widen a
 known non-null column to optional.
 
+A `sqlz.param.<name>` or `sqlz.column.<name>` directive resolves its codec ID
+against the project's registered codecs and records it on that parameter or
+column. The codec's declared database patterns must agree with the inferred
+type: a codec pinned to a value of another shape is reported rather than
+coerced, and a value the analyzer could not type is what a codec is there to
+rescue. Naming an unregistered codec, or a parameter or column the query does
+not have, is an error.
+
 For an embedded query, result names must match `.row` fields exactly. For a SQL
 file, the generator chooses built-in Zig types or registered codec types. A
 portable query must produce the same public Zig parameter and result contract on

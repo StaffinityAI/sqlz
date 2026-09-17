@@ -64,13 +64,22 @@ the current slice implements only the subset described below.
 `zig build test` exercises typed SQLite queries across exec, one, optional, and
 many cardinalities; borrowed and owned rows; nullable joins; recursive CTEs;
 upserts with RETURNING; transaction commit/rollback; portable named-parameter
-rewriting; and `libpg_query` parsing. Each scenario under `examples/` is also an
-independently runnable executable, for example `zig build run-account_crud`.
-`zig build test-zio` and `zig build test-zio-host` repeat the runtime and host
-coverage on a zio-backed `std.Io`.
+rewriting; and `libpg_query` parsing. `zig build test-zio` and
+`zig build test-zio-host` repeat the runtime and host coverage on a zio-backed
+`std.Io`.
 
-The immediate next milestone is the offline semantic checker and binding
-generator on top of this parser/runtime foundation. See the
+Every scenario under `examples/` runs through generated checked bindings: the
+examples are one sqlz project whose schema lives in `examples/migrations` and
+whose SQL lives in `examples/queries`, checked offline and compiled into the
+build cache. Each is also an independently runnable executable, for example
+`zig build run-account_crud`. Three of them demonstrate the runtime surface an
+application needs beyond query execution — `enum_roles` maps a column and a
+parameter onto a Zig enum through a registered codec, `arena_rows` collects a
+result set into an arena scope with no per-row cleanup, and `pooled_reads` runs
+checked queries straight against a connection pool.
+
+The immediate next milestone is embedded-Zig query verification, then
+diagnostics and resource-limit hardening. See the
 [implementation roadmap](docs/README.md#implementation-roadmap) for the complete
 sequence and acceptance gates.
 
