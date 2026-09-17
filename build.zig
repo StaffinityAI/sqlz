@@ -281,6 +281,7 @@ pub fn build(b: *std.Build) !void {
                 .{ .name = "sqlz_catalog", .module = catalog_mod },
                 .{ .name = "sqlz_migrations", .module = migrations_mod },
                 .{ .name = "sqlz_query_files", .module = query_files_mod },
+                .{ .name = "sqlz_zig_queries", .module = zig_queries_mod },
             },
         }),
     });
@@ -361,6 +362,7 @@ pub fn build(b: *std.Build) !void {
     run_codegen.addFileArg(b.path("test/fixtures/codegen/sqlz.ziggy"));
     const generated_queries = run_codegen.addOutputFileArg("fixture_queries.zig");
     _ = try run_codegen.step.addDirectoryWatchInput(b.path("test/fixtures/codegen"));
+    sqlz_build.addProjectInputs(b, run_codegen, b.path("test/fixtures/codegen/sqlz.ziggy"));
     const generated_module = b.createModule(.{
         .root_source_file = generated_queries,
         .target = target,
@@ -486,6 +488,7 @@ pub fn build(b: *std.Build) !void {
         const example_queries_path = run_example_codegen.addOutputFileArg("example_queries.zig");
         run_example_codegen.addArgs(&.{ "--codec", "tier", "sqlz_codec_tier", "Tier" });
         _ = try run_example_codegen.step.addDirectoryWatchInput(b.path("examples"));
+        sqlz_build.addProjectInputs(b, run_example_codegen, b.path("examples/sqlz.ziggy"));
         const example_queries_mod = b.createModule(.{
             .root_source_file = example_queries_path,
             .target = target,

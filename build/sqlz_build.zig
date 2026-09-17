@@ -39,6 +39,11 @@ pub const Tool = struct {
         run.addFileArg(options.config);
         const generated = run.addOutputFileArg(self.b.fmt("{s}_queries.zig", .{name}));
         _ = run.step.addDirectoryWatchInput(options.config.dirname()) catch @panic("out of memory");
+        // The tool discovers its own inputs — migrations, `.sql` files, and the
+        // Zig roots — so the config file alone is not what the result depends
+        // on. Register every candidate input, or an edited query would keep a
+        // cached module and skip its check entirely.
+        addProjectInputs(self.b, run, options.config);
 
         var imports: std.ArrayList(std.Build.Module.Import) = .empty;
         imports.append(
@@ -68,6 +73,42 @@ pub const Tool = struct {
         return .{ .queries_module = queries_module, .check_step = &run.step };
     }
 };
+
+/// Registers every file under a project directory that the checker may read as
+/// an input of `run`, so adding, editing, or removing one re-runs the check.
+/// Only works for a source-tree path; a generated configuration keeps the
+/// narrower dependency on the file itself.
+pub fn addProjectInputs(b: *std.Build, run: *std.Build.Step.Run, config: std.Build.LazyPath) void {
+    const root = switch (config) {
+        .src_path => |src| std.fs.path.dirname(src.sub_path) orelse ".",
+        else => return,
+    };
+    var directory = b.build_root.handle.openDir(b.graph.io, root, .{ .iterate = true }) catch return;
+    defer directory.close(b.graph.io);
+    var walker = directory.walk(b.allocator) catch @panic("out of memory");
+    defer walker.deinit();
+    while (walker.next(b.graph.io) catch return) |entry| {
+        if (entry.kind != .file or skipPath(entry.path) or !checkerInput(entry.basename)) continue;
+        run.addFileInput(b.path(b.pathJoin(&.{ root, entry.path })));
+    }
+}
+
+fn checkerInput(basename: []const u8) bool {
+    const extensions = [_][]const u8{ ".sql", ".zig", ".ziggy" };
+    for (extensions) |extension| if (std.mem.endsWith(u8, basename, extension)) return true;
+    return false;
+}
+
+fn skipPath(path: []const u8) bool {
+    var components = std.mem.splitScalar(u8, path, std.fs.path.sep);
+    while (components.next()) |component| {
+        if (component.len > 0 and component[0] == '.') return true;
+        if (std.mem.eql(u8, component, "zig-out") or
+            std.mem.eql(u8, component, "zig-cache") or
+            std.mem.eql(u8, component, "zig-pkg")) return true;
+    }
+    return false;
+}
 
 pub fn addTool(b: *std.Build, options: ToolOptions) *Tool {
     const tool = b.allocator.create(Tool) catch @panic("out of memory");

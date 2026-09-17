@@ -3,6 +3,7 @@ const checker = @import("sqlz_checker");
 const catalog = @import("sqlz_catalog");
 const migrations = @import("sqlz_migrations");
 const query_files = @import("sqlz_query_files");
+const zig_queries = @import("sqlz_zig_queries");
 
 test "replays SQLite migrations in graph order" {
     const inputs = [_]checker.MigrationInput{
@@ -210,4 +211,242 @@ test "uses the selected SQLite profile for checked queries" {
             .{ .profile = .v3_45 },
         ),
     );
+}
+
+const declaration_schema =
+    "CREATE TABLE users (id BIGINT PRIMARY KEY, name TEXT NOT NULL, label TEXT)";
+
+/// Wraps one embedded declaration in a file, checks it against a fixed schema,
+/// and reports what the checker made of the declared structs.
+fn checkDeclaration(body: [:0]const u8, codecs: []const checker.CodecInfo) !void {
+    var schema = catalog.Catalog.init(std.testing.allocator);
+    defer schema.deinit();
+    try checker.applySqliteRevisionAtomic(
+        &schema,
+        std.testing.allocator,
+        declaration_schema,
+        "",
+    );
+    var discovery = try zig_queries.parse(std.testing.allocator, "src/users.zig", body);
+    defer discovery.deinit();
+    try std.testing.expectEqual(@as(usize, 1), discovery.sources.len);
+    var checked = try checker.checkNamedSqliteWithCodecs(
+        std.testing.allocator,
+        &schema,
+        &discovery.sources[0],
+        .{},
+        codecs,
+    );
+    checked.deinit();
+}
+
+test "an embedded declaration agreeing with its SQL passes" {
+    try checkDeclaration(
+        \\const sqlz = @import("sqlz");
+        \\pub const find = sqlz.Query(.{
+        \\    .sql = "SELECT id, name, label FROM users WHERE id=:id",
+        \\    .backends = .{ .sqlite = true },
+        \\    .cardinality = .optional,
+        \\    .params = struct { id: i64 },
+        \\    .row = struct { id: i64, name: []const u8, label: ?[]const u8 },
+        \\});
+    , &.{});
+}
+
+test "a row struct may widen a known non-null column to optional" {
+    try checkDeclaration(
+        \\const sqlz = @import("sqlz");
+        \\pub const find = sqlz.Query(.{
+        \\    .sql = "SELECT id, name FROM users WHERE id=:id",
+        \\    .backends = .{ .sqlite = true },
+        \\    .cardinality = .optional,
+        \\    .params = struct { id: i64 },
+        \\    .row = struct { id: ?i64, name: []const u8 },
+        \\});
+    , &.{});
+}
+
+test "a named row struct in the same file is verified like an inline one" {
+    try std.testing.expectError(error.DeclaredTypeMismatch, checkDeclaration(
+        \\const sqlz = @import("sqlz");
+        \\const User = struct { id: []const u8, name: []const u8 };
+        \\pub const find = sqlz.Query(.{
+        \\    .sql = "SELECT id, name FROM users WHERE id=:id",
+        \\    .backends = .{ .sqlite = true },
+        \\    .cardinality = .optional,
+        \\    .params = struct { id: i64 },
+        \\    .row = User,
+        \\});
+    , &.{}));
+}
+
+test "a row struct missing or gaining a field is reported" {
+    try std.testing.expectError(error.MissingDeclaredField, checkDeclaration(
+        \\const sqlz = @import("sqlz");
+        \\pub const find = sqlz.Query(.{
+        \\    .sql = "SELECT id, name FROM users",
+        \\    .backends = .{ .sqlite = true },
+        \\    .cardinality = .many,
+        \\    .row = struct { id: i64 },
+        \\});
+    , &.{}));
+
+    try std.testing.expectError(error.UnexpectedDeclaredField, checkDeclaration(
+        \\const sqlz = @import("sqlz");
+        \\pub const find = sqlz.Query(.{
+        \\    .sql = "SELECT id, name FROM users",
+        \\    .backends = .{ .sqlite = true },
+        \\    .cardinality = .many,
+        \\    .row = struct { id: i64, name: []const u8, extra: i64 },
+        \\});
+    , &.{}));
+}
+
+test "declaring the right fields in the wrong order is reported" {
+    try std.testing.expectError(error.DeclaredFieldOrder, checkDeclaration(
+        \\const sqlz = @import("sqlz");
+        \\pub const find = sqlz.Query(.{
+        \\    .sql = "SELECT id, name FROM users",
+        \\    .backends = .{ .sqlite = true },
+        \\    .cardinality = .many,
+        \\    .row = struct { name: []const u8, id: i64 },
+        \\});
+    , &.{}));
+}
+
+test "a nullable column cannot decode into a non-optional field" {
+    try std.testing.expectError(error.DeclaredNullabilityMismatch, checkDeclaration(
+        \\const sqlz = @import("sqlz");
+        \\pub const find = sqlz.Query(.{
+        \\    .sql = "SELECT label FROM users",
+        \\    .backends = .{ .sqlite = true },
+        \\    .cardinality = .many,
+        \\    .row = struct { label: []const u8 },
+        \\});
+    , &.{}));
+}
+
+test "a required parameter cannot be declared optional" {
+    try std.testing.expectError(error.DeclaredNullabilityMismatch, checkDeclaration(
+        \\const sqlz = @import("sqlz");
+        \\pub const find = sqlz.Query(.{
+        \\    .sql = "SELECT id FROM users WHERE id=:id",
+        \\    .backends = .{ .sqlite = true },
+        \\    .cardinality = .optional,
+        \\    .params = struct { id: ?i64 },
+        \\    .row = struct { id: i64 },
+        \\});
+    , &.{}));
+}
+
+test "omitting the parameter struct of a parameterized query is reported" {
+    try std.testing.expectError(error.MissingDeclaredField, checkDeclaration(
+        \\const sqlz = @import("sqlz");
+        \\pub const find = sqlz.Query(.{
+        \\    .sql = "SELECT id FROM users WHERE id=:id",
+        \\    .backends = .{ .sqlite = true },
+        \\    .cardinality = .optional,
+        \\    .row = struct { id: i64 },
+        \\});
+    , &.{}));
+}
+
+test "a field type that cannot carry its column is reported" {
+    try std.testing.expectError(error.DeclaredTypeMismatch, checkDeclaration(
+        \\const sqlz = @import("sqlz");
+        \\pub const find = sqlz.Query(.{
+        \\    .sql = "SELECT id FROM users",
+        \\    .backends = .{ .sqlite = true },
+        \\    .cardinality = .many,
+        \\    .row = struct { id: []const u8 },
+        \\});
+    , &.{}));
+}
+
+test "any integer or float width may carry its column" {
+    try checkDeclaration(
+        \\const sqlz = @import("sqlz");
+        \\pub const find = sqlz.Query(.{
+        \\    .sql = "SELECT id FROM users",
+        \\    .backends = .{ .sqlite = true },
+        \\    .cardinality = .many,
+        \\    .row = struct { id: u32 },
+        \\});
+    , &.{});
+}
+
+test "a custom field type needs a codec entry" {
+    const body: [:0]const u8 =
+        \\const sqlz = @import("sqlz");
+        \\pub const find = sqlz.Query(.{
+        \\    .sql = "SELECT id FROM users",
+        \\    .backends = .{ .sqlite = true },
+        \\    .cardinality = .many,
+        \\    .row = struct { id: Tier },
+        \\});
+    ;
+    try std.testing.expectError(error.MissingCodecForDeclaredType, checkDeclaration(body, &.{}));
+
+    const mapped: [:0]const u8 =
+        \\const sqlz = @import("sqlz");
+        \\pub const find = sqlz.Query(.{
+        \\    .sql = "SELECT id FROM users",
+        \\    .backends = .{ .sqlite = true },
+        \\    .cardinality = .many,
+        \\    .column_codecs = .{ .id = "tier" },
+        \\    .row = struct { id: Tier },
+        \\});
+    ;
+    const codecs = [_]checker.CodecInfo{.{ .id = "tier", .sqlite_type = .integer }};
+    try checkDeclaration(mapped, &codecs);
+}
+
+test "a codec pinned to a built-in field is reported" {
+    const body: [:0]const u8 =
+        \\const sqlz = @import("sqlz");
+        \\pub const find = sqlz.Query(.{
+        \\    .sql = "SELECT id FROM users",
+        \\    .backends = .{ .sqlite = true },
+        \\    .cardinality = .many,
+        \\    .column_codecs = .{ .id = "tier" },
+        \\    .row = struct { id: i64 },
+        \\});
+    ;
+    const codecs = [_]checker.CodecInfo{.{ .id = "tier", .sqlite_type = .integer }};
+    try std.testing.expectError(error.DeclaredTypeMismatch, checkDeclaration(body, &codecs));
+}
+
+test "the row struct must match the declared cardinality" {
+    try std.testing.expectError(error.MissingDeclaredRow, checkDeclaration(
+        \\const sqlz = @import("sqlz");
+        \\pub const find = sqlz.Query(.{
+        \\    .sql = "SELECT id FROM users",
+        \\    .backends = .{ .sqlite = true },
+        \\    .cardinality = .many,
+        \\});
+    , &.{}));
+
+    try std.testing.expectError(error.UnexpectedDeclaredRow, checkDeclaration(
+        \\const sqlz = @import("sqlz");
+        \\pub const remove = sqlz.Query(.{
+        \\    .sql = "DELETE FROM users WHERE id=:id",
+        \\    .backends = .{ .sqlite = true },
+        \\    .cardinality = .exec,
+        \\    .params = struct { id: i64 },
+        \\    .row = struct { id: i64 },
+        \\});
+    , &.{}));
+}
+
+test "a declared type the checker cannot read is left unverified" {
+    try checkDeclaration(
+        \\const sqlz = @import("sqlz");
+        \\const types = @import("types");
+        \\pub const find = sqlz.Query(.{
+        \\    .sql = "SELECT id, name FROM users",
+        \\    .backends = .{ .sqlite = true },
+        \\    .cardinality = .many,
+        \\    .row = types.User,
+        \\});
+    , &.{});
 }

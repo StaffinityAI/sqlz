@@ -12,3 +12,10 @@ test "a registered codec reaches the generated parameter and row types" {
     try std.testing.expectEqual(types.Tier, @FieldType(by_tier.row_type, "tier"));
     try std.testing.expectEqual(i64, @FieldType(by_tier.row_type, "id"));
 }
+
+test "embedded declarations are checked and usable" {
+    const embedded = @import("embedded");
+    try std.testing.expectEqual(i64, @FieldType(embedded.count_users.row_type, "total"));
+    // The codec map reached the declaration's own type, not a rewritten one.
+    try std.testing.expectEqual(types.Tier, @FieldType(embedded.user_tier.row_type, "tier"));
+}

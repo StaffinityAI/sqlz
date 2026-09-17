@@ -33,7 +33,9 @@ this slice.
 | Checker | Resolve recursive CTE output shapes used by the samples | Complete |
 | Checker | General set-operation typing and conflicting constraints | Complete |
 | Inputs | Parse and deterministically discover named `.sql` files | Complete |
-| Inputs | Discover and validate embedded Zig declarations | In progress |
+| Inputs | Discover and validate embedded Zig declarations | Complete |
+| Inputs | Verify declared `.params`/`.row` structs and codec maps against the SQL | Complete |
+| Build | Register discovered project inputs so edits and additions re-check | Complete |
 | Generator | Deterministic, Zig-AST-validated binding source emission | Complete |
 | Generator | Deterministic root/path namespace assembly | Complete |
 | Generator | Build-cache module integration | Complete |
@@ -49,6 +51,4 @@ this slice.
 
 ## Current next steps
 
-1. Finish embedded-Zig discovery: verify declared `.params`/`.row` structs and
-   their codec maps against the checker's inferred shapes.
-2. Harden diagnostics, source limits, and the supported dependency matrix.
+1. Harden diagnostics, source limits, and the supported dependency matrix.

@@ -271,13 +271,7 @@ fn writeType(
         try output.print(allocator, "{s}.{s}", .{ binding.import_name, binding.declaration });
         return;
     }
-    if (value.scalar_type == .unknown) return error.UnsupportedType;
+    const spelling = analysis.zigTypeName(value.scalar_type) orelse return error.UnsupportedType;
     if (value.nullable) try output.append(allocator, '?');
-    try output.appendSlice(allocator, switch (value.scalar_type) {
-        .integer => "i64",
-        .real => "f64",
-        .text, .blob => "[]const u8",
-        .boolean => "bool",
-        .unknown => unreachable,
-    });
+    try output.appendSlice(allocator, spelling);
 }

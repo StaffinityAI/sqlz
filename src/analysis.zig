@@ -21,6 +21,59 @@ pub const ResultColumn = struct {
     codec: ?[]const u8 = null,
 };
 
+/// The built-in Zig spelling for a scalar kind: what generated bindings name
+/// and what a declaration is compared against. `null` for a kind sqlz has no
+/// built-in mapping for.
+pub fn zigTypeName(scalar: ScalarType) ?[]const u8 {
+    return switch (scalar) {
+        .integer => "i64",
+        .real => "f64",
+        .text, .blob => "[]const u8",
+        .boolean => "bool",
+        .unknown => null,
+    };
+}
+
+/// Classifies a Zig type as an author spelled it into the scalar kind it can
+/// carry. `null` means no built-in mapping exists, which is what makes a codec
+/// entry mandatory for that field.
+pub fn classifyZigType(text: []const u8) ?ScalarType {
+    if (std.mem.eql(u8, text, "bool")) return .boolean;
+    if (std.mem.eql(u8, text, "[]const u8") or std.mem.eql(u8, text, "[:0]const u8")) return .text;
+    if (std.mem.eql(u8, text, "sqlz.Blob") or std.mem.eql(u8, text, "Blob")) return .blob;
+    if (isIntegerSpelling(text)) return .integer;
+    if (isFloatSpelling(text)) return .real;
+    return null;
+}
+
+/// Whether a value of the declared kind can carry a column of `column` kind.
+/// SQLite stores one integer and one float type, so widths are the runtime's
+/// range check rather than a checker decision; the kinds still have to agree.
+pub fn scalarAccepts(declared: ScalarType, column: ScalarType) bool {
+    if (column == .unknown) return false;
+    if (declared == column) return true;
+    return switch (column) {
+        // Text and blob are both byte slices at the boundary.
+        .text, .blob => declared == .text or declared == .blob,
+        // SQLite stores booleans as integers, so an integer field can hold one.
+        .boolean => declared == .integer,
+        else => false,
+    };
+}
+
+fn isIntegerSpelling(text: []const u8) bool {
+    if (std.mem.eql(u8, text, "usize") or std.mem.eql(u8, text, "isize")) return true;
+    if (text.len < 2 or (text[0] != 'i' and text[0] != 'u')) return false;
+    for (text[1..]) |digit| if (!std.ascii.isDigit(digit)) return false;
+    return true;
+}
+
+fn isFloatSpelling(text: []const u8) bool {
+    const spellings = [_][]const u8{ "f16", "f32", "f64", "f80", "f128" };
+    for (spellings) |spelling| if (std.mem.eql(u8, text, spelling)) return true;
+    return false;
+}
+
 pub const Analysis = struct {
     arena: std.heap.ArenaAllocator,
     columns: []ResultColumn,

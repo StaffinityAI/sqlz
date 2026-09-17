@@ -22,6 +22,15 @@ pub const Error = migrations.Error || parser.ParseError || catalog.Error || ir.E
     IncompatibleCodec,
     UnexpectedResultColumns,
     MissingResultColumns,
+    MissingDeclaredField,
+    UnexpectedDeclaredField,
+    DeclaredFieldOrder,
+    DeclaredTypeMismatch,
+    DeclaredNullabilityMismatch,
+    MissingCodecForDeclaredType,
+    UninferredDeclaredType,
+    MissingDeclaredRow,
+    UnexpectedDeclaredRow,
 };
 
 pub const CheckedQuery = struct {
@@ -80,7 +89,83 @@ pub fn checkNamedSqliteWithCodecs(
     var analyzed = try analysis.analyze(allocator, schema, &query);
     errdefer analyzed.deinit();
     try applyCodecs(&analyzed, source, codecs);
+    try verifyDeclaration(&analyzed, source);
     return .{ .parsed = parsed, .query = query, .analysis = analyzed };
+}
+
+/// Compares an embedded declaration's `.params` and `.row` structs against
+/// what the SQL actually produces. A `.sql` file declares nothing, so this is
+/// a no-op for it.
+fn verifyDeclaration(
+    analyzed: *const analysis.Analysis,
+    source: *const query_files.Source,
+) Error!void {
+    const declared = source.declared;
+    if (!declared.embedded) return;
+    if (source.cardinality == .exec) {
+        if (declared.row_present) return error.UnexpectedDeclaredRow;
+    } else if (!declared.row_present) return error.MissingDeclaredRow;
+
+    if (declared.params) |fields| try verifyFields(fields, analyzed.parameters, .parameter);
+    if (declared.row) |fields| try verifyFields(fields, analyzed.columns, .result);
+}
+
+const ValueKind = enum { parameter, result };
+
+fn verifyFields(
+    declared: []const query_files.DeclaredField,
+    values: []const analysis.ResultColumn,
+    kind: ValueKind,
+) Error!void {
+    if (declared.len < values.len) return error.MissingDeclaredField;
+    if (declared.len > values.len) return error.UnexpectedDeclaredField;
+    for (declared, values) |field, value| {
+        if (!std.mem.eql(u8, field.name, value.name)) {
+            // Declaring the right fields in the wrong order is its own mistake:
+            // parameters bind and columns decode by position.
+            if (containsName(values, field.name)) return error.DeclaredFieldOrder;
+            return error.UnexpectedDeclaredField;
+        }
+        try verifyNullability(field, value, kind);
+        try verifyType(field, value);
+    }
+}
+
+fn verifyNullability(
+    field: query_files.DeclaredField,
+    value: analysis.ResultColumn,
+    kind: ValueKind,
+) Error!void {
+    switch (kind) {
+        // A nullable column cannot decode into a non-optional field, but
+        // widening a known non-null column to optional is the author's choice.
+        .result => if (value.nullable and !field.optional)
+            return error.DeclaredNullabilityMismatch,
+        // A parameter the query requires must not be declared optional, or the
+        // declaration promises a NULL the statement cannot accept. Narrowing a
+        // nullable parameter to a definite value is safe.
+        .parameter => if (!value.nullable and field.optional)
+            return error.DeclaredNullabilityMismatch,
+    }
+}
+
+fn verifyType(field: query_files.DeclaredField, value: analysis.ResultColumn) Error!void {
+    const declared_scalar = analysis.classifyZigType(field.type_text);
+    if (value.codec != null) {
+        // A codec maps the application's own type; a built-in spelling there
+        // means the codec was pinned to the wrong field.
+        if (declared_scalar != null) return error.DeclaredTypeMismatch;
+        return;
+    }
+    if (declared_scalar == null) return error.MissingCodecForDeclaredType;
+    if (value.scalar_type == .unknown) return error.UninferredDeclaredType;
+    if (!analysis.scalarAccepts(declared_scalar.?, value.scalar_type))
+        return error.DeclaredTypeMismatch;
+}
+
+fn containsName(values: []const analysis.ResultColumn, name: []const u8) bool {
+    for (values) |value| if (std.mem.eql(u8, value.name, name)) return true;
+    return false;
 }
 
 /// Resolves the query's codec directives against the project's registered

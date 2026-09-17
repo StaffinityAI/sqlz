@@ -114,9 +114,27 @@ pub const insert_user = sqlz.Query(.{
 ```
 
 The `.row` field is omitted for `.exec`; it is required otherwise. `.params`
-defaults to `struct {}`. Codec maps contain only overrides. The checker reports
-missing and extra struct fields, wrong field order, nullability mismatches,
-incompatible codecs, and SQL errors at the query declaration.
+defaults to `struct {}` — an omitted parameter struct is a claim that the query
+takes none, and the checker holds the declaration to it. Codec maps contain only
+overrides. The checker reports missing and extra struct fields, wrong field
+order, nullability mismatches, incompatible codecs, and SQL errors at the query
+declaration.
+
+Field types are compared by what they can carry, not by exact spelling: any Zig
+integer or float width may hold an integer or real column, `[]const u8` and
+`sqlz.Blob` are interchangeable for text and blob columns, and an integer field
+may hold a boolean column. Nullability is directional. A result field must be
+optional when the column is nullable, and may be optional when the column is
+not — widening is the author's choice. A parameter the statement requires must
+not be declared optional, because that promises a `NULL` the statement cannot
+accept; narrowing a nullable parameter to a definite value is fine.
+
+A field whose type has no built-in mapping needs a codec entry, and a codec
+entry pinned to a field that is already a built-in spelling is reported instead
+of ignored. Tuple structs are rejected: a column matches by name. `.params` and
+`.row` may name a struct declared in the same file, which the checker resolves
+and verifies like an inline one; a type it cannot read — an import or a
+qualified path — leaves that side unverified rather than reported as wrong.
 
 Discovery scans only Zig roots registered with `sqlz_build`. The SQL expression
 must be one string literal or Zig multiline string literal. Concatenation,

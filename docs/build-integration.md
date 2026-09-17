@@ -64,7 +64,27 @@ pub const Tool = struct {
 };
 
 pub fn addTool(b: *std.Build, options: ToolOptions) *Tool;
+
+/// Registers a project's candidate inputs on a run step. `addProject` calls
+/// this itself; a build that drives the tool directly calls it explicitly.
+pub fn addProjectInputs(
+    b: *std.Build,
+    run: *std.Build.Step.Run,
+    config: std.Build.LazyPath,
+) void;
 ```
+
+## Caching and re-checks
+
+The tool discovers its own inputs, so the configuration file alone does not
+describe what the generated module depends on. `addProject` registers every
+`.sql`, `.zig`, and `.ziggy` file under the project directory as an input of the
+check step, skipping hidden directories, `zig-out`, `zig-cache`, and `zig-pkg`.
+Editing a query, adding one, or removing one therefore re-runs the checker;
+without those inputs the step would report a cache hit and a drifted query would
+keep its previously generated bindings. A configuration supplied as a generated
+path cannot be enumerated at configure time and keeps the narrower dependency on
+the file itself.
 
 The current SQLite-first slice has this smaller build contract. `addProject`
 requires a unique name and returns a generated query module plus its internal

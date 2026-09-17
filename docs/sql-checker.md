@@ -177,6 +177,13 @@ maps built-in spellings directly and maps non-built-in fields through explicit
 codec entries. A custom type without a codec is an error with help showing the
 required map entry.
 
+Verification compares the declared fields against the analyzed parameters and
+result columns in order: count, names, nullability, and the scalar kind each
+declared type can carry. An identifier naming a struct in the same file is
+resolved first, so a named row struct is checked like an inline one; a type
+expression the checker cannot read leaves that side unverified. See
+[query-api.md](query-api.md) for the exact comparison and nullability rules.
+
 Duplicate discovery through overlapping roots is deduplicated by canonical file
 and declaration span. Two declarations with the same fully qualified container
 path and name are an error.

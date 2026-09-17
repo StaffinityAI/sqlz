@@ -85,8 +85,11 @@ parameter onto a Zig enum through a registered codec, `arena_rows` collects a
 result set into an arena scope with no per-row cleanup, and `pooled_reads` runs
 checked queries straight against a connection pool.
 
-The immediate next milestone is embedded-Zig query verification, then
-diagnostics and resource-limit hardening. See the
+Queries authored as Zig declarations are checked too: their `.params` and
+`.row` structs are compared against the SQL for field names, order,
+nullability, and type, so a declaration cannot drift from the query beside it.
+
+The immediate next milestone is diagnostics and resource-limit hardening. See the
 [implementation roadmap](docs/README.md#implementation-roadmap) for the complete
 sequence and acceptance gates.
 

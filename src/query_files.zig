@@ -14,6 +14,29 @@ pub const CodecOverride = struct {
     codec: []const u8,
 };
 
+/// One field of an embedded declaration's `.params` or `.row` struct, exactly
+/// as the author spelled it. The checker compares these against what it infers
+/// from the SQL, so a declaration cannot quietly disagree with its query.
+pub const DeclaredField = struct {
+    name: []const u8,
+    /// The field type with any leading `?` removed and whitespace normalized.
+    type_text: []const u8,
+    optional: bool,
+};
+
+pub const Declared = struct {
+    /// Set for embedded Zig declarations: the author wrote structs the checker
+    /// must agree with. A `.sql` file declares no Zig types at all.
+    embedded: bool = false,
+    /// `null` when the declaration names a type the checker cannot read — an
+    /// import or a qualified path — so that side goes unverified rather than
+    /// being reported as wrong.
+    params: ?[]const DeclaredField = null,
+    params_present: bool = false,
+    row: ?[]const DeclaredField = null,
+    row_present: bool = false,
+};
+
 pub const Source = struct {
     allocator: std.mem.Allocator,
     path: []const u8,
@@ -23,6 +46,7 @@ pub const Source = struct {
     sql: []const u8,
     param_codecs: []const CodecOverride = &.{},
     column_codecs: []const CodecOverride = &.{},
+    declared: Declared = .{},
 
     pub fn deinit(self: *Source) void {
         self.allocator.free(self.path);
@@ -30,9 +54,19 @@ pub const Source = struct {
         self.allocator.free(self.sql);
         freeOverrides(self.allocator, self.param_codecs);
         freeOverrides(self.allocator, self.column_codecs);
+        if (self.declared.params) |fields| freeDeclaredFields(self.allocator, fields);
+        if (self.declared.row) |fields| freeDeclaredFields(self.allocator, fields);
         self.* = undefined;
     }
 };
+
+pub fn freeDeclaredFields(allocator: std.mem.Allocator, fields: []const DeclaredField) void {
+    for (fields) |field| {
+        allocator.free(field.name);
+        allocator.free(field.type_text);
+    }
+    allocator.free(fields);
+}
 
 fn freeOverrides(allocator: std.mem.Allocator, overrides: []const CodecOverride) void {
     for (overrides) |override| {

@@ -120,11 +120,15 @@ pub fn generateProjectWithCodecs(
         defer embedded.deinit();
         for (embedded.sources) |*source| {
             if (source.backends.postgres) return error.PostgresBackendDeferred;
-            var checked = try checker.checkNamedSqliteWithDialect(
+            // Embedded declarations produce no generated output; checking them
+            // is the point — their `.params`/`.row` structs must agree with the
+            // SQL they sit next to.
+            var checked = try checker.checkNamedSqliteWithCodecs(
                 allocator,
                 &schema,
                 source,
                 dialect,
+                codec_infos,
             );
             checked.deinit();
         }

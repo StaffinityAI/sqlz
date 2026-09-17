@@ -11,6 +11,8 @@ pub const Error = error{
     MissingCardinality,
     InvalidBackend,
     InvalidCardinality,
+    InvalidDeclaredType,
+    InvalidCodecMap,
     DuplicateQueryVariant,
 } || std.mem.Allocator.Error || std.zig.string_literal.ParseError;
 
@@ -137,6 +139,26 @@ fn parseQuery(
         query_files.Cardinality,
         enumLiteral(tree, cardinality_node) orelse return error.InvalidCardinality,
     ) orelse return error.InvalidCardinality;
+    const params_node = fieldValue(tree, options.ast.fields, "params");
+    const row_node = fieldValue(tree, options.ast.fields, "row");
+    // An omitted `.params` is an empty parameter struct, which is a claim the
+    // checker can still disprove; an unreadable type expression is not.
+    const declared_params = if (params_node) |node|
+        try declaredFields(allocator, tree, node)
+    else
+        try allocator.alloc(query_files.DeclaredField, 0);
+    errdefer if (declared_params) |fields| query_files.freeDeclaredFields(allocator, fields);
+    const declared_row = if (row_node) |node|
+        try declaredFields(allocator, tree, node)
+    else
+        null;
+    errdefer if (declared_row) |fields| query_files.freeDeclaredFields(allocator, fields);
+
+    var param_codecs = try codecMap(allocator, tree, fieldValue(tree, options.ast.fields, "param_codecs"));
+    errdefer freeCodecs(allocator, &param_codecs);
+    var column_codecs = try codecMap(allocator, tree, fieldValue(tree, options.ast.fields, "column_codecs"));
+    errdefer freeCodecs(allocator, &column_codecs);
+
     const name = tree.tokenSlice(declaration.ast.mut_token + 1);
     const owned_path = try allocator.dupe(u8, path);
     errdefer allocator.free(owned_path);
@@ -149,7 +171,123 @@ fn parseQuery(
         .backends = backends,
         .cardinality = cardinality,
         .sql = sql,
+        .param_codecs = try param_codecs.toOwnedSlice(allocator),
+        .column_codecs = try column_codecs.toOwnedSlice(allocator),
+        .declared = .{
+            .embedded = true,
+            .params = declared_params,
+            .params_present = params_node != null,
+            .row = declared_row,
+            .row_present = row_node != null,
+        },
     };
+}
+
+/// Reads a `.params`/`.row` struct type expression into its fields. Returns
+/// `null` when the expression is a type the checker cannot read here, such as
+/// an import or a qualified path.
+fn declaredFields(
+    allocator: std.mem.Allocator,
+    tree: *const std.zig.Ast,
+    node: std.zig.Ast.Node.Index,
+) Error!?[]query_files.DeclaredField {
+    const container_node = resolveContainer(tree, node) orelse return null;
+    var buffer: [2]std.zig.Ast.Node.Index = undefined;
+    const container = tree.fullContainerDecl(&buffer, container_node) orelse return null;
+
+    var fields: std.ArrayList(query_files.DeclaredField) = .empty;
+    errdefer {
+        query_files.freeDeclaredFields(allocator, fields.items);
+        fields.deinit(allocator);
+    }
+    for (container.ast.members) |member| {
+        const field = tree.fullContainerField(member) orelse continue;
+        // A tuple field has no name to match a column against.
+        if (field.ast.tuple_like) return error.InvalidDeclaredType;
+        const type_expr = field.ast.type_expr.unwrap() orelse return error.InvalidDeclaredType;
+        const raw = std.mem.trim(u8, tree.getNodeSource(type_expr), &std.ascii.whitespace);
+        const optional = raw.len != 0 and raw[0] == '?';
+        const type_text = try normalizeType(allocator, if (optional) raw[1..] else raw);
+        errdefer allocator.free(type_text);
+        const name = try allocator.dupe(u8, tree.tokenSlice(field.ast.main_token));
+        errdefer allocator.free(name);
+        try fields.append(allocator, .{ .name = name, .type_text = type_text, .optional = optional });
+    }
+    const owned = try fields.toOwnedSlice(allocator);
+    return owned;
+}
+
+/// Follows a bare identifier to a container declared in the same file, so a
+/// named row struct is verified like an inline one.
+fn resolveContainer(tree: *const std.zig.Ast, node: std.zig.Ast.Node.Index) ?std.zig.Ast.Node.Index {
+    var buffer: [2]std.zig.Ast.Node.Index = undefined;
+    if (tree.fullContainerDecl(&buffer, node) != null) return node;
+    if (tree.nodeTag(node) != .identifier) return null;
+    const wanted = tree.tokenSlice(tree.nodeMainToken(node));
+    var index: u32 = 0;
+    while (index < tree.nodes.len) : (index += 1) {
+        const candidate: std.zig.Ast.Node.Index = @enumFromInt(index);
+        const declaration = tree.fullVarDecl(candidate) orelse continue;
+        if (!std.mem.eql(u8, tree.tokenSlice(declaration.ast.mut_token + 1), wanted)) continue;
+        const init = declaration.ast.init_node.unwrap() orelse continue;
+        var init_buffer: [2]std.zig.Ast.Node.Index = undefined;
+        if (tree.fullContainerDecl(&init_buffer, init) != null) return init;
+    }
+    return null;
+}
+
+fn normalizeType(allocator: std.mem.Allocator, text: []const u8) Error![]u8 {
+    var output: std.ArrayList(u8) = .empty;
+    errdefer output.deinit(allocator);
+    var pending_space = false;
+    for (text) |character| {
+        if (std.ascii.isWhitespace(character)) {
+            pending_space = output.items.len != 0;
+            continue;
+        }
+        if (pending_space) {
+            try output.append(allocator, ' ');
+            pending_space = false;
+        }
+        try output.append(allocator, character);
+    }
+    return output.toOwnedSlice(allocator);
+}
+
+/// Reads `.param_codecs`/`.column_codecs` — a struct literal mapping field
+/// names to registered codec IDs.
+fn codecMap(
+    allocator: std.mem.Allocator,
+    tree: *const std.zig.Ast,
+    node: ?std.zig.Ast.Node.Index,
+) Error!std.ArrayList(query_files.CodecOverride) {
+    var overrides: std.ArrayList(query_files.CodecOverride) = .empty;
+    errdefer freeCodecs(allocator, &overrides);
+    const map = node orelse return overrides;
+    var buffer: [2]std.zig.Ast.Node.Index = undefined;
+    const literal = tree.fullStructInit(&buffer, map) orelse return error.InvalidCodecMap;
+    for (literal.ast.fields) |value| {
+        const first = tree.firstToken(value);
+        if (first < 2) return error.InvalidCodecMap;
+        const field_name = tree.tokenSlice(first - 2);
+        const codec = stringValue(allocator, tree, value) catch return error.InvalidCodecMap;
+        errdefer allocator.free(codec);
+        const owned_name = try allocator.dupe(u8, field_name);
+        errdefer allocator.free(owned_name);
+        try overrides.append(allocator, .{ .name = owned_name, .codec = codec });
+    }
+    return overrides;
+}
+
+fn freeCodecs(
+    allocator: std.mem.Allocator,
+    overrides: *std.ArrayList(query_files.CodecOverride),
+) void {
+    for (overrides.items) |override| {
+        allocator.free(override.name);
+        allocator.free(override.codec);
+    }
+    overrides.deinit(allocator);
 }
 
 fn isSqlzQueryCall(tree: *const std.zig.Ast, node: std.zig.Ast.Node.Index) bool {
