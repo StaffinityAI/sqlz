@@ -137,6 +137,41 @@ pub const Catalog = struct {
         return copy;
     }
 
+    pub fn eql(self: *const Catalog, other: *const Catalog) bool {
+        if (self.tables.count() != other.tables.count() or
+            self.indexes.count() != other.indexes.count()) return false;
+
+        var tables = self.tables.iterator();
+        while (tables.next()) |entry| {
+            const right = other.tables.get(entry.key_ptr.*) orelse return false;
+            const left = entry.value_ptr;
+            if (left.is_view != right.is_view or left.columns.count() != right.columns.count())
+                return false;
+            var columns = left.columns.iterator();
+            while (columns.next()) |column_entry| {
+                const right_column = right.columns.get(column_entry.key_ptr.*) orelse return false;
+                const left_column = column_entry.value_ptr;
+                if (!std.mem.eql(u8, left_column.database_type, right_column.database_type) or
+                    left_column.nullable != right_column.nullable or
+                    left_column.primary_key != right_column.primary_key or
+                    left_column.unique != right_column.unique) return false;
+            }
+        }
+
+        var indexes = self.indexes.iterator();
+        while (indexes.next()) |entry| {
+            const right = other.indexes.get(entry.key_ptr.*) orelse return false;
+            const left = entry.value_ptr;
+            if (!std.mem.eql(u8, left.table_name, right.table_name) or
+                left.unique != right.unique or left.columns.len != right.columns.len)
+                return false;
+            for (left.columns, right.columns) |left_column, right_column| {
+                if (!std.mem.eql(u8, left_column, right_column)) return false;
+            }
+        }
+        return true;
+    }
+
     pub fn applyParserTree(self: *Catalog, tree: *const pg.PgQuery__ParseResult) Error!void {
         for (rawSlice(tree.stmts, tree.n_stmts)) |raw| {
             if (raw == null or raw.*.stmt == null) return error.InvalidAst;

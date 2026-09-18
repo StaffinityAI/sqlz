@@ -2,6 +2,7 @@ const std = @import("std");
 const ziggy = @import("ziggy");
 
 pub const Backend = enum { sqlite, postgres };
+pub const Direction = enum { up, down };
 pub const TransactionPolicy = enum { always, never };
 
 pub const Transactions = struct {
@@ -56,13 +57,45 @@ pub const DiscoveredRevision = struct {
     directory: []const u8,
     manifest: LoadedManifest,
     common_up: []const u8,
+    common_down: []const u8,
     sqlite_up: []const u8,
+    sqlite_down: []const u8,
+    postgres_up: []const u8,
+    postgres_down: []const u8,
+
+    pub fn commonSql(self: *const DiscoveredRevision, direction: Direction) []const u8 {
+        return switch (direction) {
+            .up => self.common_up,
+            .down => self.common_down,
+        };
+    }
+
+    pub fn backendSql(
+        self: *const DiscoveredRevision,
+        backend: Backend,
+        direction: Direction,
+    ) []const u8 {
+        return switch (backend) {
+            .sqlite => switch (direction) {
+                .up => self.sqlite_up,
+                .down => self.sqlite_down,
+            },
+            .postgres => switch (direction) {
+                .up => self.postgres_up,
+                .down => self.postgres_down,
+            },
+        };
+    }
 
     pub fn deinit(self: *DiscoveredRevision) void {
         self.manifest.deinit();
         self.allocator.free(self.directory);
         self.allocator.free(self.common_up);
+        self.allocator.free(self.common_down);
         self.allocator.free(self.sqlite_up);
+        self.allocator.free(self.sqlite_down);
+        self.allocator.free(self.postgres_up);
+        self.allocator.free(self.postgres_down);
         self.* = undefined;
     }
 };
@@ -81,6 +114,8 @@ pub const Discovery = struct {
 pub const DiscoveryError = error{
     DirectoryRevisionMismatch,
     MissingUpgradeSql,
+    MissingDowngradeSql,
+    UnexpectedBackendSql,
 };
 
 pub fn parseManifest(
@@ -192,6 +227,14 @@ pub fn discover(
             max_source_bytes,
         );
         errdefer allocator.free(common_up);
+        const common_down = try readOptionalSql(
+            allocator,
+            io,
+            directory,
+            "common.down.sql",
+            max_source_bytes,
+        );
+        errdefer allocator.free(common_down);
         const sqlite_up = try readOptionalSql(
             allocator,
             io,
@@ -200,18 +243,52 @@ pub fn discover(
             max_source_bytes,
         );
         errdefer allocator.free(sqlite_up);
-        if (targetsBackend(loaded.manifest(), .sqlite) and
-            std.mem.trim(u8, common_up, &std.ascii.whitespace).len == 0 and
-            std.mem.trim(u8, sqlite_up, &std.ascii.whitespace).len == 0 and
-            loaded.manifest().parents.len < 2)
-            return error.MissingUpgradeSql;
+        const sqlite_down = try readOptionalSql(
+            allocator,
+            io,
+            directory,
+            "sqlite.down.sql",
+            max_source_bytes,
+        );
+        errdefer allocator.free(sqlite_down);
+        const postgres_up = try readOptionalSql(
+            allocator,
+            io,
+            directory,
+            "postgres.up.sql",
+            max_source_bytes,
+        );
+        errdefer allocator.free(postgres_up);
+        const postgres_down = try readOptionalSql(
+            allocator,
+            io,
+            directory,
+            "postgres.down.sql",
+            max_source_bytes,
+        );
+        errdefer allocator.free(postgres_down);
+
+        const manifest = loaded.manifest();
+        try validateSqlFiles(
+            manifest,
+            common_up,
+            common_down,
+            sqlite_up,
+            sqlite_down,
+            postgres_up,
+            postgres_down,
+        );
 
         try revisions.append(allocator, .{
             .allocator = allocator,
             .directory = try allocator.dupe(u8, directory_name),
             .manifest = loaded,
             .common_up = common_up,
+            .common_down = common_down,
             .sqlite_up = sqlite_up,
+            .sqlite_down = sqlite_down,
+            .postgres_up = postgres_up,
+            .postgres_down = postgres_down,
         });
     }
 
@@ -249,9 +326,52 @@ fn readOptionalSql(
     };
 }
 
-fn targetsBackend(manifest: *const Manifest, backend: Backend) bool {
+pub fn targetsBackend(manifest: *const Manifest, backend: Backend) bool {
     for (manifest.backends) |candidate| if (candidate == backend) return true;
     return false;
+}
+
+fn validateSqlFiles(
+    manifest: *const Manifest,
+    common_up: []const u8,
+    common_down: []const u8,
+    sqlite_up: []const u8,
+    sqlite_down: []const u8,
+    postgres_up: []const u8,
+    postgres_down: []const u8,
+) DiscoveryError!void {
+    const merge = manifest.parents.len >= 2;
+    const common_up_present = hasSql(common_up);
+    const common_down_present = hasSql(common_down);
+    const sqlite_up_present = hasSql(sqlite_up);
+    const sqlite_down_present = hasSql(sqlite_down);
+    const postgres_up_present = hasSql(postgres_up);
+    const postgres_down_present = hasSql(postgres_down);
+
+    if (!targetsBackend(manifest, .sqlite) and (sqlite_up_present or sqlite_down_present))
+        return error.UnexpectedBackendSql;
+    if (!targetsBackend(manifest, .postgres) and (postgres_up_present or postgres_down_present))
+        return error.UnexpectedBackendSql;
+
+    for (manifest.backends) |backend| {
+        const backend_up = switch (backend) {
+            .sqlite => sqlite_up_present,
+            .postgres => postgres_up_present,
+        };
+        if (!merge and !common_up_present and !backend_up)
+            return error.MissingUpgradeSql;
+
+        const backend_down = switch (backend) {
+            .sqlite => sqlite_down_present,
+            .postgres => postgres_down_present,
+        };
+        if (manifest.reversible and !merge and !common_down_present and !backend_down)
+            return error.MissingDowngradeSql;
+    }
+}
+
+fn hasSql(source: []const u8) bool {
+    return std.mem.trim(u8, source, &std.ascii.whitespace).len != 0;
 }
 
 pub const Revision = struct {

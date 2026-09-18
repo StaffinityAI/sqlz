@@ -46,6 +46,25 @@ pub const SqliteDialect = struct {
     profile: SqliteProfile = .v3_53,
 };
 
+pub const PostgresProfile = enum(u8) {
+    v15,
+    v16,
+    v17,
+    v18,
+
+    pub fn fromString(value: []const u8) ?PostgresProfile {
+        const values = [_][]const u8{ "15", "16", "17", "18" };
+        for (values, 0..) |candidate, index| {
+            if (std.mem.eql(u8, value, candidate)) return @enumFromInt(index);
+        }
+        return null;
+    }
+};
+
+pub const PostgresDialect = struct {
+    profile: PostgresProfile = .v15,
+};
+
 pub fn rewriteSqlite(allocator: std.mem.Allocator, source: []const u8) !RewrittenSql {
     return rewriteParameters(allocator, source, .sqlite);
 }
@@ -230,6 +249,15 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) ParseError!ParseR
             return error.ParseError;
         },
     };
+}
+
+pub fn parsePostgresWithDialect(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    dialect: PostgresDialect,
+) ParseError!ParseResult {
+    _ = dialect;
+    return parse(allocator, source);
 }
 
 pub fn parseSqlite(allocator: std.mem.Allocator, source: []const u8) ParseError!ParseResult {

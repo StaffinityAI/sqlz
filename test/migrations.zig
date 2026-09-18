@@ -135,6 +135,10 @@ test "discovers revision directories in bytewise order" {
         .sub_path = "sqlite.up.sql",
         .data = "ALTER TABLE users ADD COLUMN email TEXT",
     });
+    try second.writeFile(std.testing.io, .{
+        .sub_path = "sqlite.down.sql",
+        .data = "ALTER TABLE users DROP COLUMN email",
+    });
 
     var first = try tmp.dir.createDirPathOpen(
         std.testing.io,
@@ -159,6 +163,10 @@ test "discovers revision directories in bytewise order" {
         .sub_path = "common.up.sql",
         .data = "CREATE TABLE users (id BIGINT PRIMARY KEY)",
     });
+    try first.writeFile(std.testing.io, .{
+        .sub_path = "common.down.sql",
+        .data = "DROP TABLE users",
+    });
 
     var discovery = try migrations.discover(
         std.testing.allocator,
@@ -180,4 +188,194 @@ test "discovers revision directories in bytewise order" {
         "ALTER TABLE users ADD COLUMN email TEXT",
         discovery.revisions[1].sqlite_up,
     );
+}
+
+test "discovers all backend and direction SQL files" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var revision = try tmp.dir.createDirPathOpen(
+        std.testing.io,
+        "aaaaaaaaaaaa_create_users",
+        .{},
+    );
+    defer revision.close(std.testing.io);
+    try revision.writeFile(std.testing.io, .{
+        .sub_path = "revision.ziggy",
+        .data =
+        \\.format_version = 1,
+        \\.revision = "aaaaaaaaaaaa",
+        \\.parents = [],
+        \\.description = "create users",
+        \\.created_utc = "2026-09-03T12:00:00Z",
+        \\.backends = [.sqlite, .postgres],
+        \\.reversible = true,
+        \\.transaction = .{ .sqlite = .always, .postgres = .always },
+        ,
+    });
+    const files = [_]struct { name: []const u8, sql: []const u8 }{
+        .{ .name = "common.up.sql", .sql = "CREATE TABLE users (id BIGINT PRIMARY KEY)" },
+        .{ .name = "common.down.sql", .sql = "DROP TABLE users" },
+        .{ .name = "sqlite.up.sql", .sql = "CREATE INDEX sqlite_users ON users(id)" },
+        .{ .name = "sqlite.down.sql", .sql = "DROP INDEX sqlite_users" },
+        .{ .name = "postgres.up.sql", .sql = "CREATE INDEX postgres_users ON users(id)" },
+        .{ .name = "postgres.down.sql", .sql = "DROP INDEX postgres_users" },
+    };
+    for (files) |file| try revision.writeFile(std.testing.io, .{
+        .sub_path = file.name,
+        .data = file.sql,
+    });
+
+    var discovery = try migrations.discover(
+        std.testing.allocator,
+        std.testing.io,
+        tmp.dir,
+        1024 * 1024,
+    );
+    defer discovery.deinit();
+    const found = &discovery.revisions[0];
+    try std.testing.expectEqualStrings(files[0].sql, found.commonSql(.up));
+    try std.testing.expectEqualStrings(files[1].sql, found.commonSql(.down));
+    try std.testing.expectEqualStrings(files[2].sql, found.backendSql(.sqlite, .up));
+    try std.testing.expectEqualStrings(files[3].sql, found.backendSql(.sqlite, .down));
+    try std.testing.expectEqualStrings(files[4].sql, found.backendSql(.postgres, .up));
+    try std.testing.expectEqualStrings(files[5].sql, found.backendSql(.postgres, .down));
+}
+
+test "requires downgrade SQL for reversible revisions" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var revision = try tmp.dir.createDirPathOpen(
+        std.testing.io,
+        "a1b2c3d4e5f6_create_users",
+        .{},
+    );
+    defer revision.close(std.testing.io);
+    try revision.writeFile(std.testing.io, .{
+        .sub_path = "revision.ziggy",
+        .data = valid_manifest,
+    });
+    try revision.writeFile(std.testing.io, .{
+        .sub_path = "common.up.sql",
+        .data = "CREATE TABLE users (id BIGINT PRIMARY KEY)",
+    });
+
+    try std.testing.expectError(
+        error.MissingDowngradeSql,
+        migrations.discover(std.testing.allocator, std.testing.io, tmp.dir, 1024 * 1024),
+    );
+}
+
+test "rejects SQL for a backend not targeted by the manifest" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var revision = try tmp.dir.createDirPathOpen(
+        std.testing.io,
+        "a1b2c3d4e5f6_create_users",
+        .{},
+    );
+    defer revision.close(std.testing.io);
+    try revision.writeFile(std.testing.io, .{
+        .sub_path = "revision.ziggy",
+        .data = valid_manifest,
+    });
+    try revision.writeFile(std.testing.io, .{
+        .sub_path = "common.up.sql",
+        .data = "CREATE TABLE users (id BIGINT PRIMARY KEY)",
+    });
+    try revision.writeFile(std.testing.io, .{
+        .sub_path = "common.down.sql",
+        .data = "DROP TABLE users",
+    });
+    try revision.writeFile(std.testing.io, .{
+        .sub_path = "postgres.up.sql",
+        .data = "CREATE INDEX users_id_key ON users(id)",
+    });
+
+    try std.testing.expectError(
+        error.UnexpectedBackendSql,
+        migrations.discover(std.testing.allocator, std.testing.io, tmp.dir, 1024 * 1024),
+    );
+}
+
+test "allows SQL-free reversible merge revisions" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const manifests = [_]struct { directory: []const u8, source: []const u8, up: ?[]const u8, down: ?[]const u8 }{
+        .{
+            .directory = "aaaaaaaaaaaa_root",
+            .source =
+            \\.format_version = 1,
+            \\.revision = "aaaaaaaaaaaa",
+            \\.parents = [],
+            \\.description = "root",
+            \\.created_utc = "2026-09-03T12:00:00Z",
+            \\.backends = [.postgres],
+            \\.reversible = true,
+            \\.transaction = .{ .postgres = .always },
+            ,
+            .up = "CREATE TABLE users (id BIGINT PRIMARY KEY)",
+            .down = "DROP TABLE users",
+        },
+        .{
+            .directory = "bbbbbbbbbbbb_left",
+            .source =
+            \\.format_version = 1,
+            \\.revision = "bbbbbbbbbbbb",
+            \\.parents = ["aaaaaaaaaaaa"],
+            \\.description = "left",
+            \\.created_utc = "2026-09-04T12:00:00Z",
+            \\.backends = [.postgres],
+            \\.reversible = false,
+            \\.transaction = .{ .postgres = .always },
+            ,
+            .up = "CREATE INDEX users_left ON users(id)",
+            .down = null,
+        },
+        .{
+            .directory = "cccccccccccc_right",
+            .source =
+            \\.format_version = 1,
+            \\.revision = "cccccccccccc",
+            \\.parents = ["aaaaaaaaaaaa"],
+            \\.description = "right",
+            \\.created_utc = "2026-09-04T12:00:00Z",
+            \\.backends = [.postgres],
+            \\.reversible = false,
+            \\.transaction = .{ .postgres = .always },
+            ,
+            .up = "CREATE INDEX users_right ON users(id)",
+            .down = null,
+        },
+        .{
+            .directory = "dddddddddddd_merge",
+            .source =
+            \\.format_version = 1,
+            \\.revision = "dddddddddddd",
+            \\.parents = ["bbbbbbbbbbbb", "cccccccccccc"],
+            \\.description = "merge",
+            \\.created_utc = "2026-09-05T12:00:00Z",
+            \\.backends = [.postgres],
+            \\.reversible = true,
+            \\.transaction = .{ .postgres = .always },
+            ,
+            .up = null,
+            .down = null,
+        },
+    };
+    for (manifests) |item| {
+        var revision = try tmp.dir.createDirPathOpen(std.testing.io, item.directory, .{});
+        defer revision.close(std.testing.io);
+        try revision.writeFile(std.testing.io, .{ .sub_path = "revision.ziggy", .data = item.source });
+        if (item.up) |sql| try revision.writeFile(std.testing.io, .{ .sub_path = "postgres.up.sql", .data = sql });
+        if (item.down) |sql| try revision.writeFile(std.testing.io, .{ .sub_path = "postgres.down.sql", .data = sql });
+    }
+
+    var discovery = try migrations.discover(
+        std.testing.allocator,
+        std.testing.io,
+        tmp.dir,
+        1024 * 1024,
+    );
+    defer discovery.deinit();
+    try std.testing.expectEqual(@as(usize, 4), discovery.revisions.len);
 }

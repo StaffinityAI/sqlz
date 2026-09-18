@@ -13,7 +13,8 @@ test "replays SQLite migrations in graph order" {
         },
         .{
             .revision = .{ .id = "cccccccccccc", .parents = &.{"aaaaaaaaaaaa"} },
-            .common_sql = "CREATE TABLE profiles (id BIGINT PRIMARY KEY)",
+            .common_sql = "ALTER TABLE accounts ADD COLUMN email TEXT NOT NULL;" ++
+                "CREATE TABLE profiles (id BIGINT PRIMARY KEY)",
         },
         .{
             .revision = .{ .id = "aaaaaaaaaaaa", .parents = &.{} },
@@ -21,7 +22,8 @@ test "replays SQLite migrations in graph order" {
         },
         .{
             .revision = .{ .id = "bbbbbbbbbbbb", .parents = &.{"aaaaaaaaaaaa"} },
-            .common_sql = "ALTER TABLE accounts ADD COLUMN email TEXT NOT NULL",
+            .common_sql = "ALTER TABLE accounts ADD COLUMN email TEXT NOT NULL;" ++
+                "CREATE TABLE profiles (id BIGINT PRIMARY KEY)",
         },
     };
 
@@ -71,6 +73,137 @@ test "ordered replay rejects an invalid graph before applying SQL" {
     );
 }
 
+test "replays PostgreSQL common and backend SQL" {
+    const inputs = [_]checker.MigrationInput{
+        .{
+            .revision = .{ .id = "aaaaaaaaaaaa", .parents = &.{} },
+            .common_sql = "CREATE TABLE accounts (id BIGINT PRIMARY KEY, email TEXT NOT NULL)",
+            .postgres_sql = "CREATE UNIQUE INDEX accounts_email_key ON accounts(email)",
+        },
+    };
+
+    var schema = try checker.replayPostgresWithDialect(
+        std.testing.allocator,
+        &inputs,
+        .{ .profile = .v18 },
+    );
+    defer schema.deinit();
+    try std.testing.expect(schema.table("accounts") != null);
+    try std.testing.expect(schema.indexes.get("accounts_email_key").?.unique);
+}
+
+test "PostgreSQL replay ignores SQLite-specific SQL" {
+    const inputs = [_]checker.MigrationInput{
+        .{
+            .revision = .{ .id = "aaaaaaaaaaaa", .parents = &.{} },
+            .common_sql = "CREATE TABLE accounts (id BIGINT PRIMARY KEY)",
+            .sqlite_sql = "CREATE TABLE sqlite_only (id BIGINT)",
+            .postgres_sql = "CREATE TABLE postgres_only (id BIGINT)",
+        },
+    };
+
+    var schema = try checker.replayPostgres(std.testing.allocator, &inputs);
+    defer schema.deinit();
+    try std.testing.expect(schema.table("accounts") != null);
+    try std.testing.expect(schema.table("postgres_only") != null);
+    try std.testing.expect(schema.table("sqlite_only") == null);
+}
+
+test "a failed PostgreSQL revision leaves the prior catalog unchanged" {
+    var schema = catalog.Catalog.init(std.testing.allocator);
+    defer schema.deinit();
+    try checker.applyPostgresRevisionAtomic(
+        &schema,
+        std.testing.allocator,
+        "CREATE TABLE users (id BIGINT PRIMARY KEY)",
+        "",
+    );
+
+    try std.testing.expectError(
+        error.DuplicateTable,
+        checker.applyPostgresRevisionAtomic(
+            &schema,
+            std.testing.allocator,
+            "ALTER TABLE users ADD COLUMN active BOOLEAN NOT NULL;" ++
+                "CREATE TABLE users (other BIGINT)",
+            "",
+        ),
+    );
+    try std.testing.expect(schema.table("users").?.columns.get("active") == null);
+}
+
+test "merge replay accepts convergent parent catalogs" {
+    const inputs = [_]checker.MigrationInput{
+        .{
+            .revision = .{ .id = "aaaaaaaaaaaa", .parents = &.{} },
+            .common_sql = "CREATE TABLE accounts (id BIGINT PRIMARY KEY)",
+        },
+        .{
+            .revision = .{ .id = "bbbbbbbbbbbb", .parents = &.{"aaaaaaaaaaaa"} },
+        },
+        .{
+            .revision = .{ .id = "cccccccccccc", .parents = &.{"aaaaaaaaaaaa"} },
+        },
+        .{
+            .revision = .{ .id = "dddddddddddd", .parents = &.{ "bbbbbbbbbbbb", "cccccccccccc" } },
+            .common_sql = "ALTER TABLE accounts ADD COLUMN email TEXT",
+        },
+    };
+
+    var schema = try checker.replayPostgres(std.testing.allocator, &inputs);
+    defer schema.deinit();
+    try std.testing.expect(schema.table("accounts").?.columns.get("email") != null);
+}
+
+test "merge replay rejects divergent parent catalogs" {
+    const inputs = [_]checker.MigrationInput{
+        .{
+            .revision = .{ .id = "aaaaaaaaaaaa", .parents = &.{} },
+            .common_sql = "CREATE TABLE accounts (id BIGINT PRIMARY KEY)",
+        },
+        .{
+            .revision = .{ .id = "bbbbbbbbbbbb", .parents = &.{"aaaaaaaaaaaa"} },
+            .common_sql = "ALTER TABLE accounts ADD COLUMN email TEXT",
+        },
+        .{
+            .revision = .{ .id = "cccccccccccc", .parents = &.{"aaaaaaaaaaaa"} },
+            .common_sql = "ALTER TABLE accounts ADD COLUMN name TEXT",
+        },
+        .{
+            .revision = .{ .id = "dddddddddddd", .parents = &.{ "bbbbbbbbbbbb", "cccccccccccc" } },
+        },
+    };
+
+    try std.testing.expectError(
+        error.DivergentMerge,
+        checker.replayPostgres(std.testing.allocator, &inputs),
+    );
+}
+
+test "checks a named PostgreSQL query against replayed migrations" {
+    var schema = catalog.Catalog.init(std.testing.allocator);
+    defer schema.deinit();
+    try checker.applyPostgresRevisionAtomic(
+        &schema,
+        std.testing.allocator,
+        "CREATE TABLE users (id BIGINT PRIMARY KEY, name TEXT NOT NULL)",
+        "",
+    );
+    var source = try query_files.parse(std.testing.allocator, "get_user.sql",
+        \\-- sqlz.name: get_user
+        \\-- sqlz.backends: postgres
+        \\-- sqlz.cardinality: optional
+        \\
+        \\SELECT id, name FROM users WHERE id=:id
+    );
+    defer source.deinit();
+    var checked = try checker.checkNamedPostgres(std.testing.allocator, &schema, &source);
+    defer checked.deinit();
+    try std.testing.expectEqual(@as(usize, 1), checked.analysis.parameters.len);
+    try std.testing.expectEqual(@as(usize, 2), checked.analysis.columns.len);
+    try std.testing.expectEqualStrings("SELECT id, name FROM users WHERE id=$1", checked.parsed.rewritten.sql);
+}
+
 test "discovery and replay apply common SQL before SQLite SQL" {
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
@@ -100,6 +233,10 @@ test "discovery and replay apply common SQL before SQLite SQL" {
     try revision.writeFile(std.testing.io, .{
         .sub_path = "sqlite.up.sql",
         .data = "CREATE UNIQUE INDEX users_email_key ON users(email)",
+    });
+    try revision.writeFile(std.testing.io, .{
+        .sub_path = "common.down.sql",
+        .data = "DROP TABLE users",
     });
 
     var discovery = try migrations.discover(

@@ -22,7 +22,10 @@ this slice.
 | Catalog | Replay common tables, columns, keys, indexes, ALTER, and DROP | Complete |
 | Migrations | Validate revision IDs, graph shape, and deterministic ordering | Complete |
 | Migrations | Parse manifests and discover revision inputs | Complete |
+| Migrations | Discover and validate common, SQLite, and PostgreSQL upgrade/downgrade SQL | Complete |
 | Catalog | Deterministic, atomic common + SQLite migration replay | Complete |
+| Catalog | Deterministic, atomic common + PostgreSQL migration replay | Complete |
+| Catalog | Reject divergent migration merge-parent catalogs | Complete |
 | Catalog | Remaining SQLite 0.1 DDL objects and constraints | Complete |
 | Parser | SQLite-only syntax validation and capability gates | Complete |
 | Checker | Adapt statements, relations, parameters, and result names into IR | Complete |
@@ -48,6 +51,7 @@ this slice.
 | Acceptance | Example runs all four cardinalities through generated and embedded queries (M3 gate) | Complete |
 | Hardening | Complete diagnostics, resource limits, and dependency matrix | Not started |
 | Deferred | PostgreSQL runtime backend | Deferred |
+| Deferred | PostgreSQL namespaces, full type semantics, generated bindings, and runtime execution | Deferred |
 | Deferred | Migration execution and full CLI | Deferred |
 
 ## Tracked divergences
@@ -71,4 +75,5 @@ an undocumented rule, per [README.md](README.md).
 
 ## Current next steps
 
-1. Harden diagnostics, source limits, and the supported dependency matrix.
+1. Add PostgreSQL namespace/type semantics and generated-query integration.
+2. Harden diagnostics, source limits, and the supported dependency matrix.

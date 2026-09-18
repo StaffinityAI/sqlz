@@ -8,11 +8,14 @@ const query_files = @import("sqlz_query_files");
 
 pub const SqliteDialect = parser.SqliteDialect;
 pub const SqliteProfile = parser.SqliteProfile;
+pub const PostgresDialect = parser.PostgresDialect;
+pub const PostgresProfile = parser.PostgresProfile;
 
 pub const MigrationInput = struct {
     revision: migrations.Revision,
     common_sql: []const u8 = "",
     sqlite_sql: []const u8 = "",
+    postgres_sql: []const u8 = "",
 };
 
 pub const Error = migrations.Error || parser.ParseError || catalog.Error || ir.Error || analysis.Error || error{
@@ -31,6 +34,7 @@ pub const Error = migrations.Error || parser.ParseError || catalog.Error || ir.E
     UninferredDeclaredType,
     MissingDeclaredRow,
     UnexpectedDeclaredRow,
+    DivergentMerge,
 };
 
 pub const CheckedQuery = struct {
@@ -89,6 +93,34 @@ pub fn checkNamedSqliteWithCodecs(
     var analyzed = try analysis.analyze(allocator, schema, &query);
     errdefer analyzed.deinit();
     try applyCodecs(&analyzed, source, codecs);
+    try verifyDeclaration(&analyzed, source);
+    return .{ .parsed = parsed, .query = query, .analysis = analyzed };
+}
+
+pub fn checkNamedPostgres(
+    allocator: std.mem.Allocator,
+    schema: *const catalog.Catalog,
+    source: *const query_files.Source,
+) Error!CheckedQuery {
+    return checkNamedPostgresWithDialect(allocator, schema, source, .{});
+}
+
+pub fn checkNamedPostgresWithDialect(
+    allocator: std.mem.Allocator,
+    schema: *const catalog.Catalog,
+    source: *const query_files.Source,
+    dialect: PostgresDialect,
+) Error!CheckedQuery {
+    if (!source.backends.postgres) return error.BackendNotSelected;
+    var parsed = try parser.parsePostgresWithDialect(allocator, source.sql, dialect);
+    errdefer parsed.deinit();
+    var query = try ir.adapt(allocator, parsed.tree, parsed.rewritten.names);
+    errdefer query.deinit();
+    const produces_rows = query.projections.len != 0;
+    if (source.cardinality == .exec and produces_rows) return error.UnexpectedResultColumns;
+    if (source.cardinality != .exec and !produces_rows) return error.MissingResultColumns;
+    var analyzed = try analysis.analyze(allocator, schema, &query);
+    errdefer analyzed.deinit();
     try verifyDeclaration(&analyzed, source);
     return .{ .parsed = parsed, .query = query, .analysis = analyzed };
 }
@@ -228,6 +260,31 @@ pub fn replaySqliteWithDialect(
     inputs: []const MigrationInput,
     dialect: SqliteDialect,
 ) Error!catalog.Catalog {
+    return replayBackend(allocator, inputs, .sqlite, dialect, .{});
+}
+
+pub fn replayPostgres(
+    allocator: std.mem.Allocator,
+    inputs: []const MigrationInput,
+) Error!catalog.Catalog {
+    return replayPostgresWithDialect(allocator, inputs, .{});
+}
+
+pub fn replayPostgresWithDialect(
+    allocator: std.mem.Allocator,
+    inputs: []const MigrationInput,
+    dialect: PostgresDialect,
+) Error!catalog.Catalog {
+    return replayBackend(allocator, inputs, .postgres, .{}, dialect);
+}
+
+fn replayBackend(
+    allocator: std.mem.Allocator,
+    inputs: []const MigrationInput,
+    backend: migrations.Backend,
+    sqlite_dialect: SqliteDialect,
+    postgres_dialect: PostgresDialect,
+) Error!catalog.Catalog {
     const revisions = try allocator.alloc(migrations.Revision, inputs.len);
     defer allocator.free(revisions);
     for (inputs, revisions) |input, *revision| revision.* = input.revision;
@@ -235,19 +292,46 @@ pub fn replaySqliteWithDialect(
     var order = try migrations.validateAndOrder(allocator, revisions);
     defer order.deinit();
 
-    var schema = catalog.Catalog.init(allocator);
-    errdefer schema.deinit();
+    const snapshots = try allocator.alloc(?catalog.Catalog, inputs.len);
+    defer allocator.free(snapshots);
+    @memset(snapshots, null);
+    errdefer for (snapshots) |*snapshot| if (snapshot.*) |*schema| schema.deinit();
+
     for (order.indices) |index| {
         const input = inputs[index];
-        try applySqliteRevisionAtomicWithDialect(
+        var schema = if (input.revision.parents.len == 0)
+            catalog.Catalog.init(allocator)
+        else blk: {
+            const first_parent = revisionIndex(revisions, input.revision.parents[0]).?;
+            const first = &snapshots[first_parent].?;
+            for (input.revision.parents[1..]) |parent_id| {
+                const parent = revisionIndex(revisions, parent_id).?;
+                if (!first.eql(&snapshots[parent].?)) return error.DivergentMerge;
+            }
+            break :blk try first.clone(allocator);
+        };
+        errdefer schema.deinit();
+        try applyRevisionAtomic(
             &schema,
             allocator,
             input.common_sql,
-            input.sqlite_sql,
-            dialect,
+            switch (backend) {
+                .sqlite => input.sqlite_sql,
+                .postgres => input.postgres_sql,
+            },
+            backend,
+            sqlite_dialect,
+            postgres_dialect,
         );
+        snapshots[index] = schema;
     }
-    return schema;
+    const result = snapshots[order.head].?;
+    snapshots[order.head] = null;
+    for (snapshots) |*snapshot| if (snapshot.*) |*schema| {
+        schema.deinit();
+        snapshot.* = null;
+    };
+    return result;
 }
 
 pub fn replayDiscoveredSqlite(
@@ -268,11 +352,36 @@ pub fn replayDiscoveredSqliteWithDialect(
         const manifest = revision.manifest.manifest();
         input.* = .{
             .revision = .{ .id = manifest.revision, .parents = manifest.parents },
-            .common_sql = revision.common_up,
-            .sqlite_sql = revision.sqlite_up,
+            .common_sql = if (migrations.targetsBackend(manifest, .sqlite)) revision.common_up else "",
+            .sqlite_sql = if (migrations.targetsBackend(manifest, .sqlite)) revision.sqlite_up else "",
         };
     }
     return replaySqliteWithDialect(allocator, inputs, dialect);
+}
+
+pub fn replayDiscoveredPostgres(
+    allocator: std.mem.Allocator,
+    discovery: *const migrations.Discovery,
+) Error!catalog.Catalog {
+    return replayDiscoveredPostgresWithDialect(allocator, discovery, .{});
+}
+
+pub fn replayDiscoveredPostgresWithDialect(
+    allocator: std.mem.Allocator,
+    discovery: *const migrations.Discovery,
+    dialect: PostgresDialect,
+) Error!catalog.Catalog {
+    const inputs = try allocator.alloc(MigrationInput, discovery.revisions.len);
+    defer allocator.free(inputs);
+    for (discovery.revisions, inputs) |revision, *input| {
+        const manifest = revision.manifest.manifest();
+        input.* = .{
+            .revision = .{ .id = manifest.revision, .parents = manifest.parents },
+            .common_sql = if (migrations.targetsBackend(manifest, .postgres)) revision.common_up else "",
+            .postgres_sql = if (migrations.targetsBackend(manifest, .postgres)) revision.postgres_up else "",
+        };
+    }
+    return replayPostgresWithDialect(allocator, inputs, dialect);
 }
 
 pub fn applySqliteRevisionAtomic(
@@ -291,10 +400,41 @@ pub fn applySqliteRevisionAtomicWithDialect(
     sqlite_sql: []const u8,
     dialect: SqliteDialect,
 ) (parser.ParseError || catalog.Error)!void {
+    return applyRevisionAtomic(schema, allocator, common_sql, sqlite_sql, .sqlite, dialect, .{});
+}
+
+pub fn applyPostgresRevisionAtomic(
+    schema: *catalog.Catalog,
+    allocator: std.mem.Allocator,
+    common_sql: []const u8,
+    postgres_sql: []const u8,
+) (parser.ParseError || catalog.Error)!void {
+    return applyPostgresRevisionAtomicWithDialect(schema, allocator, common_sql, postgres_sql, .{});
+}
+
+pub fn applyPostgresRevisionAtomicWithDialect(
+    schema: *catalog.Catalog,
+    allocator: std.mem.Allocator,
+    common_sql: []const u8,
+    postgres_sql: []const u8,
+    dialect: PostgresDialect,
+) (parser.ParseError || catalog.Error)!void {
+    return applyRevisionAtomic(schema, allocator, common_sql, postgres_sql, .postgres, .{}, dialect);
+}
+
+fn applyRevisionAtomic(
+    schema: *catalog.Catalog,
+    allocator: std.mem.Allocator,
+    common_sql: []const u8,
+    backend_sql: []const u8,
+    backend: migrations.Backend,
+    sqlite_dialect: SqliteDialect,
+    postgres_dialect: PostgresDialect,
+) (parser.ParseError || catalog.Error)!void {
     var staged = try schema.clone(allocator);
     errdefer staged.deinit();
-    try parseAndApply(&staged, allocator, common_sql, false, dialect);
-    try parseAndApply(&staged, allocator, sqlite_sql, true, dialect);
+    try parseAndApply(&staged, allocator, common_sql, .postgres, sqlite_dialect, postgres_dialect);
+    try parseAndApply(&staged, allocator, backend_sql, backend, sqlite_dialect, postgres_dialect);
 
     schema.deinit();
     schema.* = staged;
@@ -304,14 +444,22 @@ fn parseAndApply(
     schema: *catalog.Catalog,
     allocator: std.mem.Allocator,
     sql: []const u8,
-    sqlite: bool,
-    dialect: SqliteDialect,
+    backend: migrations.Backend,
+    sqlite_dialect: SqliteDialect,
+    postgres_dialect: PostgresDialect,
 ) (parser.ParseError || catalog.Error)!void {
     if (std.mem.trim(u8, sql, &std.ascii.whitespace).len == 0) return;
-    var parsed = if (sqlite)
-        try parser.parseSqliteWithDialect(allocator, sql, dialect)
-    else
-        try parser.parse(allocator, sql);
+    var parsed = switch (backend) {
+        .sqlite => try parser.parseSqliteWithDialect(allocator, sql, sqlite_dialect),
+        .postgres => try parser.parsePostgresWithDialect(allocator, sql, postgres_dialect),
+    };
     defer parsed.deinit();
     try schema.applyParserTree(parsed.tree);
+}
+
+fn revisionIndex(revisions: []const migrations.Revision, id: []const u8) ?usize {
+    for (revisions, 0..) |revision, index| {
+        if (std.mem.eql(u8, revision.id, id)) return index;
+    }
+    return null;
 }

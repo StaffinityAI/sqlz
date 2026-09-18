@@ -72,6 +72,20 @@ test "PostgreSQL casts are not mistaken for named parameters" {
     try std.testing.expectEqualStrings("value", rewritten.names[0]);
 }
 
+test "PostgreSQL profiles parse supported versions" {
+    try std.testing.expectEqual(parser.PostgresProfile.v15, parser.PostgresProfile.fromString("15").?);
+    try std.testing.expectEqual(parser.PostgresProfile.v18, parser.PostgresProfile.fromString("18").?);
+    try std.testing.expect(parser.PostgresProfile.fromString("14") == null);
+
+    var parsed = try parser.parsePostgresWithDialect(
+        std.testing.allocator,
+        "SELECT :value::text",
+        .{ .profile = .v17 },
+    );
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("SELECT $1::text", parsed.rewritten.sql);
+}
+
 test "syntax diagnostics map libpg_query positions to the original SQL" {
     const source = "SELECT :identity FROM";
     const result = try parser.parseDetailed(std.testing.allocator, source);
