@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up mise tools
+        uses: jdx/mise-action@v4
+        with:
+          install_args: hk pkl
+          cache: true
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+          use-cache: true
+          cache-key: ${{ hashFiles('build.zig.zon') }}
+
+      - name: Restore fetched Zig dependencies
+        uses: actions/cache@v6
+        with:
+          path: zig-pkg
+          key: zig-pkg-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build.zig.zon') }}
+          restore-keys: |
+            zig-pkg-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Run CI
+        run: mise run ci
