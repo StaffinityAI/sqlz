@@ -757,6 +757,44 @@ pub fn build(b: *std.Build) !void {
         integration_step.dependOn(&run_postgres_integration.step);
         const postgres_integration_step = b.step("test-postgres-integration", "Run tests against PostgreSQL on localhost:55432");
         postgres_integration_step.dependOn(&run_postgres_integration.step);
+
+        if (zqlite_dep) |sqlite_dep| {
+            const bootstrap_integration_options = b.addOptions();
+            bootstrap_integration_options.addOption([]const u8, "zig_exe", b.graph.zig_exe);
+            bootstrap_integration_options.addOption(
+                []const u8,
+                "fixture_path",
+                b.pathFromRoot("test/fixtures/bootstrap"),
+            );
+            bootstrap_integration_options.addOption(
+                []const u8,
+                "source_sql_path",
+                b.pathFromRoot("test/fixtures/bootstrap/source.sql"),
+            );
+            const bootstrap_integration_tests = b.addTest(.{
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("test/bootstrap_integration.zig"),
+                    .target = host_target,
+                    .optimize = optimize,
+                    .imports = &.{
+                        .{ .name = "pg", .module = dep.module("pg") },
+                        .{ .name = "zqlite", .module = sqlite_dep.module("zqlite") },
+                    },
+                }),
+            });
+            bootstrap_integration_tests.root_module.addOptions(
+                "bootstrap_test_options",
+                bootstrap_integration_options,
+            );
+            const run_bootstrap_integration = b.addRunArtifact(bootstrap_integration_tests);
+            run_bootstrap_integration.setCwd(b.path("."));
+            integration_step.dependOn(&run_bootstrap_integration.step);
+            const bootstrap_integration_step = b.step(
+                "test-bootstrap-integration",
+                "Run the SQLite-to-PostgreSQL bootstrap integration test",
+            );
+            bootstrap_integration_step.dependOn(&run_bootstrap_integration.step);
+        }
     } else {
         test_step.dependOn(&b.addFail("pg.zig is required for the complete test suite").step);
         integration_step.dependOn(&b.addFail("pg.zig is required for integration tests").step);

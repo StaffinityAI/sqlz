@@ -292,10 +292,12 @@ Status: not started.
 - Update this plan after each implementation slice and record newly deferred
   behavior rather than silently expanding scope.
 
-A disposable PostgreSQL 15 smoke test has verified scalar/blob transfer,
-identity restoration, default nonempty-destination rejection, managed-schema
-wipe, and preservation of an unrelated `public` table. This is evidence for the
-initial implementation but does not replace the planned automated live suite.
+The CI integration suite now creates a temporary SQLite file containing users,
+optional profiles, and sessions; invokes the public build-integrated bootstrap
+command; and validates every transferred value plus both restored PostgreSQL
+identity sequences. A separate disposable PostgreSQL smoke test has also
+verified default nonempty-destination rejection, managed-schema wipe, and
+preservation of an unrelated `public` table.
 
 Acceptance gate: all documented safety properties have integration coverage and
 the public command examples pass against supported PostgreSQL versions.
@@ -347,7 +349,7 @@ conversion and test matrix.
 | PostgreSQL managed-namespace inspector/wipe | Initial dedicated-schema implementation complete |
 | Dynamic PostgreSQL row insertion | Initial row-at-a-time implementation complete |
 | Bootstrap orchestration | Initial implementation complete |
-| End-to-end and safety test suite | Fixture and manual PostgreSQL 15 smoke test complete; automation not started |
+| End-to-end and safety test suite | Core successful bootstrap path automated in CI; wipe/failure matrix remains |
 | Performance baseline | Not started |
 
 ## Open decisions

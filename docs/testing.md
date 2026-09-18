@@ -18,9 +18,12 @@ The repository has two intentionally separate validation gates:
 
 `zig build test-postgres` remains a compile/API test and does not connect to a
 server. `zig build test-postgres-integration` is the live PostgreSQL-only gate;
-`zig build test-sqlite` is the SQLite-only runtime gate. These narrower commands
-are useful while developing an adapter, but `mise run ci` is the required
-pre-push and continuous-integration command.
+`zig build test-bootstrap-integration` creates a realistic temporary SQLite
+database, runs the public SQLite-to-PostgreSQL bootstrap command, and validates
+the resulting PostgreSQL rows and identity sequences. `zig build test-sqlite`
+is the SQLite-only runtime gate. These narrower commands are useful while
+developing an adapter, but `mise run ci` is the required pre-push and
+continuous-integration command.
 
 Long-running, service-backed, and end-to-end tests must not be added to
 `test-offline` or the hk hook. Quick parser, catalog, migration-planning,
