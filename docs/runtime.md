@@ -66,6 +66,14 @@ copy a PostgreSQL server error payload after the driver has released its interna
 checkout, so it reports the safe Zig error name; explicitly acquired connections
 retain the detailed SQLSTATE and message behavior.
 
+PostgreSQL one-dimensional arrays bind and decode through `pg.zig`'s binary array
+support. Result slices and borrowed text elements live in result-local storage and
+remain valid until the next streaming row or result deinitialization; owned-row
+conversion recursively duplicates both the outer slice and borrowed elements.
+Nullable arrays and nullable elements are distinct. Integer and float element
+widths follow PostgreSQL's concrete element type, and registered Zig enums work in
+arrays through the same integer- or text-storage rule as scalar enum fields.
+
 `sqlz.sqlite.OpenOptions` names the connection settings sqlz applies itself:
 open flags, `foreign_keys`, `journal_mode`, `synchronous`, and
 `busy_timeout_ms`. Each is optional, `null` keeps SQLite's default, and they are

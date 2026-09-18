@@ -36,6 +36,9 @@ test "PostgreSQL generic executor paths compile" {
         name: []const u8,
         role: Role,
         text_role: ?TextRole,
+        ids: []const ?i32,
+        roles: ?[]const ?Role,
+        text_roles: []const ?TextRole,
     };
     if (false) {
         var conn: sqlz.postgres.Conn = undefined;
@@ -45,6 +48,11 @@ test "PostgreSQL generic executor paths compile" {
         _ = conn.fetch(Row, "select id, active, name, role, text_role from users where role=$1 and text_role=$2", .{
             .role = Role.admin,
             .text_role = @as(?TextRole, .member),
+        });
+        _ = conn.fetch(Row, "select id, active, name, role, text_role, ids, roles, text_roles from users where ids=$1 and roles=$2 and text_roles=$3", .{
+            .ids = @as([]const ?i32, &.{ 1, null, 3 }),
+            .roles = @as(?[]const ?Role, &.{ .member, null, .admin }),
+            .text_roles = @as([]const ?TextRole, &.{ .member, null }),
         });
         _ = conn.begin(.{});
 

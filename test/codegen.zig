@@ -112,7 +112,7 @@ test "generates PostgreSQL array contracts" {
     );
     defer std.testing.allocator.free(generated);
     try std.testing.expect(std.mem.indexOf(u8, generated, "tags: []const ?[]const u8,") != null);
-    try std.testing.expect(std.mem.indexOf(u8, generated, "ratings: ?[]const ?i64,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, generated, "ratings: ?[]const ?i32,") != null);
 }
 
 fn writeProject(tmp: *std.testing.TmpDir, mismatch: bool) !void {

@@ -75,7 +75,11 @@ pub const postgres = struct {
         }
 
         pub fn execute(self: *Conn, sql: []const u8, args: anytype) Result(ExecResult) {
-            const affected = self.conn.exec(sql, positionalArgs(args)) catch |cause|
+            var arena: std.heap.ArenaAllocator = .init(self.allocator);
+            defer arena.deinit();
+            const bound = positionalArgs(arena.allocator(), args) catch
+                return .{ .err = staticError(.other, .execute, "unable to lower PostgreSQL parameters") };
+            const affected = self.conn.exec(sql, bound) catch |cause|
                 return .{ .err = makeError(self.allocator, self.conn, .execute, cause) };
             return .{ .ok = .{ .rows_affected = if (affected) |value| @intCast(value) else null } };
         }
@@ -87,15 +91,22 @@ pub const postgres = struct {
         }
 
         pub fn fetchOne(self: *Conn, comptime Row: type, sql: []const u8, args: anytype) Result(Single(Row)) {
-            const native = self.conn.row(sql, positionalArgs(args)) catch |cause|
+            var bind_arena: std.heap.ArenaAllocator = .init(self.allocator);
+            defer bind_arena.deinit();
+            const bound = positionalArgs(bind_arena.allocator(), args) catch
+                return .{ .err = staticError(.other, .fetch, "unable to lower PostgreSQL parameters") };
+            const native = self.conn.row(sql, bound) catch |cause|
                 return .{ .err = makeError(self.allocator, self.conn, .fetch, cause) };
             const row = native orelse return .{ .err = staticError(.invalid_data, .fetch, "query expected one row but returned none") };
-            const value = decodeRow(Row, &row) catch |cause| {
+            var arena: std.heap.ArenaAllocator = .init(self.allocator);
+            const value = decodeRow(Row, &row, arena.allocator()) catch |cause| {
+                arena.deinit();
                 deinitQueryRow(&row);
                 return .{ .err = decodeError(cause) };
             };
             return .{ .ok = .{
                 .native = row,
+                .arena = arena,
                 .value = value,
                 .row_allocator = self.row_allocator,
                 .row_free = self.row_free,
@@ -103,15 +114,22 @@ pub const postgres = struct {
         }
 
         pub fn fetchOptional(self: *Conn, comptime Row: type, sql: []const u8, args: anytype) Result(?Single(Row)) {
-            const native = self.conn.row(sql, positionalArgs(args)) catch |cause|
+            var bind_arena: std.heap.ArenaAllocator = .init(self.allocator);
+            defer bind_arena.deinit();
+            const bound = positionalArgs(bind_arena.allocator(), args) catch
+                return .{ .err = staticError(.other, .fetch, "unable to lower PostgreSQL parameters") };
+            const native = self.conn.row(sql, bound) catch |cause|
                 return .{ .err = makeError(self.allocator, self.conn, .fetch, cause) };
             const row = native orelse return .{ .ok = null };
-            const value = decodeRow(Row, &row) catch |cause| {
+            var arena: std.heap.ArenaAllocator = .init(self.allocator);
+            const value = decodeRow(Row, &row, arena.allocator()) catch |cause| {
+                arena.deinit();
                 deinitQueryRow(&row);
                 return .{ .err = decodeError(cause) };
             };
             return .{ .ok = .{
                 .native = row,
+                .arena = arena,
                 .value = value,
                 .row_allocator = self.row_allocator,
                 .row_free = self.row_free,
@@ -119,12 +137,17 @@ pub const postgres = struct {
         }
 
         pub fn fetch(self: *Conn, comptime Row: type, sql: []const u8, args: anytype) Result(Rows(Row)) {
-            const native = self.conn.query(sql, positionalArgs(args)) catch |cause|
+            var bind_arena: std.heap.ArenaAllocator = .init(self.allocator);
+            defer bind_arena.deinit();
+            const bound = positionalArgs(bind_arena.allocator(), args) catch
+                return .{ .err = staticError(.other, .fetch, "unable to lower PostgreSQL parameters") };
+            const native = self.conn.query(sql, bound) catch |cause|
                 return .{ .err = makeError(self.allocator, self.conn, .fetch, cause) };
             return .{ .ok = .{
                 .allocator = self.allocator,
                 .connection = self.conn,
                 .native = native,
+                .arena = .init(self.allocator),
                 .row_allocator = self.row_allocator,
                 .row_free = self.row_free,
             } };
@@ -192,7 +215,11 @@ pub const postgres = struct {
         }
 
         pub fn execute(self: *Pool, sql: []const u8, args: anytype) Result(ExecResult) {
-            const affected = self.pool.exec(sql, positionalArgs(args)) catch |cause|
+            var arena: std.heap.ArenaAllocator = .init(self.allocator);
+            defer arena.deinit();
+            const bound = positionalArgs(arena.allocator(), args) catch
+                return .{ .err = staticError(.other, .execute, "unable to lower PostgreSQL parameters") };
+            const affected = self.pool.exec(sql, bound) catch |cause|
                 return .{ .err = poolError(.execute, cause) };
             return .{ .ok = .{ .rows_affected = if (affected) |value| @intCast(value) else null } };
         }
@@ -204,15 +231,22 @@ pub const postgres = struct {
         }
 
         pub fn fetchOne(self: *Pool, comptime Row: type, sql: []const u8, args: anytype) Result(Single(Row)) {
-            const native = self.pool.row(sql, positionalArgs(args)) catch |cause|
+            var bind_arena: std.heap.ArenaAllocator = .init(self.allocator);
+            defer bind_arena.deinit();
+            const bound = positionalArgs(bind_arena.allocator(), args) catch
+                return .{ .err = staticError(.other, .fetch, "unable to lower PostgreSQL parameters") };
+            const native = self.pool.row(sql, bound) catch |cause|
                 return .{ .err = poolError(.fetch, cause) };
             const row = native orelse return .{ .err = staticError(.invalid_data, .fetch, "query expected one row but returned none") };
-            const value = decodeRow(Row, &row) catch |cause| {
+            var arena: std.heap.ArenaAllocator = .init(self.allocator);
+            const value = decodeRow(Row, &row, arena.allocator()) catch |cause| {
+                arena.deinit();
                 deinitQueryRow(&row);
                 return .{ .err = decodeError(cause) };
             };
             return .{ .ok = .{
                 .native = row,
+                .arena = arena,
                 .value = value,
                 .row_allocator = null,
                 .row_free = true,
@@ -220,15 +254,22 @@ pub const postgres = struct {
         }
 
         pub fn fetchOptional(self: *Pool, comptime Row: type, sql: []const u8, args: anytype) Result(?Single(Row)) {
-            const native = self.pool.row(sql, positionalArgs(args)) catch |cause|
+            var bind_arena: std.heap.ArenaAllocator = .init(self.allocator);
+            defer bind_arena.deinit();
+            const bound = positionalArgs(bind_arena.allocator(), args) catch
+                return .{ .err = staticError(.other, .fetch, "unable to lower PostgreSQL parameters") };
+            const native = self.pool.row(sql, bound) catch |cause|
                 return .{ .err = poolError(.fetch, cause) };
             const row = native orelse return .{ .ok = null };
-            const value = decodeRow(Row, &row) catch |cause| {
+            var arena: std.heap.ArenaAllocator = .init(self.allocator);
+            const value = decodeRow(Row, &row, arena.allocator()) catch |cause| {
+                arena.deinit();
                 deinitQueryRow(&row);
                 return .{ .err = decodeError(cause) };
             };
             return .{ .ok = .{
                 .native = row,
+                .arena = arena,
                 .value = value,
                 .row_allocator = null,
                 .row_free = true,
@@ -236,12 +277,17 @@ pub const postgres = struct {
         }
 
         pub fn fetch(self: *Pool, comptime Row: type, sql: []const u8, args: anytype) Result(Rows(Row)) {
-            const native = self.pool.query(sql, positionalArgs(args)) catch |cause|
+            var bind_arena: std.heap.ArenaAllocator = .init(self.allocator);
+            defer bind_arena.deinit();
+            const bound = positionalArgs(bind_arena.allocator(), args) catch
+                return .{ .err = staticError(.other, .fetch, "unable to lower PostgreSQL parameters") };
+            const native = self.pool.query(sql, bound) catch |cause|
                 return .{ .err = poolError(.fetch, cause) };
             return .{ .ok = .{
                 .allocator = self.allocator,
                 .connection = null,
                 .native = native,
+                .arena = .init(self.allocator),
                 .row_allocator = null,
                 .row_free = true,
             } };
@@ -331,6 +377,7 @@ pub const postgres = struct {
     pub fn Single(comptime Row: type) type {
         return struct {
             native: pg.QueryRow,
+            arena: std.heap.ArenaAllocator,
             value: Row,
             row_allocator: ?std.mem.Allocator,
             row_free: bool,
@@ -352,6 +399,7 @@ pub const postgres = struct {
 
             pub fn deinit(self: *@This()) void {
                 deinitQueryRow(&self.native);
+                self.arena.deinit();
                 self.* = undefined;
             }
         };
@@ -394,6 +442,7 @@ pub const postgres = struct {
             allocator: std.mem.Allocator,
             connection: ?*pg.Conn,
             native: *pg.Result,
+            arena: std.heap.ArenaAllocator,
             finished: bool = false,
             row_allocator: ?std.mem.Allocator,
             row_free: bool,
@@ -409,7 +458,8 @@ pub const postgres = struct {
                     self.finished = true;
                     return .{ .ok = null };
                 };
-                const value = decodePgRow(Row, &row) catch |cause|
+                _ = self.arena.reset(.retain_capacity);
+                const value = decodePgRow(Row, &row, self.arena.allocator()) catch |cause|
                     return .{ .err = decodeError(cause) };
                 return .{ .ok = value };
             }
@@ -477,6 +527,7 @@ pub const postgres = struct {
             pub fn deinit(self: *@This()) void {
                 if (!self.finished) self.native.drain() catch {};
                 self.native.deinit();
+                self.arena.deinit();
                 self.* = undefined;
             }
 
@@ -509,10 +560,10 @@ pub const postgres = struct {
         InvalidEnumTag,
     };
 
-    fn decodeRow(comptime Row: type, native: *const pg.QueryRow) DecodeError!Row {
+    fn decodeRow(comptime Row: type, native: *const pg.QueryRow, allocator: std.mem.Allocator) !Row {
         var value: Row = undefined;
         inline for (@typeInfo(Row).@"struct".fields, 0..) |field, index|
-            @field(value, field.name) = try decodeField(field.type, native, index);
+            @field(value, field.name) = try decodeField(field.type, native, index, allocator);
         return value;
     }
 
@@ -521,21 +572,79 @@ pub const postgres = struct {
         native.result.deinit();
     }
 
-    fn decodePgRow(comptime Row: type, native: *const pg.Row) DecodeError!Row {
+    fn decodePgRow(comptime Row: type, native: *const pg.Row, allocator: std.mem.Allocator) !Row {
         var value: Row = undefined;
         inline for (@typeInfo(Row).@"struct".fields, 0..) |field, index|
-            @field(value, field.name) = try decodeField(field.type, native, index);
+            @field(value, field.name) = try decodeField(field.type, native, index, allocator);
         return value;
     }
 
-    fn decodeField(comptime T: type, native: anytype, index: usize) DecodeError!T {
+    fn decodeField(comptime T: type, native: anytype, index: usize, allocator: std.mem.Allocator) !T {
         return switch (@typeInfo(T)) {
             .@"enum" => decodeEnum(T, native, index),
             .optional => |optional| switch (@typeInfo(optional.child)) {
                 .@"enum" => decodeOptionalEnum(optional.child, native, index),
+                .pointer => |pointer| if (pointer.size == .slice and pointer.child != u8)
+                    try decodeOptionalArray(optional.child, native, index, allocator)
+                else
+                    try native.get(T, index),
                 else => try native.get(T, index),
             },
+            .pointer => |pointer| if (pointer.size == .slice and pointer.child != u8)
+                try decodeArray(T, native, index, allocator)
+            else
+                try native.get(T, index),
             else => try native.get(T, index),
+        };
+    }
+
+    fn decodeArray(comptime T: type, native: anytype, index: usize, allocator: std.mem.Allocator) !T {
+        const Element = @typeInfo(T).pointer.child;
+        const DriverElement = DriverArrayElement(Element);
+        var iterator = try native.iterator(DriverElement, index);
+        const driver_values = try iterator.alloc(allocator);
+        if (DriverElement == Element) return driver_values;
+        const values = try allocator.alloc(Element, driver_values.len);
+        for (driver_values, values) |driver_value, *value|
+            value.* = try restoreArrayElement(Element, driver_value);
+        return values;
+    }
+
+    fn decodeOptionalArray(comptime T: type, native: anytype, index: usize, allocator: std.mem.Allocator) !?T {
+        const Element = @typeInfo(T).pointer.child;
+        const DriverElement = DriverArrayElement(Element);
+        var iterator = try native.iterator(DriverElement, index);
+        if (iterator.is_null) return null;
+        const driver_values = try iterator.alloc(allocator);
+        if (DriverElement == Element) return driver_values;
+        const values = try allocator.alloc(Element, driver_values.len);
+        for (driver_values, values) |driver_value, *value|
+            value.* = try restoreArrayElement(Element, driver_value);
+        return values;
+    }
+
+    fn DriverArrayElement(comptime T: type) type {
+        return switch (@typeInfo(T)) {
+            .optional => |optional| ?DriverArrayElement(optional.child),
+            .@"enum" => switch (comptime core.enumStorage(T)) {
+                .integer => std.meta.Tag(T),
+                .text => T,
+            },
+            else => T,
+        };
+    }
+
+    fn restoreArrayElement(comptime T: type, value: DriverArrayElement(T)) !T {
+        return switch (@typeInfo(T)) {
+            .optional => |optional| if (value) |inner|
+                try restoreArrayElement(optional.child, inner)
+            else
+                null,
+            .@"enum" => switch (comptime core.enumStorage(T)) {
+                .integer => std.meta.intToEnum(T, value) catch error.InvalidEnumTag,
+                .text => value,
+            },
+            else => value,
         };
     }
 
@@ -559,12 +668,12 @@ pub const postgres = struct {
         };
     }
 
-    fn positionalArgs(args: anytype) PositionalArgs(@TypeOf(args)) {
+    fn positionalArgs(allocator: std.mem.Allocator, args: anytype) !PositionalArgs(@TypeOf(args)) {
         const Args = @TypeOf(args);
         const fields = @typeInfo(Args).@"struct".fields;
         var result: PositionalArgs(Args) = undefined;
         inline for (fields, 0..) |field, index|
-            result[index] = lowerValue(field.type, @field(args, field.name));
+            result[index] = try lowerValue(allocator, field.type, @field(args, field.name));
         return result;
     }
 
@@ -582,17 +691,28 @@ pub const postgres = struct {
                 .text => []const u8,
             },
             .optional => |optional| ?LowerType(optional.child),
+            .pointer => |pointer| if (pointer.size == .slice and pointer.child != u8)
+                []const LowerType(pointer.child)
+            else
+                T,
             else => T,
         };
     }
 
-    fn lowerValue(comptime T: type, value: T) LowerType(T) {
+    fn lowerValue(allocator: std.mem.Allocator, comptime T: type, value: T) !LowerType(T) {
         return switch (@typeInfo(T)) {
             .@"enum" => switch (comptime core.enumStorage(T)) {
                 .integer => @intFromEnum(value),
                 .text => @tagName(value),
             },
-            .optional => |optional| if (value) |inner| lowerValue(optional.child, inner) else null,
+            .optional => |optional| if (value) |inner| try lowerValue(allocator, optional.child, inner) else null,
+            .pointer => |pointer| if (pointer.size == .slice and pointer.child != u8) blk: {
+                if (LowerType(pointer.child) == pointer.child) break :blk value;
+                const lowered = try allocator.alloc(LowerType(pointer.child), value.len);
+                for (value, lowered) |item, *destination|
+                    destination.* = try lowerValue(allocator, pointer.child, item);
+                break :blk lowered;
+            } else value,
             else => value,
         };
     }
@@ -639,3 +759,34 @@ pub const postgres = struct {
         };
     }
 };
+
+test "PostgreSQL array lowering preserves nulls and enum storage" {
+    const IntegerRole = enum(i32) { member, admin };
+    const TextRole = enum {
+        member,
+        admin,
+        pub const sqlz_storage: Storage = .text;
+    };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+
+    const integer_roles = [_]?IntegerRole{ .member, null, .admin };
+    const lowered_integer = try postgres.lowerValue(arena.allocator(), []const ?IntegerRole, &integer_roles);
+    try std.testing.expectEqual(@as(?i32, 0), lowered_integer[0]);
+    try std.testing.expect(lowered_integer[1] == null);
+    try std.testing.expectEqual(@as(?i32, 1), lowered_integer[2]);
+
+    const text_roles = [_]?TextRole{ .admin, null };
+    const lowered_text = try postgres.lowerValue(arena.allocator(), []const ?TextRole, &text_roles);
+    try std.testing.expectEqualStrings("admin", lowered_text[0].?);
+    try std.testing.expect(lowered_text[1] == null);
+
+    try std.testing.expectEqual(
+        IntegerRole.admin,
+        try postgres.restoreArrayElement(IntegerRole, @as(i32, 1)),
+    );
+    try std.testing.expectEqual(
+        @as(?IntegerRole, null),
+        try postgres.restoreArrayElement(?IntegerRole, @as(?i32, null)),
+    );
+}

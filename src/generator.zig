@@ -386,10 +386,28 @@ fn writeType(
         try output.print(allocator, "{s}.{s}", .{ binding.import_name, binding.declaration });
         return;
     }
-    const spelling = analysis.zigTypeName(value.scalar_type) orelse return error.UnsupportedType;
+    const spelling = if (value.array_dimensions == 1)
+        arrayElementTypeName(value) orelse return error.UnsupportedType
+    else
+        analysis.zigTypeName(value.scalar_type) orelse return error.UnsupportedType;
     if (value.nullable) try output.append(allocator, '?');
     if (value.array_dimensions == 1) {
         try output.appendSlice(allocator, "[]const ?");
     } else if (value.array_dimensions != 0) return error.UnsupportedType;
     try output.appendSlice(allocator, spelling);
+}
+
+fn arrayElementTypeName(value: analysis.ResultColumn) ?[]const u8 {
+    const database_type = value.database_type orelse return analysis.zigTypeName(value.scalar_type);
+    if (std.ascii.eqlIgnoreCase(database_type, "int2") or
+        std.ascii.eqlIgnoreCase(database_type, "smallint")) return "i16";
+    if (std.ascii.eqlIgnoreCase(database_type, "int4") or
+        std.ascii.eqlIgnoreCase(database_type, "integer")) return "i32";
+    if (std.ascii.eqlIgnoreCase(database_type, "int8") or
+        std.ascii.eqlIgnoreCase(database_type, "bigint")) return "i64";
+    if (std.ascii.eqlIgnoreCase(database_type, "float4") or
+        std.ascii.eqlIgnoreCase(database_type, "real")) return "f32";
+    if (std.ascii.eqlIgnoreCase(database_type, "float8") or
+        std.ascii.eqlIgnoreCase(database_type, "double")) return "f64";
+    return analysis.zigTypeName(value.scalar_type);
 }
