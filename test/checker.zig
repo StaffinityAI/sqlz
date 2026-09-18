@@ -1,4 +1,5 @@
 const std = @import("std");
+const analysis = @import("sqlz_analysis");
 const checker = @import("sqlz_checker");
 const catalog = @import("sqlz_catalog");
 const migrations = @import("sqlz_migrations");
@@ -277,6 +278,60 @@ test "PostgreSQL resolves qualified and search-path relations" {
     );
     defer checked_qualified.deinit();
     try std.testing.expectEqual(@as(usize, 2), checked_qualified.analysis.columns.len);
+}
+
+test "PostgreSQL domains use their base scalar and enums require a matching codec" {
+    var schema = catalog.Catalog.init(std.testing.allocator);
+    defer schema.deinit();
+    try checker.applyPostgresRevisionAtomic(
+        &schema,
+        std.testing.allocator,
+        "CREATE DOMAIN app.user_id AS BIGINT;" ++
+            "CREATE TYPE app.user_role AS ENUM ('member', 'admin');" ++
+            "CREATE TABLE app.users (id app.user_id PRIMARY KEY, role app.user_role NOT NULL)",
+        "",
+    );
+    try schema.setPostgresSearchPath(&.{"app"});
+    var source = try query_files.parse(std.testing.allocator, "users/by_role.sql",
+        \\-- sqlz.name: users_by_role
+        \\-- sqlz.backends: postgres
+        \\-- sqlz.cardinality: many
+        \\-- sqlz.param.role: role
+        \\-- sqlz.column.role: role
+        \\
+        \\SELECT id, role FROM users WHERE role=:role
+    );
+    defer source.deinit();
+    const patterns = [_][]const u8{"app.user_role"};
+    const codecs = [_]checker.CodecInfo{.{
+        .id = "role",
+        .postgres_patterns = &patterns,
+    }};
+    var checked = try checker.checkNamedPostgresWithCodecs(
+        std.testing.allocator,
+        &schema,
+        &source,
+        .{},
+        &codecs,
+    );
+    defer checked.deinit();
+    try std.testing.expectEqual(analysis.ScalarType.integer, checked.analysis.columns[0].scalar_type);
+    try std.testing.expectEqualStrings("app.user_id", checked.analysis.columns[0].database_type.?);
+    try std.testing.expectEqualStrings("role", checked.analysis.parameters[0].codec.?);
+    try std.testing.expectEqualStrings("role", checked.analysis.columns[1].codec.?);
+
+    const wrong_patterns = [_][]const u8{"app.other_role"};
+    const wrong = [_]checker.CodecInfo{.{
+        .id = "role",
+        .postgres_patterns = &wrong_patterns,
+    }};
+    try std.testing.expectError(error.IncompatibleCodec, checker.checkNamedPostgresWithCodecs(
+        std.testing.allocator,
+        &schema,
+        &source,
+        .{},
+        &wrong,
+    ));
 }
 
 test "discovery and replay apply common SQL before SQLite SQL" {

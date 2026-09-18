@@ -207,3 +207,46 @@ test "catalog retains PostgreSQL schema-qualified table identity" {
     try schema.setPostgresSearchPath(&.{"app"});
     try std.testing.expect(schema.table("users") != null);
 }
+
+test "replays PostgreSQL enums domains and enum extension" {
+    var parsed = try parser.parse(
+        std.testing.allocator,
+        "CREATE TYPE app.user_role AS ENUM ('member', 'admin');" ++
+            "ALTER TYPE app.user_role ADD VALUE 'owner' BEFORE 'admin';" ++
+            "CREATE DOMAIN app.user_id AS BIGINT CHECK (VALUE > 0);" ++
+            "CREATE TABLE app.users (id app.user_id PRIMARY KEY, role app.user_role NOT NULL)",
+    );
+    defer parsed.deinit();
+
+    var schema = catalog.Catalog.init(std.testing.allocator);
+    defer schema.deinit();
+    try schema.applyParserTree(parsed.tree);
+    try schema.setPostgresSearchPath(&.{ "app", "public" });
+
+    const role = schema.databaseType("user_role").?;
+    try std.testing.expectEqual(catalog.TypeKind.enumeration, role.kind);
+    try std.testing.expectEqual(@as(usize, 3), role.enum_values.len);
+    try std.testing.expectEqualStrings("member", role.enum_values[0]);
+    try std.testing.expectEqualStrings("owner", role.enum_values[1]);
+    try std.testing.expectEqualStrings("admin", role.enum_values[2]);
+    const user_id = schema.databaseType("user_id").?;
+    try std.testing.expectEqual(catalog.TypeKind.domain, user_id.kind);
+    try std.testing.expectEqualStrings("int8", user_id.base_type.?);
+    try std.testing.expectEqualStrings("app.user_id", schema.table("users").?.columns.get("id").?.database_type);
+    try std.testing.expectEqualStrings("app.user_role", schema.table("users").?.columns.get("role").?.database_type);
+}
+
+test "drops PostgreSQL enums and domains" {
+    var parsed = try parser.parse(
+        std.testing.allocator,
+        "CREATE TYPE app.user_role AS ENUM ('member');" ++
+            "CREATE DOMAIN app.user_id AS BIGINT;" ++
+            "DROP TYPE app.user_role; DROP DOMAIN app.user_id",
+    );
+    defer parsed.deinit();
+    var schema = catalog.Catalog.init(std.testing.allocator);
+    defer schema.deinit();
+    try schema.applyParserTree(parsed.tree);
+    try std.testing.expect(schema.databaseType("app.user_role") == null);
+    try std.testing.expect(schema.databaseType("app.user_id") == null);
+}

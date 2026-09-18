@@ -70,6 +70,7 @@ pub const CodecInfo = struct {
     id: []const u8,
     sqlite_type: analysis.ScalarType = .unknown,
     postgres_type: analysis.ScalarType = .unknown,
+    postgres_patterns: []const []const u8 = &.{},
 };
 
 pub fn checkNamedSqliteWithDialect(
@@ -248,6 +249,16 @@ fn applyCodec(
         .sqlite => codec.sqlite_type,
         .postgres => codec.postgres_type,
     };
+    if (backend == .postgres and target.database_type != null and codec.postgres_patterns.len != 0) {
+        var matched = false;
+        for (codec.postgres_patterns) |pattern| {
+            if (std.ascii.eqlIgnoreCase(pattern, target.database_type.?)) {
+                matched = true;
+                break;
+            }
+        }
+        if (!matched) return error.IncompatibleCodec;
+    }
     if (database_type != .unknown) {
         if (target.scalar_type == .unknown)
             target.scalar_type = database_type

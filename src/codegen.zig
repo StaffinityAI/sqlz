@@ -110,6 +110,7 @@ pub fn generateProjectWithCodecs(
             .id = id,
             .sqlite_type = sqlite_type,
             .postgres_type = postgres_type,
+            .postgres_patterns = entry.value_ptr.postgres_types,
         };
         generator_codecs[codec_index] = .{
             .id = id,

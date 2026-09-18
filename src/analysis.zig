@@ -14,6 +14,7 @@ pub const ScalarType = enum {
 pub const ResultColumn = struct {
     name: []const u8,
     scalar_type: ScalarType,
+    database_type: ?[]const u8 = null,
     nullable: bool,
     /// Set when a `sqlz.param.<name>` / `sqlz.column.<name>` directive pinned
     /// this value to a registered codec; the generator then names the codec's
@@ -95,6 +96,7 @@ pub const Error = error{
 
 const ResolvedColumn = struct {
     scalar_type: ScalarType,
+    database_type: ?[]const u8 = null,
     nullable: bool,
 };
 
@@ -124,6 +126,7 @@ pub fn analyze(
             if (projection.column) |reference| {
                 const resolved = try resolvePhysicalColumn(schema, query.relation_bindings, reference);
                 result.scalar_type = resolved.scalar_type;
+                result.database_type = if (resolved.database_type) |value| try storage.dupe(u8, value) else null;
                 result.nullable = resolved.nullable;
             } else if (projection.hint) |hint| {
                 result.scalar_type = fromHint(hint.scalar_type);
@@ -159,6 +162,10 @@ pub fn analyze(
             }
             if (resolved) |value| {
                 result.scalar_type = value.scalar_type;
+                result.database_type = if (value.database_type) |database_type|
+                    try storage.dupe(u8, database_type)
+                else
+                    null;
                 result.nullable = value.nullable;
             }
         } else {
@@ -170,6 +177,7 @@ pub fn analyze(
                 projection.hint,
             );
             result.scalar_type = resolved.scalar_type;
+            result.database_type = if (resolved.database_type) |value| try storage.dupe(u8, value) else null;
             result.nullable = resolved.nullable;
         }
     }
@@ -190,6 +198,10 @@ pub fn analyze(
         }
         if (inferred) |value| {
             result.scalar_type = value.scalar_type;
+            result.database_type = if (value.database_type) |database_type|
+                try storage.dupe(u8, database_type)
+            else
+                null;
             result.nullable = value.nullable;
         }
     }
@@ -226,7 +238,17 @@ fn mergeResolved(
         .real
     else
         return conflict;
-    return .{ .scalar_type = scalar_type, .nullable = prior.nullable or next.nullable };
+    const database_type = if (prior.database_type == null)
+        next.database_type
+    else if (next.database_type == null or std.mem.eql(u8, prior.database_type.?, next.database_type.?))
+        prior.database_type
+    else
+        return conflict;
+    return .{
+        .scalar_type = scalar_type,
+        .database_type = database_type,
+        .nullable = prior.nullable or next.nullable,
+    };
 }
 
 fn resolvePhysicalColumn(
@@ -243,11 +265,16 @@ fn resolvePhysicalColumn(
         const table = schema.table(binding.name) orelse continue;
         const column = table.columns.getPtr(reference.name) orelse continue;
         if (found) |prior| {
-            if (prior.scalar_type != scalarType(column.database_type) or
+            if (prior.scalar_type != scalarTypeInCatalog(schema, column.database_type) or
+                (prior.database_type != null and !std.mem.eql(u8, prior.database_type.?, column.database_type)) or
                 prior.nullable != column.nullable)
                 return error.AmbiguousColumn;
         } else {
-            found = .{ .scalar_type = scalarType(column.database_type), .nullable = column.nullable };
+            found = .{
+                .scalar_type = scalarTypeInCatalog(schema, column.database_type),
+                .database_type = column.database_type,
+                .nullable = column.nullable,
+            };
         }
     }
     return found orelse error.MissingColumn;
@@ -272,7 +299,8 @@ fn resolveColumn(
         const candidate: ?ResolvedColumn = if (schema.table(binding.name)) |table| blk: {
             const column = table.columns.getPtr(reference.name) orelse break :blk null;
             break :blk .{
-                .scalar_type = scalarType(column.database_type),
+                .scalar_type = scalarTypeInCatalog(schema, column.database_type),
+                .database_type = column.database_type,
                 .nullable = column.nullable or binding.nullable,
             };
         } else if (findCte(ctes, binding.name)) |cte| blk: {
@@ -323,6 +351,13 @@ pub fn scalarType(database_type: []const u8) ScalarType {
     if (contains(&blob_types, database_type)) return .blob;
     if (contains(&boolean_types, database_type)) return .boolean;
     return .unknown;
+}
+
+fn scalarTypeInCatalog(schema: *const catalog.Catalog, database_type: []const u8) ScalarType {
+    const base = schema.baseDatabaseType(database_type);
+    const custom = schema.databaseType(base);
+    if (custom != null and custom.?.kind == .enumeration) return .unknown;
+    return scalarType(base);
 }
 
 fn contains(values: []const []const u8, needle: []const u8) bool {

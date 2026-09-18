@@ -44,6 +44,24 @@ pub const Table = struct {
     }
 };
 
+pub const TypeKind = enum { enumeration, domain };
+
+pub const DatabaseType = struct {
+    allocator: std.mem.Allocator,
+    name: []const u8,
+    kind: TypeKind,
+    base_type: ?[]const u8 = null,
+    enum_values: [][]const u8 = &.{},
+
+    pub fn deinit(self: *DatabaseType) void {
+        self.allocator.free(self.name);
+        if (self.base_type) |base| self.allocator.free(base);
+        for (self.enum_values) |value| self.allocator.free(value);
+        self.allocator.free(self.enum_values);
+        self.* = undefined;
+    }
+};
+
 pub const Error = error{
     InvalidAst,
     UnsupportedStatement,
@@ -53,12 +71,16 @@ pub const Error = error{
     MissingColumn,
     DuplicateIndex,
     MissingIndex,
+    DuplicateType,
+    MissingType,
+    DuplicateEnumValue,
 } || std.mem.Allocator.Error;
 
 pub const Catalog = struct {
     allocator: std.mem.Allocator,
     tables: std.StringArrayHashMapUnmanaged(Table) = .empty,
     indexes: std.StringArrayHashMapUnmanaged(Index) = .empty,
+    types: std.StringArrayHashMapUnmanaged(DatabaseType) = .empty,
     postgres_search_path: []const []const u8 = &.{},
 
     pub fn init(allocator: std.mem.Allocator) Catalog {
@@ -72,6 +94,9 @@ pub const Catalog = struct {
         var indexes = self.indexes.iterator();
         while (indexes.next()) |entry| entry.value_ptr.deinit();
         self.indexes.deinit(self.allocator);
+        var types = self.types.iterator();
+        while (types.next()) |entry| entry.value_ptr.deinit();
+        self.types.deinit(self.allocator);
         for (self.postgres_search_path) |schema| self.allocator.free(schema);
         self.allocator.free(self.postgres_search_path);
         self.* = undefined;
@@ -105,6 +130,28 @@ pub const Catalog = struct {
         for (self.postgres_search_path) |schema| self.allocator.free(schema);
         self.allocator.free(self.postgres_search_path);
         self.postgres_search_path = owned;
+    }
+
+    pub fn databaseType(self: *const Catalog, name: []const u8) ?*const DatabaseType {
+        if (self.types.getPtr(name)) |value| return value;
+        if (std.mem.indexOfScalar(u8, name, '.') != null) return null;
+        for (self.postgres_search_path) |schema| {
+            const qualified = std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ schema, name }) catch return null;
+            defer self.allocator.free(qualified);
+            if (self.types.getPtr(qualified)) |value| return value;
+        }
+        return null;
+    }
+
+    pub fn baseDatabaseType(self: *const Catalog, name: []const u8) []const u8 {
+        var current = name;
+        var depth: usize = 0;
+        while (depth < 64) : (depth += 1) {
+            const custom = self.databaseType(current) orelse return current;
+            if (custom.kind != .domain) return custom.name;
+            current = custom.base_type orelse return custom.name;
+        }
+        return current;
     }
 
     pub fn clone(self: *const Catalog, allocator: std.mem.Allocator) std.mem.Allocator.Error!Catalog {
@@ -164,12 +211,38 @@ pub const Catalog = struct {
                 .unique = source.unique,
             });
         }
+        var types = self.types.iterator();
+        while (types.next()) |entry| {
+            const source = entry.value_ptr;
+            const name = try allocator.dupe(u8, source.name);
+            errdefer allocator.free(name);
+            const base_type = if (source.base_type) |base| try allocator.dupe(u8, base) else null;
+            errdefer if (base_type) |base| allocator.free(base);
+            const values = try allocator.alloc([]const u8, source.enum_values.len);
+            var copied: usize = 0;
+            errdefer {
+                for (values[0..copied]) |value| allocator.free(value);
+                allocator.free(values);
+            }
+            for (source.enum_values, values) |value, *destination| {
+                destination.* = try allocator.dupe(u8, value);
+                copied += 1;
+            }
+            try copy.types.putNoClobber(allocator, name, .{
+                .allocator = allocator,
+                .name = name,
+                .kind = source.kind,
+                .base_type = base_type,
+                .enum_values = values,
+            });
+        }
         return copy;
     }
 
     pub fn eql(self: *const Catalog, other: *const Catalog) bool {
         if (self.tables.count() != other.tables.count() or
-            self.indexes.count() != other.indexes.count()) return false;
+            self.indexes.count() != other.indexes.count() or
+            self.types.count() != other.types.count()) return false;
 
         var tables = self.tables.iterator();
         while (tables.next()) |entry| {
@@ -199,6 +272,16 @@ pub const Catalog = struct {
                 if (!std.mem.eql(u8, left_column, right_column)) return false;
             }
         }
+        var types = self.types.iterator();
+        while (types.next()) |entry| {
+            const right = other.types.get(entry.key_ptr.*) orelse return false;
+            const left = entry.value_ptr;
+            if (left.kind != right.kind or left.enum_values.len != right.enum_values.len or
+                (left.base_type == null) != (right.base_type == null)) return false;
+            if (left.base_type) |base| if (!std.mem.eql(u8, base, right.base_type.?)) return false;
+            for (left.enum_values, right.enum_values) |left_value, right_value|
+                if (!std.mem.eql(u8, left_value, right_value)) return false;
+        }
         return true;
     }
 
@@ -213,6 +296,9 @@ pub const Catalog = struct {
                 pg.PG_QUERY__NODE__NODE_ALTER_TABLE_STMT => try self.applyAlterTable(node.*.unnamed_0.alter_table_stmt),
                 pg.PG_QUERY__NODE__NODE_RENAME_STMT => try self.applyRename(node.*.unnamed_0.rename_stmt),
                 pg.PG_QUERY__NODE__NODE_DROP_STMT => try self.applyDrop(node.*.unnamed_0.drop_stmt),
+                pg.PG_QUERY__NODE__NODE_CREATE_ENUM_STMT => try self.applyCreateEnum(node.*.unnamed_0.create_enum_stmt),
+                pg.PG_QUERY__NODE__NODE_ALTER_ENUM_STMT => try self.applyAlterEnum(node.*.unnamed_0.alter_enum_stmt),
+                pg.PG_QUERY__NODE__NODE_CREATE_DOMAIN_STMT => try self.applyCreateDomain(node.*.unnamed_0.create_domain_stmt),
                 else => return error.UnsupportedStatement,
             }
         }
@@ -241,6 +327,82 @@ pub const Catalog = struct {
         }
         if (table_value.columns.count() == 0) return error.InvalidAst;
         try self.tables.putNoClobber(self.allocator, table_value.name, table_value);
+    }
+
+    fn applyCreateEnum(self: *Catalog, node_ptr: [*c]pg.PgQuery__CreateEnumStmt) Error!void {
+        if (node_ptr == null) return error.InvalidAst;
+        const node = node_ptr.*;
+        const name = try qualifiedNodeName(self.allocator, node.type_name, node.n_type_name);
+        errdefer self.allocator.free(name);
+        if (self.types.contains(name)) return error.DuplicateType;
+        const values = try self.allocator.alloc([]const u8, node.n_vals);
+        var initialized: usize = 0;
+        errdefer {
+            for (values[0..initialized]) |value| self.allocator.free(value);
+            self.allocator.free(values);
+        }
+        for (nodeSlice(node.vals, node.n_vals), values) |value_node, *value| {
+            const text = nodeString(value_node) orelse return error.InvalidAst;
+            for (values[0..initialized]) |existing|
+                if (std.mem.eql(u8, existing, text)) return error.DuplicateEnumValue;
+            value.* = try self.allocator.dupe(u8, text);
+            initialized += 1;
+        }
+        try self.types.putNoClobber(self.allocator, name, .{
+            .allocator = self.allocator,
+            .name = name,
+            .kind = .enumeration,
+            .enum_values = values,
+        });
+    }
+
+    fn applyAlterEnum(self: *Catalog, node_ptr: [*c]pg.PgQuery__AlterEnumStmt) Error!void {
+        if (node_ptr == null) return error.InvalidAst;
+        const node = node_ptr.*;
+        const old_value = cString(node.old_val);
+        if (old_value != null and old_value.?.len != 0) return error.UnsupportedStatement;
+        const new_value = cString(node.new_val) orelse return error.UnsupportedStatement;
+        if (new_value.len == 0) return error.UnsupportedStatement;
+        const name = try qualifiedNodeName(self.allocator, node.type_name, node.n_type_name);
+        defer self.allocator.free(name);
+        const custom = self.types.getPtr(name) orelse return error.MissingType;
+        if (custom.kind != .enumeration) return error.MissingType;
+        const value = new_value;
+        for (custom.enum_values) |existing| {
+            if (!std.mem.eql(u8, existing, value)) continue;
+            if (node.skip_if_new_val_exists != 0) return;
+            return error.DuplicateEnumValue;
+        }
+        const neighbor = cString(node.new_val_neighbor);
+        const insertion = if (neighbor == null or neighbor.?.len == 0)
+            custom.enum_values.len
+        else
+            findEnumInsertion(custom.enum_values, neighbor.?, node.new_val_is_after != 0) orelse
+                return error.InvalidAst;
+        const replacement = try self.allocator.alloc([]const u8, custom.enum_values.len + 1);
+        errdefer self.allocator.free(replacement);
+        @memcpy(replacement[0..insertion], custom.enum_values[0..insertion]);
+        replacement[insertion] = try self.allocator.dupe(u8, value);
+        errdefer self.allocator.free(replacement[insertion]);
+        @memcpy(replacement[insertion + 1 ..], custom.enum_values[insertion..]);
+        self.allocator.free(custom.enum_values);
+        custom.enum_values = replacement;
+    }
+
+    fn applyCreateDomain(self: *Catalog, node_ptr: [*c]pg.PgQuery__CreateDomainStmt) Error!void {
+        if (node_ptr == null or node_ptr.*.type_name == null) return error.InvalidAst;
+        const node = node_ptr.*;
+        const name = try qualifiedNodeName(self.allocator, node.domainname, node.n_domainname);
+        errdefer self.allocator.free(name);
+        if (self.types.contains(name)) return error.DuplicateType;
+        const base_type = try typeName(self.allocator, node.type_name);
+        errdefer self.allocator.free(base_type);
+        try self.types.putNoClobber(self.allocator, name, .{
+            .allocator = self.allocator,
+            .name = name,
+            .kind = .domain,
+            .base_type = base_type,
+        });
     }
 
     fn applyCreateIndex(self: *Catalog, node_ptr: [*c]pg.PgQuery__IndexStmt) Error!void {
@@ -351,6 +513,22 @@ pub const Catalog = struct {
         if (node_ptr == null) return error.InvalidAst;
         const node = node_ptr.*;
         for (nodeSlice(node.objects, node.n_objects)) |object| {
+            if (node.remove_type == pg.PG_QUERY__OBJECT_TYPE__OBJECT_TYPE or
+                node.remove_type == pg.PG_QUERY__OBJECT_TYPE__OBJECT_DOMAIN)
+            {
+                if (object.*.node_case != pg.PG_QUERY__NODE__NODE_TYPE_NAME) return error.InvalidAst;
+                const type_name_ptr = object.*.unnamed_0.type_name;
+                if (type_name_ptr == null) return error.InvalidAst;
+                const qualified = try qualifiedNodeName(
+                    self.allocator,
+                    type_name_ptr.*.names,
+                    type_name_ptr.*.n_names,
+                );
+                defer self.allocator.free(qualified);
+                var removed = self.types.fetchOrderedRemove(qualified) orelse return error.MissingType;
+                removed.value.deinit();
+                continue;
+            }
             if (object.*.node_case != pg.PG_QUERY__NODE__NODE_LIST) return error.InvalidAst;
             const list = object.*.unnamed_0.list.*;
             if (list.n_items == 0) return error.InvalidAst;
@@ -579,10 +757,8 @@ fn addColumn(table: *Table, definition_ptr: [*c]pg.PgQuery__ColumnDef) Error!voi
     const definition = definition_ptr.*;
     const column_name = cString(definition.colname) orelse return error.InvalidAst;
     if (table.columns.contains(column_name)) return error.DuplicateColumn;
-    const type_name = definition.type_name.*;
-    if (type_name.n_names == 0) return error.InvalidAst;
-    const database_type_value = nodeString(type_name.names[type_name.n_names - 1]) orelse
-        return error.InvalidAst;
+    const database_type_value = try typeName(table.allocator, definition.type_name);
+    defer table.allocator.free(database_type_value);
 
     var nullable = true;
     var primary_key = false;
@@ -610,6 +786,42 @@ fn addColumn(table: *Table, definition_ptr: [*c]pg.PgQuery__ColumnDef) Error!voi
         .primary_key = primary_key,
         .unique = unique,
     });
+}
+
+fn typeName(allocator: std.mem.Allocator, pointer: [*c]pg.PgQuery__TypeName) Error![]const u8 {
+    if (pointer == null or pointer.*.n_names == 0) return error.InvalidAst;
+    if (pointer.*.n_array_bounds != 0) return error.UnsupportedStatement;
+    if (pointer.*.n_names == 2) {
+        const schema = nodeString(pointer.*.names[0]) orelse return error.InvalidAst;
+        if (std.mem.eql(u8, schema, "pg_catalog")) {
+            const name = nodeString(pointer.*.names[1]) orelse return error.InvalidAst;
+            return allocator.dupe(u8, name);
+        }
+    }
+    return qualifiedNodeName(allocator, pointer.*.names, pointer.*.n_names);
+}
+
+fn qualifiedNodeName(
+    allocator: std.mem.Allocator,
+    nodes: [*c][*c]pg.PgQuery__Node,
+    count: usize,
+) Error![]const u8 {
+    if (count == 0) return error.InvalidAst;
+    var output: std.ArrayList(u8) = .empty;
+    errdefer output.deinit(allocator);
+    for (nodeSlice(nodes, count), 0..) |node, index| {
+        const part = nodeString(node) orelse return error.InvalidAst;
+        if (index != 0) try output.append(allocator, '.');
+        try output.appendSlice(allocator, part);
+    }
+    return output.toOwnedSlice(allocator);
+}
+
+fn findEnumInsertion(values: []const []const u8, neighbor: []const u8, after: bool) ?usize {
+    for (values, 0..) |value, index| {
+        if (std.mem.eql(u8, value, neighbor)) return index + @intFromBool(after);
+    }
+    return null;
 }
 
 fn nodeString(node: [*c]pg.PgQuery__Node) ?[]const u8 {

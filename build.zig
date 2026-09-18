@@ -279,6 +279,7 @@ pub fn build(b: *std.Build) !void {
             .link_libc = true,
             .imports = &.{
                 .{ .name = "sqlz_checker", .module = checker_mod },
+                .{ .name = "sqlz_analysis", .module = analysis_mod },
                 .{ .name = "sqlz_catalog", .module = catalog_mod },
                 .{ .name = "sqlz_migrations", .module = migrations_mod },
                 .{ .name = "sqlz_query_files", .module = query_files_mod },

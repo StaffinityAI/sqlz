@@ -27,6 +27,7 @@ this slice.
 | Catalog | Deterministic, atomic common + PostgreSQL migration replay | Complete |
 | Catalog | Reject divergent migration merge-parent catalogs | Complete |
 | Catalog | PostgreSQL schema-qualified objects and configured `search_path` resolution | Complete |
+| Catalog | PostgreSQL enum/domain replay, enum extension, and custom-type drops | Complete |
 | Catalog | Remaining SQLite 0.1 DDL objects and constraints | Complete |
 | Parser | SQLite-only syntax validation and capability gates | Complete |
 | Checker | Adapt statements, relations, parameters, and result names into IR | Complete |
@@ -46,6 +47,7 @@ this slice.
 | Generator | PostgreSQL-only and portable shared-text query generation with contract comparison | Complete |
 | Generator | Disjoint SQLite/PostgreSQL query variants with static executor dispatch | Complete |
 | Generator | Backend SQL and ordered parameter-name metadata | Complete |
+| Checker | PostgreSQL domain base-scalar inference and exact custom-type codec matching | Complete |
 | Runtime | Native enums at the parameter and row boundary | Complete |
 | Runtime | Connection-scoped owned rows and streaming owned conversion | Complete |
 | Runtime | Typed connection options and the native pool wrapper | Complete |
@@ -55,7 +57,7 @@ this slice.
 | Acceptance | Example runs all four cardinalities through generated and embedded queries (M3 gate) | Complete |
 | Hardening | Complete diagnostics, resource limits, and dependency matrix | Not started |
 | Deferred | PostgreSQL runtime backend | Deferred |
-| Deferred | PostgreSQL arrays, enums/domains, catalog signatures, and runtime execution | Deferred |
+| Deferred | PostgreSQL arrays, builtin catalog signatures, and runtime execution | Deferred |
 | Deferred | Migration execution and full CLI | Deferred |
 
 ## Tracked divergences
@@ -79,6 +81,7 @@ an undocumented rule, per [README.md](README.md).
 
 ## Current next steps
 
-1. Add PostgreSQL arrays, enums/domains, and catalog signatures.
+1. Add PostgreSQL one-dimensional array type checking and generated metadata.
 2. Implement the `pg.zig` runtime adapter against the generated backend SQL metadata.
-3. Harden diagnostics, source limits, and the supported dependency matrix.
+3. Add PostgreSQL builtin catalog signatures.
+4. Harden diagnostics, source limits, and the supported dependency matrix.

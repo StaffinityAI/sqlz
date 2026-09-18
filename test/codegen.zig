@@ -81,6 +81,25 @@ test "rejects backend variants with incompatible contracts" {
     );
 }
 
+test "generates PostgreSQL enum codecs and domain base types" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try writeCustomTypeProject(&tmp);
+    const bindings = [_]codegen.CodecBinding{
+        .{ .id = "role", .import_name = "sqlz_codec_role", .declaration = "Role" },
+    };
+    const generated = try codegen.generateProjectWithCodecs(
+        std.testing.allocator,
+        std.testing.io,
+        tmp.dir,
+        "sqlz.ziggy",
+        &bindings,
+    );
+    defer std.testing.allocator.free(generated);
+    try std.testing.expect(std.mem.indexOf(u8, generated, "id: i64,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, generated, "role: sqlz_codec_role.Role,") != null);
+}
+
 fn writeProject(tmp: *std.testing.TmpDir, mismatch: bool) !void {
     try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "sqlz.ziggy",
@@ -315,6 +334,64 @@ fn writeVariantProject(tmp: *std.testing.TmpDir, mismatch: bool) !void {
             \\-- sqlz.cardinality: many
             \\
             \\SELECT id FROM users WHERE name ILIKE :pattern
+        ,
+    });
+}
+
+fn writeCustomTypeProject(tmp: *std.testing.TmpDir) !void {
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "sqlz.ziggy",
+        .data =
+        \\.format_version = 1,
+        \\.project_id = "550e8400-e29b-41d4-a716-446655440000",
+        \\.migrations = "migrations",
+        \\.sql_roots = .{ .app = "queries" },
+        \\.zig_roots = [],
+        \\.backends = .{ .postgres = .{ .profile = "15", .search_path = ["app"] } },
+        \\.codecs = .{ .role = .{ .postgres_types = ["app.user_role"] } },
+        ,
+    });
+    var migration = try tmp.dir.createDirPathOpen(
+        std.testing.io,
+        "migrations/aaaaaaaaaaaa_create_users",
+        .{},
+    );
+    defer migration.close(std.testing.io);
+    try migration.writeFile(std.testing.io, .{
+        .sub_path = "revision.ziggy",
+        .data =
+        \\.format_version = 1,
+        \\.revision = "aaaaaaaaaaaa",
+        \\.parents = [],
+        \\.description = "create users",
+        \\.created_utc = "2026-09-18T12:00:00Z",
+        \\.backends = [.postgres],
+        \\.reversible = true,
+        \\.transaction = .{ .postgres = .always },
+        ,
+    });
+    try migration.writeFile(std.testing.io, .{
+        .sub_path = "postgres.up.sql",
+        .data = "CREATE DOMAIN app.user_id AS BIGINT;" ++
+            "CREATE TYPE app.user_role AS ENUM ('member', 'admin');" ++
+            "CREATE TABLE app.users (id app.user_id PRIMARY KEY, role app.user_role NOT NULL)",
+    });
+    try migration.writeFile(std.testing.io, .{
+        .sub_path = "postgres.down.sql",
+        .data = "DROP TABLE app.users; DROP TYPE app.user_role; DROP DOMAIN app.user_id",
+    });
+    var queries = try tmp.dir.createDirPathOpen(std.testing.io, "queries", .{});
+    defer queries.close(std.testing.io);
+    try queries.writeFile(std.testing.io, .{
+        .sub_path = "by_role.sql",
+        .data =
+        \\-- sqlz.name: users_by_role
+        \\-- sqlz.backends: postgres
+        \\-- sqlz.cardinality: many
+        \\-- sqlz.param.role: role
+        \\-- sqlz.column.role: role
+        \\
+        \\SELECT id, role FROM users WHERE role=:role
         ,
     });
 }
