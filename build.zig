@@ -624,6 +624,7 @@ pub fn build(b: *std.Build) !void {
                 .imports = &example_imports,
             }),
         });
+        example_tests.root_module.addImport("queries", example_queries_mod);
         const run_examples = b.addRunArtifact(example_tests);
         test_step.dependOn(&run_examples.step);
     } else {

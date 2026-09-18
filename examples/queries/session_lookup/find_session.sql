@@ -1,5 +1,5 @@
 -- sqlz.name: find_session
--- sqlz.backends: sqlite
+-- sqlz.backends: sqlite, postgres
 -- sqlz.cardinality: optional
 
 SELECT u.id, u.name, s.csrf_token FROM sessions s JOIN users u ON u.id=s.user_id

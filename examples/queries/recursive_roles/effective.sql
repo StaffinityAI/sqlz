@@ -1,5 +1,5 @@
 -- sqlz.name: effective
--- sqlz.backends: sqlite
+-- sqlz.backends: sqlite, postgres
 -- sqlz.cardinality: many
 
 WITH RECURSIVE held(id, depth) AS (

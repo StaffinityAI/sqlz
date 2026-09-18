@@ -53,31 +53,33 @@ pub fn Query(comptime options: anytype) type {
     const sqlite = @hasField(BackendOptions, "sqlite") and options.backends.sqlite;
     const postgres = @hasField(BackendOptions, "postgres") and options.backends.postgres;
     if (!sqlite and !postgres) @compileError("sqlz.Query requires at least one backend");
+    const backends: Backends = .{ .sqlite = sqlite, .postgres = postgres };
 
     const Params = if (@hasField(Options, "params")) options.params else struct {};
     const parameter_names = if (@hasField(Options, "parameter_names")) options.parameter_names else .{};
     const cardinality: Cardinality = options.cardinality;
     return switch (cardinality) {
-        .exec => ExecQuery(options.sql, Params, parameter_names),
+        .exec => ExecQuery(options.sql, Params, parameter_names, backends),
         .one => blk: {
             if (!@hasField(Options, "row")) @compileError("row-returning queries require .row");
-            break :blk OneQuery(options.sql, Params, options.row, parameter_names);
+            break :blk OneQuery(options.sql, Params, options.row, parameter_names, backends);
         },
         .optional => blk: {
             if (!@hasField(Options, "row")) @compileError("row-returning queries require .row");
-            break :blk OptionalQuery(options.sql, Params, options.row, parameter_names);
+            break :blk OptionalQuery(options.sql, Params, options.row, parameter_names, backends);
         },
         .many => blk: {
             if (!@hasField(Options, "row")) @compileError("row-returning queries require .row");
-            break :blk ManyQuery(options.sql, Params, options.row, parameter_names);
+            break :blk ManyQuery(options.sql, Params, options.row, parameter_names, backends);
         },
     };
 }
 
-fn ExecQuery(comptime sql_text: anytype, comptime Params: type, comptime names: anytype) type {
+fn ExecQuery(comptime sql_text: anytype, comptime Params: type, comptime names: anytype, comptime selected_backends: Backends) type {
     return struct {
         pub const params = Params;
         pub const cardinality: Cardinality = .exec;
+        pub const backends = selected_backends;
         pub const sql = sql_text;
         pub const parameter_names = names;
 
@@ -87,11 +89,12 @@ fn ExecQuery(comptime sql_text: anytype, comptime Params: type, comptime names: 
     };
 }
 
-fn OneQuery(comptime sql_text: anytype, comptime Params: type, comptime Row: type, comptime names: anytype) type {
+fn OneQuery(comptime sql_text: anytype, comptime Params: type, comptime Row: type, comptime names: anytype, comptime selected_backends: Backends) type {
     return struct {
         pub const params = Params;
         pub const row_type = Row;
         pub const cardinality: Cardinality = .one;
+        pub const backends = selected_backends;
         pub const sql = sql_text;
         pub const parameter_names = names;
 
@@ -101,11 +104,12 @@ fn OneQuery(comptime sql_text: anytype, comptime Params: type, comptime Row: typ
     };
 }
 
-fn OptionalQuery(comptime sql_text: anytype, comptime Params: type, comptime Row: type, comptime names: anytype) type {
+fn OptionalQuery(comptime sql_text: anytype, comptime Params: type, comptime Row: type, comptime names: anytype, comptime selected_backends: Backends) type {
     return struct {
         pub const params = Params;
         pub const row_type = Row;
         pub const cardinality: Cardinality = .optional;
+        pub const backends = selected_backends;
         pub const sql = sql_text;
         pub const parameter_names = names;
 
@@ -115,11 +119,12 @@ fn OptionalQuery(comptime sql_text: anytype, comptime Params: type, comptime Row
     };
 }
 
-fn ManyQuery(comptime sql_text: anytype, comptime Params: type, comptime Row: type, comptime names: anytype) type {
+fn ManyQuery(comptime sql_text: anytype, comptime Params: type, comptime Row: type, comptime names: anytype, comptime selected_backends: Backends) type {
     return struct {
         pub const params = Params;
         pub const row_type = Row;
         pub const cardinality: Cardinality = .many;
+        pub const backends = selected_backends;
         pub const sql = sql_text;
         pub const parameter_names = names;
 

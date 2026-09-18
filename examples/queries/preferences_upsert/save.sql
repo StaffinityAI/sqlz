@@ -1,5 +1,5 @@
 -- sqlz.name: save
--- sqlz.backends: sqlite
+-- sqlz.backends: sqlite, postgres
 -- sqlz.cardinality: one
 
 INSERT INTO preferences(user_id, value) VALUES (:user_id, :value)

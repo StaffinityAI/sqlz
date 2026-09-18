@@ -92,6 +92,7 @@ is completed, split, deferred, or newly discovered.
 | Runtime | Unchecked scripts, transaction behavior, and scalar widening so applications need no driver handle | Complete |
 | Acceptance | Convert examples to generated checked bindings | Complete |
 | Acceptance | Example runs all four cardinalities through generated and embedded queries (M3 gate) | Complete |
+| Acceptance | Every example query checks offline against both SQLite and PostgreSQL catalogs | Complete |
 | Hardening | Complete diagnostics, resource limits, and dependency matrix | Not started |
 | Deferred | PostgreSQL runtime backend | Deferred |
 | Deferred | PostgreSQL builtin catalog signatures and live-engine conformance | Deferred |

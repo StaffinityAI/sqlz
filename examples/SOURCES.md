@@ -1,5 +1,10 @@
 # Example sources
 
+Every example query is checked offline against both SQLite and PostgreSQL. The
+examples execute against in-memory SQLite so the default suite needs no live
+database. SQL that differs by dialect uses disjoint variants with one shared
+generated contract.
+
 The examples are independent MIT-licensed rewrites of common query shapes. They
 do not copy application modules or substantial SQL from their references.
 

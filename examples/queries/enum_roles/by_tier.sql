@@ -1,5 +1,5 @@
 -- sqlz.name: by_tier
--- sqlz.backends: sqlite
+-- sqlz.backends: sqlite, postgres
 -- sqlz.cardinality: many
 -- sqlz.param.tier: tier
 -- sqlz.column.tier: tier

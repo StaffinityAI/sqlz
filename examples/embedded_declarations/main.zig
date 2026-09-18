@@ -17,17 +17,17 @@ const Account = struct {
     tier: types.Tier,
 };
 
-const promote = sqlz.Query(.{
+pub const promote = sqlz.Query(.{
     .sql = "UPDATE accounts SET tier=:tier WHERE name=:name",
-    .backends = .{ .sqlite = true },
+    .backends = .{ .sqlite = true, .postgres = true },
     .cardinality = .exec,
     .param_codecs = .{ .tier = "tier" },
     .params = struct { tier: types.Tier, name: []const u8 },
 });
 
-const by_tier = sqlz.Query(.{
+pub const by_tier = sqlz.Query(.{
     .sql = "SELECT id, name, tier FROM accounts WHERE tier=:tier ORDER BY id",
-    .backends = .{ .sqlite = true },
+    .backends = .{ .sqlite = true, .postgres = true },
     .cardinality = .many,
     .param_codecs = .{ .tier = "tier" },
     .column_codecs = .{ .tier = "tier" },
@@ -35,9 +35,9 @@ const by_tier = sqlz.Query(.{
     .row = Account,
 });
 
-const newest = sqlz.Query(.{
+pub const newest = sqlz.Query(.{
     .sql = "SELECT id, name, tier FROM accounts ORDER BY id DESC LIMIT 1",
-    .backends = .{ .sqlite = true },
+    .backends = .{ .sqlite = true, .postgres = true },
     .cardinality = .optional,
     .row = struct { id: i64, name: []const u8, tier: types.Tier },
     .column_codecs = .{ .tier = "tier" },

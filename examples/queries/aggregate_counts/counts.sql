@@ -1,5 +1,5 @@
 -- sqlz.name: counts
--- sqlz.backends: sqlite
+-- sqlz.backends: sqlite, postgres
 -- sqlz.cardinality: one
 
 SELECT (SELECT COUNT(*) FROM organization_members WHERE user_id=:user)
