@@ -1,8 +1,37 @@
 # Implementation plan
 
 This is the live implementation checklist for the first checked-query release.
-PostgreSQL runtime support, migration execution, and the full CLI remain outside
-this slice.
+SQLite and the initial PostgreSQL runtime are implemented. Migration execution,
+the full CLI, and release hardening remain.
+
+## Recommended Remaining Sequence
+
+This is the source of truth for work ordering. Keep it current whenever a slice
+is completed, split, deferred, or newly discovered.
+
+1. Add opt-in PostgreSQL live-engine conformance tests covering connections,
+   scalar and array values, enums/domains, transactions, pools, draining,
+   SQLSTATE errors, version checks, and TLS.
+2. Introduce structured diagnostics with stable codes, source spans, labels,
+   human and JSON rendering, error accumulation, and defined exit behavior.
+3. Add PostgreSQL builtin catalogs for functions, aggregates, operators, casts,
+   type aliases, and profile-specific behavior.
+4. Implement the pure migration planner: applied sets, target parsing, ancestor
+   closures, deterministic upgrade/downgrade plans, ancestry safety, and
+   irreversible-revision preflight.
+5. Implement canonical checksums, project/configuration identity, the versioned
+   database state schema, and forward-only state upgrades.
+6. Implement the SQLite migration runner with locking, transactional execution,
+   applied-state updates, journaling, and interruption/failure tests.
+7. Implement the PostgreSQL migration runner with advisory locking,
+   transactional and nontransactional revisions, statement journaling, and
+   recovery behavior.
+8. Generate runtime migration bundles and add the unified build-integrated CLI,
+   sharing the planner and runners between runtime and host commands.
+9. Complete hardening: resource limits, build invalidation, differential and
+   fuzz tests, platform coverage, telemetry/security, and performance baselines.
+10. Reconcile all normative documentation and tracked divergences, run every
+    public example and compatibility fixture, and enforce the 0.1 release gate.
 
 | Phase | Work item | Status |
 | --- | --- | --- |
@@ -86,9 +115,3 @@ an undocumented rule, per [README.md](README.md).
 | Resource limits beyond `source_bytes` | [configuration.md](configuration.md) | declared and validated, not yet enforced |
 | Automated build-input invalidation test | [testing.md](testing.md) | inputs are registered and verified by hand; no test yet |
 | Generated metadata for embedded declarations, and a versioned cache-metadata file | [sql-checker.md](sql-checker.md) | embedded declarations run their own SQL, which SQLite accepts with named parameters; PostgreSQL will need the metadata |
-
-## Current next steps
-
-1. Add opt-in PostgreSQL live-engine conformance tests.
-2. Add PostgreSQL builtin catalog signatures.
-3. Harden diagnostics, source limits, and the remaining platform matrix.
