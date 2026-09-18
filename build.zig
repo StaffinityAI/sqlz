@@ -176,6 +176,11 @@ pub fn build(b: *std.Build) !void {
             .{ .name = "sqlz_query_files", .module = query_files_mod },
         },
     });
+    const diagnostics_mod = b.addModule("sqlz_diagnostics", .{
+        .root_source_file = b.path("src/diagnostics.zig"),
+        .target = host_target,
+        .optimize = optimize,
+    });
     const codegen_mod = b.addModule("sqlz_codegen", .{
         .root_source_file = b.path("src/codegen.zig"),
         .target = host_target,
@@ -198,7 +203,10 @@ pub fn build(b: *std.Build) !void {
             .root_source_file = b.path("src/codegen_main.zig"),
             .target = host_target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "sqlz_codegen", .module = codegen_mod }},
+            .imports = &.{
+                .{ .name = "sqlz_codegen", .module = codegen_mod },
+                .{ .name = "sqlz_diagnostics", .module = diagnostics_mod },
+            },
         }),
     });
     b.installArtifact(codegen_exe);
@@ -286,6 +294,37 @@ pub fn build(b: *std.Build) !void {
     const run_postgres_config = b.addRunArtifact(postgres_config_tests);
     test_step.dependOn(&run_postgres_config.step);
     offline_step.dependOn(&run_postgres_config.step);
+
+    const diagnostics_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/diagnostics.zig"),
+            .target = host_target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "sqlz_diagnostics", .module = diagnostics_mod }},
+        }),
+    });
+    const run_diagnostics = b.addRunArtifact(diagnostics_tests);
+    test_step.dependOn(&run_diagnostics.step);
+    offline_step.dependOn(&run_diagnostics.step);
+
+    const diagnostics_json = b.addRunArtifact(codegen_exe);
+    diagnostics_json.addFileArg(b.path("test/fixtures/diagnostics/invalid.ziggy"));
+    _ = diagnostics_json.addOutputFileArg("invalid_queries.zig");
+    diagnostics_json.addArgs(&.{ "--format", "json" });
+    diagnostics_json.expectExitCode(1);
+    diagnostics_json.expectStdOutMatch("\"format_version\":1");
+    diagnostics_json.expectStdOutMatch("\"kind\":\"diagnostic\"");
+    diagnostics_json.expectStdErrEqual("");
+    test_step.dependOn(&diagnostics_json.step);
+    offline_step.dependOn(&diagnostics_json.step);
+
+    const diagnostics_human = b.addRunArtifact(codegen_exe);
+    diagnostics_human.expectExitCode(2);
+    diagnostics_human.expectStdOutEqual("");
+    diagnostics_human.expectStdErrMatch("error[S001]");
+    diagnostics_human.expectStdErrMatch("usage: sqlz-codegen");
+    test_step.dependOn(&diagnostics_human.step);
+    offline_step.dependOn(&diagnostics_human.step);
     const core_step = b.step("test-core", "Run backend-neutral tests");
     const examples_step = b.step("examples", "Build all examples");
 

@@ -70,6 +70,10 @@ possible so they can fail before integration infrastructure is involved.
 - CLI human/JSON golden tests, stdout/stderr separation, exit codes, and destructive
   confirmation tests.
 
+Diagnostic transport tests include allocation-free human and JSON golden records,
+stable error-code/exit classification, and subprocess/build-step assertions that
+JSON failures write only stdout while human invocation failures write only stderr.
+
 ## Engine matrix
 
 Differential parser/conformance CI runs against SQLite profiles 3.45–3.53 and every

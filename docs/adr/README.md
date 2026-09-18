@@ -49,3 +49,4 @@ be replaced only by a new ADR. Records use [0000-template.md](0000-template.md).
 | [0036](0036-checkpoint-migrations-and-history-compaction.md) | Checkpoint migrations and history compaction | Proposed |
 | [0037](0037-offline-hooks-and-compose-backed-ci.md) | Offline hooks and Compose-backed CI | Accepted |
 | [0038](0038-postgresql-live-engine-conformance.md) | PostgreSQL live-engine conformance | Accepted |
+| [0039](0039-diagnostic-transport-and-codegen-boundary.md) | Diagnostic transport and codegen boundary | Accepted |

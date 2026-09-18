@@ -16,8 +16,9 @@ is completed, split, deferred, or newly discovered.
 1. Complete the remaining PostgreSQL conformance edges: cancellation/timeouts,
    runtime version-policy overrides, zio-backed sockets, certificate-backed TLS,
    and detailed SQLSTATE payloads after the pg.zig recovery limitation is fixed.
-2. Introduce structured diagnostics with stable codes, source spans, labels,
-   human and JSON rendering, error accumulation, and defined exit behavior.
+2. Convert parser, manifest, graph, catalog, and query-analysis failures onto the
+   structured diagnostic transport, add real source labels/fixes, and accumulate
+   independent errors up to the configured limit.
 3. Add PostgreSQL builtin catalogs for functions, aggregates, operators, casts,
    type aliases, and profile-specific behavior.
 4. Implement the pure migration planner: applied sets, target parsing, ancestor
@@ -95,6 +96,8 @@ is completed, split, deferred, or newly discovered.
 | Runtime | PostgreSQL one-dimensional array binding/decoding for built-ins and derived enums | Complete |
 | Build | Lazy SQLite/PostgreSQL runtime facade and TLS flag validation | Complete |
 | Build | Core, SQLite, PostgreSQL, both-backend, and PostgreSQL-TLS compile matrix | Complete |
+| Diagnostics | Stable diagnostic transport, human/JSON rendering, and codegen exit/output contract | Complete |
+| Diagnostics | Component source spans, labels/fixes, and independent error accumulation | Not started |
 | Acceptance | Live PostgreSQL CRUD, rows, owned values, transactions, arrays, enums/domains, pools, and version checks | Complete |
 | Acceptance | Hosted live PostgreSQL 15–18 conformance matrix | Complete |
 | Acceptance | Certificate-backed PostgreSQL TLS and cancellation conformance | Not started |
@@ -106,7 +109,7 @@ is completed, split, deferred, or newly discovered.
 | Acceptance | Convert examples to generated checked bindings | Complete |
 | Acceptance | Example runs all four cardinalities through generated and embedded queries (M3 gate) | Complete |
 | Acceptance | Every example query checks offline against both SQLite and PostgreSQL catalogs | Complete |
-| Hardening | Complete diagnostics, resource limits, and dependency matrix | Not started |
+| Hardening | Complete remaining diagnostics, resource limits, and dependency matrix | Not started |
 | Deferred | PostgreSQL runtime backend | Deferred |
 | Deferred | PostgreSQL builtin catalog signatures and remaining live-engine conformance | Deferred |
 | Deferred | Migration execution and full CLI | Deferred |
@@ -122,7 +125,7 @@ an undocumented rule, per [README.md](README.md).
 
 | Promise | Document | State |
 | --- | --- | --- |
-| Diagnostics with stable codes, source spans, labels, and JSON rendering | [sql-checker.md](sql-checker.md) | checker failures are Zig error values today |
+| Diagnostics with stable codes, source spans, labels, and JSON rendering | [sql-checker.md](sql-checker.md) | transport/rendering and process contracts exist; most checker components still return Zig errors without real spans or accumulation |
 | Named `Row` and `OwnedRow` types per row-returning query | [sql-checker.md](sql-checker.md) | generated bindings carry an anonymous `.row` struct; the runtime supplies `Single(Row)`/`Owned(Row)` |
 | General codec interface: `Binder`/`Decoder`, `borrows_result`, ownership hooks | [query-api.md](query-api.md) | only enum codecs are derived; `sqlz.assertCodec` rejects any other declaration |
 | `sqlz.Uuid` built-in mapping | [query-api.md](query-api.md) | not implemented |
