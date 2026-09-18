@@ -176,6 +176,11 @@ pub fn build(b: *std.Build) !void {
         .target = target,
         .optimize = optimize,
     });
+    const pg_dep = b.lazyDependency("pg", .{
+        .target = target,
+        .optimize = optimize,
+        .openssl = false,
+    });
     // zio is an alternative `std.Io` implementation. sqlz never depends on it;
     // it is pulled in only to prove the runtime initialization works with a
     // non-std implementation of the interface.
@@ -567,6 +572,35 @@ pub fn build(b: *std.Build) !void {
         test_step.dependOn(&run_examples.step);
     } else {
         test_step.dependOn(&b.addFail("zqlite is required for the complete test suite").step);
+    }
+
+    if (pg_dep) |dep| {
+        const postgres_mod = b.addModule("sqlz_postgres", .{
+            .root_source_file = b.path("src/postgres.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "sqlz_core", .module = core_mod },
+                .{ .name = "pg", .module = dep.module("pg") },
+            },
+        });
+        const postgres_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("test/postgres.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "sqlz", .module = postgres_mod },
+                    .{ .name = "pg", .module = dep.module("pg") },
+                },
+            }),
+        });
+        const run_postgres = b.addRunArtifact(postgres_tests);
+        test_step.dependOn(&run_postgres.step);
+        const postgres_step = b.step("test-postgres", "Run PostgreSQL adapter compile tests");
+        postgres_step.dependOn(&run_postgres.step);
+    } else {
+        test_step.dependOn(&b.addFail("pg.zig is required for the complete test suite").step);
     }
 }
 
