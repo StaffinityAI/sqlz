@@ -1,12 +1,12 @@
 # Design completeness audit
 
 This audit is the exhaustive 0.1 design-document gap register as of 2026-09-03,
-reviewed 2026-09-17 when ADRs 0033–0035 added connection-scoped owned rows,
-typed SQLite connection settings with the native-pool wrapper, and derived enum
-codecs. “Resolved” means a normative design document and an Accepted ADR exist;
+reviewed 2026-09-18 when ADR 0036 proposed checkpoint migrations and history
+compaction. “Resolved” means a normative design document and an Accepted ADR exist;
 it does not imply an implementation exists — see
 [implementation-plan.md](implementation-plan.md) for what is built and where code
-still trails these documents. No known architectural decision remains open.
+still trails these documents. Checkpoint compaction remains proposed until ADR 0036
+is accepted.
 
 | Area | Required decision/detail | Resolution | Normative document | Milestone |
 | --- | --- | --- | --- | --- |
@@ -22,7 +22,8 @@ still trails these documents. No known architectural decision remains open.
 | Errors | payload ownership, privacy, telemetry | Resolved | [errors-and-observability.md](errors-and-observability.md) | M3–M5 |
 | Config | schema, roots, profiles, codecs, projects | Resolved | [configuration.md](configuration.md) | M1 |
 | Migrations | DAG, files, convergence, transactions | Resolved | [migrations.md](migrations.md) | M1–M5 |
-| State | identity, checksums, journal, upgrades | Resolved | [migration-state.md](migration-state.md) | M5 |
+| Compaction | checkpoint replacement and source pruning | Proposed | [adr/0036-checkpoint-migrations-and-history-compaction.md](adr/0036-checkpoint-migrations-and-history-compaction.md) | M5 |
+| State | identity, checksums, journal, upgrades | Resolved; checkpoint extension proposed | [migration-state.md](migration-state.md) | M5 |
 | CLI | unified commands, JSON, confirmations | Resolved | [cli.md](cli.md) | M5 |
 | Compatibility | SemVer, formats, Zig/DB/platform matrix | Resolved | [compatibility.md](compatibility.md) | M6 |
 | Testing | component, engine, build, and platform suites | Resolved | [testing.md](testing.md) | M1–M6 |

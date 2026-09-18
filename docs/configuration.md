@@ -41,6 +41,12 @@ to scan sources that sit beside `sqlz.ziggy`.
 It identifies migration ownership and never derives from a path or package name.
 Changing it is a database rebind operation, not an ordinary edit.
 
+Checkpoint selection needs no project-level enable flag: checked-in checkpoint
+manifests are validated whenever present and are eligible for empty-database
+bootstrap by default. Operators may disable selection per command with
+`--no-checkpoint`. Checkpoint/replacement metadata and `migrations/history.ziggy`
+participate in the semantic configuration fingerprint.
+
 ## Field contract
 
 | Field | Type | Rule |
@@ -110,6 +116,10 @@ All limits are configurable. Defaults are 16 MiB per source, 1,000,000 tokens pe
 source, nesting depth 256, 100 diagnostics per invocation, 10,000 revisions,
 100,000 queries, and 512 MiB total registered source. Reaching a limit produces a
 diagnostic rather than a crash or partial binding output.
+Checkpoint manifests count toward the revision limit. Entries in
+`migrations/history.ziggy` have a separate count bounded by the same default
+10,000 limit in the initial implementation, and all checkpoint/history bytes count
+toward total registered source bytes.
 
 ## Multiple projects
 

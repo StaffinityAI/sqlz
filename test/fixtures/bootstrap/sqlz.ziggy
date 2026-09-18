@@ -1,0 +1,9 @@
+.format_version = 1,
+.project_id = "7db17243-f462-4ee2-9b1e-a11a6bd75908",
+.migrations = "migrations",
+.sql_roots = .{ .app = "queries" },
+.zig_roots = [],
+.backends = .{
+  .sqlite = .{ .profile = "3.53" },
+  .postgres = .{ .profile = "15", .search_path = ["sqlz_bootstrap_test"] },
+},

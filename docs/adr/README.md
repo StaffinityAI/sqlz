@@ -46,3 +46,4 @@ be replaced only by a new ADR. Records use [0000-template.md](0000-template.md).
 | [0033](0033-connection-scoped-owned-rows.md) | Connection-scoped owned rows | Accepted |
 | [0034](0034-typed-sqlite-connection-options-and-pool-wrapper.md) | Connection options and pool wrapper | Accepted |
 | [0035](0035-derived-enum-codecs.md) | Derived enum codecs | Accepted |
+| [0036](0036-checkpoint-migrations-and-history-compaction.md) | Checkpoint migrations and history compaction | Proposed |

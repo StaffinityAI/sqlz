@@ -1,9 +1,16 @@
 # SQLite-to-PostgreSQL bootstrap implementation plan
 
-Status: planned. Keep this document current as scope changes, implementation
-slices land, or new constraints are discovered. The general release checklist
-remains [implementation-plan.md](implementation-plan.md); this document is the
-source of truth for the bootstrap feature.
+Status: initial implementation available. Keep this document current as scope
+changes, implementation slices land, or new constraints are discovered. The
+general release checklist remains [implementation-plan.md](implementation-plan.md);
+this document is the source of truth for the bootstrap feature.
+
+The implemented slice provides the build-integrated command, project routing,
+offline transfer planning, read-only SQLite validation, dedicated-schema reset,
+transactional PostgreSQL migration replay, parameter-bound row transfer,
+sequence restoration, and row-count validation. Migration state/checksums,
+journaling, interactive confirmation, JSON output, and live PostgreSQL
+integration coverage remain follow-up work.
 
 ## Goal
 
@@ -15,7 +22,7 @@ zig build sqlz -- bootstrap postgres \
     --project NAME \
     --from-sqlite PATH \
     [--wipe-postgres] \
-    [connection options]
+    [--postgres-url URL]
 ```
 
 The command creates the destination schema from the project's PostgreSQL
@@ -34,8 +41,8 @@ bootstrap operation, not an incremental synchronization tool.
   or data outside an explicitly allowed empty baseline rejects the operation.
 - `--wipe-postgres` is optional and defaults to false. It authorizes sqlz to
   remove the destination project's managed PostgreSQL schema and state before
-  rebuilding it. It requires interactive confirmation or `--yes` in
-  non-interactive use.
+  rebuilding it. The initial implementation requires `--yes`; interactive
+  confirmation is not implemented yet.
 - Wipe applies only to the configured project-managed PostgreSQL namespace and
   sqlz state schema. It must not drop the PostgreSQL database, roles,
   extensions, or unrelated schemas.
@@ -97,14 +104,14 @@ zig build sqlz -- bootstrap postgres \
     --from-sqlite PATH \
     [--wipe-postgres] \
     [--yes] \
-    [--format human|json] \
-    [connection options]
+    [--postgres-url URL]
 ```
 
 Behavior:
 
 - `--project` may be inferred only under the normal single-registration rule.
 - `--from-sqlite` is required and is opened read-only.
+- `--postgres-url` or `DATABASE_URL` supplies the destination connection.
 - `--wipe-postgres` never implies `--yes`.
 - `--yes` has no destructive effect unless `--wipe-postgres` is also present.
 - Human output reports preflight, table-level progress, validation, and the final
@@ -149,7 +156,7 @@ known to be valid.
 
 ### Phase 0: Normative design
 
-Status: not started.
+Status: partially complete.
 
 - Add bootstrap to [cli.md](cli.md), including `--wipe-postgres`, confirmation,
   output, and exit behavior.
@@ -166,7 +173,9 @@ behavior, supported conversions, and reduced-atomicity policy are unambiguous.
 
 ### Phase 1: CLI and migration prerequisites
 
-Status: blocked by the unified CLI and migration execution work in
+Status: partially complete. The host command and project registration are
+implemented. Bootstrap currently performs transactional head replay directly;
+the shared stateful migration runner remains blocked by
 [implementation-plan.md](implementation-plan.md).
 
 - Implement the unified host CLI and registered-project routing.
@@ -182,7 +191,7 @@ destination and can identify a wipe boundary without bootstrap-specific SQL.
 
 ### Phase 2: Pure transfer planning
 
-Status: not started.
+Status: initial implementation complete; metadata and coverage hardening remain.
 
 - Add `src/bootstrap.zig` with backend-neutral `TransferPlan`, `TablePlan`, and
   `ColumnPlan` types.
@@ -202,7 +211,8 @@ deterministic ordering.
 
 ### Phase 3: SQLite source inspection
 
-Status: not started.
+Status: initial implementation complete; state identity, UTF-8 policy tests, and
+concurrent-writer coverage remain.
 
 - Add a bootstrap-specific SQLite reader that opens files read-only.
 - Inspect `sqlite_schema` and relevant PRAGMAs and compare the live database to
@@ -230,7 +240,9 @@ and snapshot stability under a concurrent writer.
 
 ### Phase 4: PostgreSQL destination reset and insertion
 
-Status: not started.
+Status: initial implementation complete for dedicated schemas and row-at-a-time
+insertion. Reusable wipe planning, prepare-once insertion, and live-engine tests
+remain.
 
 - Implement managed-namespace inspection and wipe as a reusable migration/CLI
   operation rather than inline bootstrap SQL.
@@ -249,7 +261,8 @@ overflows fail, row failures roll back, and sequence next-values are correct.
 
 ### Phase 5: Bootstrap orchestration
 
-Status: not started.
+Status: initial implementation complete. Stateful migration recording,
+interactive confirmation, structured diagnostics, and JSON output remain.
 
 - Add the `bootstrap postgres` command and compose the planner, source reader,
   destination inspector, wipe operation, migration runner, and row writer.
@@ -278,6 +291,11 @@ Status: not started.
   row-at-a-time performance baseline.
 - Update this plan after each implementation slice and record newly deferred
   behavior rather than silently expanding scope.
+
+A disposable PostgreSQL 15 smoke test has verified scalar/blob transfer,
+identity restoration, default nonempty-destination rejection, managed-schema
+wipe, and preservation of an unrelated `public` table. This is evidence for the
+initial implementation but does not replace the planned automated live suite.
 
 Acceptance gate: all documented safety properties have integration coverage and
 the public command examples pass against supported PostgreSQL versions.
@@ -320,22 +338,23 @@ conversion and test matrix.
 | Work item | Status |
 | --- | --- |
 | Scope and initial wipe policy documented | Complete |
-| Normative CLI/security/migration docs updated | Not started |
+| Normative CLI/security/migration docs updated | Partial |
 | Bootstrap ADR accepted | Not started |
-| Unified CLI prerequisite | Not started |
+| Unified CLI prerequisite | Partial: bootstrap command only |
 | PostgreSQL migration runner prerequisite | Not started |
-| Pure transfer planner | Not started |
-| SQLite live source inspector | Not started |
-| PostgreSQL managed-namespace inspector/wipe | Not started |
-| Dynamic PostgreSQL row insertion | Not started |
-| Bootstrap orchestration | Not started |
-| End-to-end and safety test suite | Not started |
+| Pure transfer planner | Initial implementation complete |
+| SQLite live source inspector | Initial implementation complete |
+| PostgreSQL managed-namespace inspector/wipe | Initial dedicated-schema implementation complete |
+| Dynamic PostgreSQL row insertion | Initial row-at-a-time implementation complete |
+| Bootstrap orchestration | Initial implementation complete |
+| End-to-end and safety test suite | Fixture and manual PostgreSQL 15 smoke test complete; automation not started |
 | Performance baseline | Not started |
 
 ## Open decisions
 
 - Whether bootstrap and wipe require a dedicated PostgreSQL application schema
-  in the first release. Recommended: yes.
+  in the first release. Initial implementation: yes; `public` and multiple-entry
+  search paths are rejected.
 - Whether the sqlz state schema may be shared by multiple registered projects.
   Recommended: no for the initial wipe implementation.
 - Whether an empty destination may contain explicitly allowlisted extensions and
@@ -344,4 +363,4 @@ conversion and test matrix.
 - Whether finite SQLite REAL values may target PostgreSQL `numeric`. Recommended:
   defer until decimal conversion semantics exist.
 - Whether source tables absent from PostgreSQL may be explicitly excluded.
-  Recommended: reject initially rather than silently omit application data.
+  Initial implementation: reject rather than silently omit application data.

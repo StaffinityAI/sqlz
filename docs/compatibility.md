@@ -31,6 +31,17 @@ releases through explicit format upgrades. Forward-incompatible newer formats ar
 rejected, never guessed. Generated Zig is an implementation artifact and need not
 be source-compatible or committed.
 
+Checkpoint manifests, replacement metadata, state tombstones, and runtime bundle
+metadata are persisted formats. Ordinary format-1 revisions remain valid and keep
+their immutable meaning. Checkpoint support uses a newer manifest format rather
+than assigning replacement semantics to existing fields. Once a release accepts a
+checkpoint manifest or records checkpoint state, later 0.x releases must continue
+to read it or perform an explicit state/manifest upgrade. Finalized historical IDs
+remain reserved and cannot be reused. The versioned `migrations/history.ziggy`
+registry is likewise backward-readable persisted project metadata; deleting or
+rewriting entries without an explicit format-aware compaction operation is a
+compatibility violation.
+
 Driver and Ziggy revisions are pinned. Updating a pin requires the relevant
 conformance, format, runtime, and generated-binding fixtures. Dropping a database
 or platform version requires release notes and ordinarily a minor release.

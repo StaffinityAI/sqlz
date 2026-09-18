@@ -157,6 +157,15 @@ pub fn build(b: *std.Build) !void {
             .{ .name = "sqlz_query_files", .module = query_files_mod },
         },
     });
+    const bootstrap_mod = b.addModule("sqlz_bootstrap", .{
+        .root_source_file = b.path("src/bootstrap.zig"),
+        .target = host_target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "sqlz_analysis", .module = analysis_mod },
+            .{ .name = "sqlz_catalog", .module = catalog_mod },
+        },
+    });
     const generator_mod = b.addModule("sqlz_generator", .{
         .root_source_file = b.path("src/generator.zig"),
         .target = host_target,
@@ -194,6 +203,46 @@ pub fn build(b: *std.Build) !void {
     });
     b.installArtifact(codegen_exe);
 
+    const cli_options = b.addOptions();
+    cli_options.addOption(bool, "bootstrap_enabled", sqlite_enabled and postgres_enabled);
+    const cli_imports: []const std.Build.Module.Import = if (sqlite_enabled and postgres_enabled) imports: {
+        const host_zqlite = b.lazyDependency("zqlite", .{
+            .target = host_target,
+            .optimize = optimize,
+        }) orelse break :imports &.{};
+        const host_pg = b.lazyDependency("pg", .{
+            .target = host_target,
+            .optimize = optimize,
+            .openssl = postgres_tls,
+        }) orelse break :imports &.{};
+        const bootstrap_cli_mod = b.createModule(.{
+            .root_source_file = b.path("src/bootstrap_cli.zig"),
+            .target = host_target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "ziggy", .module = ziggy_dep.module("ziggy") },
+                .{ .name = "sqlz_analysis", .module = analysis_mod },
+                .{ .name = "sqlz_bootstrap", .module = bootstrap_mod },
+                .{ .name = "sqlz_catalog", .module = catalog_mod },
+                .{ .name = "sqlz_checker", .module = checker_mod },
+                .{ .name = "sqlz_config", .module = config_mod },
+                .{ .name = "sqlz_migrations", .module = migrations_mod },
+                .{ .name = "pg", .module = host_pg.module("pg") },
+                .{ .name = "zqlite", .module = host_zqlite.module("zqlite") },
+            },
+        });
+        break :imports &.{std.Build.Module.Import{ .name = "sqlz_bootstrap_cli", .module = bootstrap_cli_mod }};
+    } else &.{};
+    const cli_root = b.createModule(.{
+        .root_source_file = b.path("src/cli_main.zig"),
+        .target = host_target,
+        .optimize = optimize,
+        .imports = cli_imports,
+    });
+    cli_root.addOptions("sqlz_cli_options", cli_options);
+    const cli_exe = b.addExecutable(.{ .name = "sqlz-cli", .root_module = cli_root });
+    b.installArtifact(cli_exe);
+
     const zqlite_dep = if (sqlite_enabled) b.lazyDependency("zqlite", .{
         .target = target,
         .optimize = optimize,
@@ -214,6 +263,23 @@ pub fn build(b: *std.Build) !void {
     const test_step = b.step("test", "Run the complete sqlz test suite");
     const core_step = b.step("test-core", "Run backend-neutral tests");
     const examples_step = b.step("examples", "Build all examples");
+
+    const bootstrap_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/bootstrap.zig"),
+            .target = host_target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "sqlz_bootstrap", .module = bootstrap_mod },
+                .{ .name = "sqlz_catalog", .module = catalog_mod },
+                .{ .name = "sqlz_parser", .module = parser_mod },
+            },
+        }),
+    });
+    const run_bootstrap_tests = b.addRunArtifact(bootstrap_tests);
+    test_step.dependOn(&run_bootstrap_tests.step);
+    const bootstrap_step = b.step("test-bootstrap", "Run bootstrap planning tests");
+    bootstrap_step.dependOn(&run_bootstrap_tests.step);
 
     const core_tests = b.addTest(.{
         .root_module = b.createModule(.{

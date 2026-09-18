@@ -22,12 +22,24 @@ dedicated PostgreSQL state schema has separately documentable ownership. Locks,
 identity checks, checksums, state-version checks, and confirmations fail closed.
 SQL migration files are trusted deployment code; sqlz does not sandbox DDL/DML.
 
+Checkpoint SQL is equally trusted and has a larger blast radius because it is a
+fresh-database bootstrap. Selection requires both missing sqlz state and an
+explicit empty-destination classification; sqlz never treats an arbitrary
+unmanaged schema as empty. Initialized sqlz state tables are allowed only when they
+contain no applied history, checkpoint evidence, or incomplete command. Checkpoint
+adoption executes no SQL and requires exact
+identity, replacement-set, checksum, and catalog fingerprints. Finalization cannot
+discover every deployment, so it requires an explicit operator assertion and
+confirmation, never automatic age-based pruning.
+
 ## Secrets and diagnostics
 
 Connection strings, credentials, SQL text, and parameter values are never emitted
 to telemetry. Full backend errors remain available to callers but are documented
 as sensitive. Journals persist only stable safe codes/context. JSON diagnostics
 redact secrets and keep machine data on stdout with incidental logging on stderr.
+Checkpoint journals and tombstones contain revision IDs and hashes but never SQL
+text, credentials, or database contents.
 
 Dependencies and builtin catalogs are pinned and reviewed. Release automation
 verifies hashes, licenses, format fixtures, and supported-engine conformance.

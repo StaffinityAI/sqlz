@@ -22,19 +22,25 @@ is completed, split, deferred, or newly discovered.
    type aliases, and profile-specific behavior.
 4. Implement the pure migration planner: applied sets, target parsing, ancestor
    closures, deterministic upgrade/downgrade plans, ancestry safety, and
-   irreversible-revision preflight.
+   irreversible-revision preflight. Its data model must distinguish physical
+   application, logical checkpoint coverage, and alternate empty bootstrap paths.
 5. Implement canonical checksums, project/configuration identity, the versioned
-   database state schema, and forward-only state upgrades.
+   database state schema, and forward-only state upgrades, reserving explicit
+   checkpoint evidence and compacted-history registry fields.
 6. Implement the SQLite migration runner with locking, transactional execution,
    applied-state updates, journaling, and interruption/failure tests.
 7. Implement the PostgreSQL migration runner with advisory locking,
    transactional and nontransactional revisions, statement journaling, and
    recovery behavior.
-8. Generate runtime migration bundles and add the unified build-integrated CLI,
+8. Implement checkpoint migrations and history compaction: the new manifest
+   format, replacement-closure validation, per-backend catalog equivalence,
+   fresh bootstrap selection, historical adoption, durable tombstones, and
+   confirmed finalization.
+9. Generate runtime migration bundles and add the unified build-integrated CLI,
    sharing the planner and runners between runtime and host commands.
-9. Complete hardening: resource limits, build invalidation, differential and
+10. Complete hardening: resource limits, build invalidation, differential and
    fuzz tests, platform coverage, telemetry/security, and performance baselines.
-10. Reconcile all normative documentation and tracked divergences, run every
+11. Reconcile all normative documentation and tracked divergences, run every
     public example and compatibility fixture, and enforce the 0.1 release gate.
 
 | Phase | Work item | Status |
@@ -101,6 +107,9 @@ is completed, split, deferred, or newly discovered.
 | Deferred | PostgreSQL runtime backend | Deferred |
 | Deferred | PostgreSQL builtin catalog signatures and live-engine conformance | Deferred |
 | Deferred | Migration execution and full CLI | Deferred |
+| Deferred | Checkpoint migrations and history compaction | Deferred |
+| Deferred | Checkpoint manifest v2 and compacted-history registry format | Deferred |
+| Deferred | Checkpoint equivalence, selection, adoption, and finalization workflows | Deferred |
 
 ## Tracked divergences
 

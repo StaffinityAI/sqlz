@@ -158,7 +158,8 @@ all milestones; early milestones are not separate compatibility promises.
 
 - Implement versioned migration state, operation journal, locking,
   upgrade/downgrade/repair operations, unified host command, runtime bundles,
-  cache integration, and lazy flags.
+  cache integration, lazy flags, and checkpoint-based history compaction for
+  empty-database bootstrap.
 - Gate: migration integration tests pass on SQLite and PostgreSQL, and the four-
   configuration build matrix proves disabled dependencies remain unused.
 
@@ -184,6 +185,13 @@ stamp. sqlz uses static SQL files instead of executable migration programs and
 does not include autogeneration in 0.1. See Alembic's
 [tutorial](https://alembic.sqlalchemy.org/en/latest/tutorial.html) and
 [branch documentation](https://alembic.sqlalchemy.org/en/latest/branches.html).
+
+Django's replacement migrations and Flyway's baseline migrations inform sqlz's
+proposed checkpoint lifecycle: old and compacted histories coexist during rollout,
+fresh databases use a cumulative bootstrap, and source pruning is a separate
+confirmed phase. sqlz differs by requiring offline catalog equivalence for every
+targeted backend and preserving immutable revision identity in a compacted-history
+registry.
 
 Awebo's database code demonstrates a low-friction Zig interface built from
 declarative query types, typed argument structs, typed column access, prepared

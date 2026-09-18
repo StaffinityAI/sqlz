@@ -128,6 +128,9 @@ are registered as build inputs. On Zig 0.16, directory roots use
 step inputs. Output paths are content-addressed from tool version, all input bytes,
 profiles, semantic configuration, and codec IDs. Absolute checkout paths and
 credentials never enter keys or generated files.
+The migration root's `history.ziggy` compacted-history registry is always an input
+when present; adding, editing, or removing it invalidates checker and runtime
+migration metadata.
 
 ## Generated modules
 
@@ -135,6 +138,10 @@ The query module mirrors required SQL-root aliases and subdirectories. The
 migration module embeds validated manifests and SQL for enabled runtime backends.
 Generation is deterministic, uses atomic cache writes, and never edits source
 directories. Backend-specific imports appear only when that backend is selected.
+Checkpoint manifests, replacement-set digests, historical boundary identities,
+and finalized tombstones are included in migration bundle/cache metadata. A
+runtime bundle contains both paths during coexistence and applies the same
+destination-state selection rules as the host CLI.
 
 ## Acceptance tests
 

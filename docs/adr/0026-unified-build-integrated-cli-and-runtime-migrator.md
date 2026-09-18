@@ -11,8 +11,9 @@ applications may need programmatic migration.
 ## Decision
 
 Expose `zig build sqlz -- ...` for init, check, revision, status, migration, state,
-and journal commands. Also expose a runtime migrator using the same planner/state
-logic.
+checkpoint, and journal commands. Also expose a runtime migrator using the same
+planner/state logic. Checkpoint subcommands and compaction semantics are defined by
+ADR 0036.
 
 ## Alternatives considered
 
@@ -26,3 +27,4 @@ One host command needs stable subcommand and JSON contracts.
 
 - [CLI](../cli.md)
 - [Build integration](../build-integration.md)
+- [ADR 0036](0036-checkpoint-migrations-and-history-compaction.md)

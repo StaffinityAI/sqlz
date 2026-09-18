@@ -69,6 +69,17 @@ branches, but it must add a merge revision before the checker can choose a
 single schema. Migration commands continue to understand multiple database
 heads so they can repair or merge deployed histories.
 
+Checkpoint revisions add alternate roots for empty-database bootstrap. They do
+not change the logical historical DAG used by existing databases or query-head
+selection. The planner receives destination state and target revision, chooses a
+historical or checkpoint bootstrap path, and emits one logical applied boundary.
+The catalog layer validates checkpoint equivalence offline for every targeted
+backend before either path can enter a runtime bundle.
+After finalization, compacted-history registry entries supply virtual graph identity
+and the validated checkpoint supplies the catalog snapshot at the logical boundary;
+live descendants replay normally from there. Thus source pruning does not change
+the query-checking head or require a live database.
+
 ### Query analyzer and generator
 
 The query analyzer resolves names, scopes, joins, expressions, parameters,
@@ -183,6 +194,7 @@ cache key includes:
 - sqlz checker and generator version;
 - complete bytes and relative paths of migration and query inputs;
 - migration target head and backend set;
+- checkpoint/replacement metadata and the selected bootstrap policy;
 - codec registry and query configuration;
 - generated API format version.
 

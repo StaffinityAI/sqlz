@@ -42,11 +42,16 @@ pub const Tool = struct {
     b: *std.Build,
     dependency: *std.Build.Dependency,
     names: std.StringHashMapUnmanaged(void) = .empty,
+    cli_run: *std.Build.Step.Run,
 
     pub fn addProject(self: *Tool, options: ProjectOptions) Project {
         const name = self.b.dupe(options.name);
         const entry = self.names.getOrPut(self.b.allocator, name) catch @panic("out of memory");
         if (entry.found_existing) @panic("duplicate sqlz project name");
+
+        self.cli_run.addArg("--registration");
+        self.cli_run.addArg(name);
+        self.cli_run.addFileArg(options.config);
 
         const run = self.b.addRunArtifact(self.dependency.artifact("sqlz-codegen"));
         run.setName(self.b.fmt("check sqlz project {s}", .{name}));
@@ -129,7 +134,16 @@ fn skipPath(path: []const u8) bool {
 }
 
 pub fn addTool(b: *std.Build, options: ToolOptions) *Tool {
+    const cli_run = b.addRunArtifact(options.dependency.artifact("sqlz-cli"));
+    cli_run.setName("run sqlz command");
+    cli_run.setCwd(b.path("."));
+    cli_run.stdio = .inherit;
+    if (b.args) |args| cli_run.addArgs(args);
+    cli_run.addArg("--sqlz-build-registrations");
+    const cli_step = b.step("sqlz", "Run a sqlz project command");
+    cli_step.dependOn(&cli_run.step);
+
     const tool = b.allocator.create(Tool) catch @panic("out of memory");
-    tool.* = .{ .b = b, .dependency = options.dependency };
+    tool.* = .{ .b = b, .dependency = options.dependency, .cli_run = cli_run };
     return tool;
 }

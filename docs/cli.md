@@ -13,6 +13,12 @@ zig build sqlz -- migrate upgrade TARGET [connection options]
 zig build sqlz -- migrate downgrade TARGET [connection options]
 zig build sqlz -- revision create [--message TEXT]
 zig build sqlz -- revision merge REV...
+zig build sqlz -- checkpoint create --through REV [--message TEXT]
+zig build sqlz -- checkpoint verify CHECKPOINT
+zig build sqlz -- checkpoint adopt CHECKPOINT [connection options]
+zig build sqlz -- checkpoint finalize CHECKPOINT
+zig build sqlz -- bootstrap postgres --from-sqlite PATH [--postgres-url URL]
+    [--project NAME] [--wipe-postgres --yes]
 zig build sqlz -- state init|stamp|repair|rebind
 zig build sqlz -- journal show|prune
 ```
@@ -35,6 +41,40 @@ as downgrade, stamp, repair, rebind, and journal prune—prompt on an interactiv
 terminal. Non-interactive use must pass `--yes`; otherwise the command fails before
 opening a mutation transaction. Secrets are accepted through driver-appropriate
 environment/config channels and are redacted from output.
+
+`bootstrap postgres` is the first implemented operational command. It requires
+both backend dependencies, a registered project with SQLite and PostgreSQL
+profiles, and a dedicated single-entry PostgreSQL `search_path` other than
+`public`. The destination URL comes from `--postgres-url` or `DATABASE_URL`.
+Without `--wipe-postgres`, an existing managed destination is rejected. The
+initial implementation requires `--yes` with `--wipe-postgres`; interactive
+confirmation, JSON output, migration-state recording, and nontransactional
+migration support remain pending.
+
+`checkpoint create` generates a manifest/directory skeleton and authors supply
+reviewed SQL; schema serialization/autogeneration remains out of scope. Creation
+never edits or deletes historical files. A checkpoint containing DML requires an
+explicit `--acknowledge-unverified-dml` during verification/finalization, and the
+acknowledgement is recorded in command output and journal metadata.
+`checkpoint verify` is read-only and checks replacement closure plus per-backend
+catalog equivalence. `checkpoint adopt` records equivalence on a database already
+at or beyond `through` and executes no checkpoint SQL. `checkpoint finalize` is a
+destructive repository-history workflow: it prints the exact removable revisions,
+requires `--yes` in non-interactive use, emits durable replacement tombstone
+metadata, and leaves source deletion to a separate explicit version-control change.
+It must never infer that unknown remote deployments are safe to prune.
+
+Fresh migration commands report whether they selected historical replay or a
+checkpoint bootstrap. `--no-checkpoint` forces historical replay for testing and
+for operators who retain downgrade-from-base requirements. There is no flag that
+allows a partially migrated database to jump into a checkpoint.
+
+`status`, `history`, human plans, and JSON plans distinguish physical execution
+from logical coverage. A checkpoint-bootstrapped database reports the checkpoint
+ID and `through` boundary, then lists replaced ordinary revisions as covered, not
+individually executed. `stamp` cannot create checkpoint adoption evidence;
+operators use `checkpoint adopt` so replacement fingerprints are verified and
+journaled.
 
 Migration lock acquisition defaults to 30 seconds and is configurable. Timeout is
 a structured failure and never falls back to running unlocked.

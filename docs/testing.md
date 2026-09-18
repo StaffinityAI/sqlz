@@ -10,6 +10,10 @@ behavior, and migration safety fail independently.
 - catalog signature, coercion, nullability, overload, and codec-resolution tests;
 - migration DAG planning, replay, merge convergence, checksum, identity, lock,
   journal, interruption, and state-upgrade tests;
+- checkpoint tests for exact replacement closures, per-backend catalog
+  equivalence, fresh bootstrap selection, historical-path coexistence, partial
+  deployments, adoption, ambiguous candidates, finalized tombstones, source
+  pruning, and downgrade-boundary refusal;
 - generated-binding snapshots plus compile-pass and compile-fail fixtures on Zig
   0.16.0;
 - runtime integration tests for borrowed/owned lifetimes, owned-row scopes,
@@ -45,3 +49,16 @@ system/custom builds have runtime option verification tests.
 Every defect gains the narrowest regression test and, when it crosses a component
 boundary, an integration fixture. Tests must not require a production database or
 network access after dependencies and engine images are provisioned.
+
+Checkpoint tests use both schema-only and DML-bearing histories. They prove only
+empty-database schema equivalence and verify that the tool never claims historical
+data equivalence. Failure-injection coverage includes transactional and
+nontransactional checkpoint bootstrap, adoption drift, interrupted finalization,
+and recovery from a journaled partial bootstrap.
+Finalization tests remove the original revision directories, retain
+`history.ziggy`, and cover databases below, exactly at, and beyond the boundary.
+They verify that at/beyond states continue, below-boundary states produce a
+pruned-history-unavailable diagnostic, and reused finalized IDs are rejected.
+Repeated-compaction fixtures verify composed equivalence from a finalized
+checkpoint snapshot through a live suffix, and reject nested checkpoints while an
+earlier coexistence transition remains open.

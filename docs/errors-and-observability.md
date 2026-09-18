@@ -31,5 +31,15 @@ where applicable. They never contain SQL text, parameter values, credentials, or
 full backend diagnostics. Callbacks are disabled by default and must not change
 operation semantics.
 
+Checkpoint lifecycle events include validation, bootstrap selection, bootstrap
+completion, historical adoption, and finalization. Safe fields are checkpoint ID,
+logical `through` revision, replacement-set digest, backend, duration, and outcome.
+They never contain checkpoint SQL or seed data.
+
 Checker and CLI diagnostics are separate non-runtime values with stable codes,
 source spans, labels, notes, and human or versioned JSON rendering.
+
+Checkpoint diagnostics reserve stable categories for invalid replacement closure,
+catalog divergence, ambiguous selection, non-empty destination, adoption drift,
+finalized-ID reuse, unavailable pruned history, unsupported downgrade boundary,
+and registry/state fingerprint mismatch.
