@@ -4,6 +4,19 @@ pub const ToolOptions = struct {
     dependency: *std.Build.Dependency,
 };
 
+pub const RuntimeOptions = struct {
+    sqlite: bool = false,
+    postgres: bool = false,
+    postgres_tls: bool = false,
+};
+
+pub const RuntimeOptionsError = error{PostgresTlsRequiresPostgres};
+
+pub fn validateRuntimeOptions(options: RuntimeOptions) RuntimeOptionsError!void {
+    if (options.postgres_tls and !options.postgres)
+        return error.PostgresTlsRequiresPostgres;
+}
+
 /// Binds one codec ID from `sqlz.ziggy` to the Zig declaration generated code
 /// should name. IDs and bindings are one to one: a configured ID without a
 /// binding, or a binding the configuration never declares, fails the check.
@@ -20,6 +33,7 @@ pub const ProjectOptions = struct {
 };
 
 pub const Project = struct {
+    runtime_module: *std.Build.Module,
     queries_module: *std.Build.Module,
     check_step: *std.Build.Step,
 };
@@ -70,7 +84,11 @@ pub const Tool = struct {
             .root_source_file = generated,
             .imports = imports.items,
         });
-        return .{ .queries_module = queries_module, .check_step = &run.step };
+        return .{
+            .runtime_module = self.dependency.module("sqlz"),
+            .queries_module = queries_module,
+            .check_step = &run.step,
+        };
     }
 };
 

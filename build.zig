@@ -11,6 +11,18 @@ pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const host_target = b.graph.host;
     const optimize = b.standardOptimizeOption(.{});
+    const root_build = b.pkg_hash.len == 0;
+    const sqlite_enabled = b.option(bool, "sqlite", "Enable the SQLite runtime adapter") orelse root_build;
+    const postgres_enabled = b.option(bool, "postgres", "Enable the PostgreSQL runtime adapter") orelse root_build;
+    const postgres_tls = b.option(bool, "postgres_tls", "Enable TLS in the PostgreSQL driver") orelse false;
+    sqlz_build.validateRuntimeOptions(.{
+        .sqlite = sqlite_enabled,
+        .postgres = postgres_enabled,
+        .postgres_tls = postgres_tls,
+    }) catch {
+        std.log.err("-Dpostgres_tls=true requires -Dpostgres=true", .{});
+        b.invalid_user_input = true;
+    };
 
     _ = b.addModule("sqlz_build", .{ .root_source_file = b.path("build/sqlz_build.zig") });
 
@@ -29,12 +41,22 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
         .imports = &.{.{ .name = "ziggy", .module = ziggy_dep.module("ziggy") }},
     });
-    const sqlz_mod = b.addModule("sqlz", .{
+    const sqlite_mod = b.createModule(.{
         .root_source_file = b.path("src/sqlz.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{.{ .name = "sqlz_core", .module = core_mod }},
     });
+    const runtime_options = b.addOptions();
+    runtime_options.addOption(bool, "sqlite", sqlite_enabled);
+    runtime_options.addOption(bool, "postgres", postgres_enabled);
+    const sqlz_mod = b.addModule("sqlz", .{
+        .root_source_file = b.path("src/runtime.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "sqlz_core", .module = core_mod }},
+    });
+    sqlz_mod.addOptions("sqlz_runtime_options", runtime_options);
     // libpg_query does not ship a Zig manifest. Zig still fetches its pinned
     // source package into zig-pkg; compile those sources for the selected target
     // instead of relying on a platform-specific prebuilt archive.
@@ -172,15 +194,15 @@ pub fn build(b: *std.Build) !void {
     });
     b.installArtifact(codegen_exe);
 
-    const zqlite_dep = b.lazyDependency("zqlite", .{
+    const zqlite_dep = if (sqlite_enabled) b.lazyDependency("zqlite", .{
         .target = target,
         .optimize = optimize,
-    });
-    const pg_dep = b.lazyDependency("pg", .{
+    }) else null;
+    const pg_dep = if (postgres_enabled) b.lazyDependency("pg", .{
         .target = target,
         .optimize = optimize,
-        .openssl = false,
-    });
+        .openssl = postgres_tls,
+    }) else null;
     // zio is an alternative `std.Io` implementation. sqlz never depends on it;
     // it is pulled in only to prove the runtime initialization works with a
     // non-std implementation of the interface.
@@ -204,6 +226,16 @@ pub fn build(b: *std.Build) !void {
     const run_core = b.addRunArtifact(core_tests);
     core_step.dependOn(&run_core.step);
     test_step.dependOn(&run_core.step);
+
+    const build_options_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/build_options.zig"),
+            .target = host_target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "sqlz_build", .module = b.modules.get("sqlz_build").? }},
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(build_options_tests).step);
 
     const parser_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -426,14 +458,38 @@ pub fn build(b: *std.Build) !void {
 
     // `--summary failures` keeps the nested build quiet on success; a failing
     // fixture still prints its own step tree.
-    const build_api_test = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "--summary", "failures" });
-    build_api_test.setCwd(b.path("test/fixtures/build_api"));
-    test_step.dependOn(&build_api_test.step);
     const build_api_step = b.step("test-build-api", "Run the external build integration fixture");
-    build_api_step.dependOn(&build_api_test.step);
+    const matrix = [_][]const []const u8{
+        &.{},
+        &.{ "-Dsqlite=true", "-Dpostgres=false" },
+        &.{ "-Dsqlite=false", "-Dpostgres=true" },
+        &.{ "-Dsqlite=true", "-Dpostgres=true" },
+    };
+    for (matrix) |flags| {
+        const command = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "--summary", "failures" });
+        command.addArgs(flags);
+        command.setCwd(b.path("test/fixtures/build_api"));
+        test_step.dependOn(&command.step);
+        build_api_step.dependOn(&command.step);
+    }
+    if (root_build) {
+        const tls_matrix = b.addSystemCommand(&.{
+            b.graph.zig_exe,
+            "build",
+            "--summary",
+            "failures",
+            "-Dsqlite=false",
+            "-Dpostgres=true",
+            "-Dpostgres_tls=true",
+            "test-postgres",
+        });
+        tls_matrix.setCwd(b.path("."));
+        build_api_step.dependOn(&tls_matrix.step);
+    }
 
     if (zqlite_dep) |dep| {
-        sqlz_mod.addImport("zqlite", dep.module("zqlite"));
+        sqlite_mod.addImport("zqlite", dep.module("zqlite"));
+        sqlz_mod.addImport("sqlz_sqlite", sqlite_mod);
         const sqlite_tests = b.addTest(.{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("test/sqlite.zig"),
@@ -584,13 +640,14 @@ pub fn build(b: *std.Build) !void {
                 .{ .name = "pg", .module = dep.module("pg") },
             },
         });
+        sqlz_mod.addImport("sqlz_postgres", postgres_mod);
         const postgres_tests = b.addTest(.{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("test/postgres.zig"),
                 .target = target,
                 .optimize = optimize,
                 .imports = &.{
-                    .{ .name = "sqlz", .module = postgres_mod },
+                    .{ .name = "sqlz", .module = sqlz_mod },
                     .{ .name = "pg", .module = dep.module("pg") },
                 },
             }),

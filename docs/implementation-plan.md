@@ -54,6 +54,8 @@ this slice.
 | Runtime | PostgreSQL owned/borrowed connections, scalar execution, rows, and transactions | Complete |
 | Runtime | PostgreSQL native pool wrapper, pooled executor methods, and dirty-connection replacement | Complete |
 | Runtime | PostgreSQL one-dimensional array binding/decoding for built-ins and derived enums | Complete |
+| Build | Lazy SQLite/PostgreSQL runtime facade and TLS flag validation | Complete |
+| Build | Core, SQLite, PostgreSQL, both-backend, and PostgreSQL-TLS compile matrix | Complete |
 | Runtime | Native enums at the parameter and row boundary | Complete |
 | Runtime | Connection-scoped owned rows and streaming owned conversion | Complete |
 | Runtime | Typed connection options and the native pool wrapper | Complete |
@@ -63,7 +65,7 @@ this slice.
 | Acceptance | Example runs all four cardinalities through generated and embedded queries (M3 gate) | Complete |
 | Hardening | Complete diagnostics, resource limits, and dependency matrix | Not started |
 | Deferred | PostgreSQL runtime backend | Deferred |
-| Deferred | PostgreSQL TLS, builtin catalog signatures, and live-engine conformance | Deferred |
+| Deferred | PostgreSQL builtin catalog signatures and live-engine conformance | Deferred |
 | Deferred | Migration execution and full CLI | Deferred |
 
 ## Tracked divergences
@@ -88,6 +90,5 @@ an undocumented rule, per [README.md](README.md).
 ## Current next steps
 
 1. Add opt-in PostgreSQL live-engine conformance tests.
-2. Add PostgreSQL TLS build/runtime options.
-3. Add PostgreSQL builtin catalog signatures.
-4. Harden diagnostics, source limits, and the supported dependency matrix.
+2. Add PostgreSQL builtin catalog signatures.
+3. Harden diagnostics, source limits, and the remaining platform matrix.

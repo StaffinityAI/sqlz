@@ -30,7 +30,7 @@ const app_db = tool.addProject(.{
     .config = b.path("sqlz.ziggy"),
 });
 
-exe.root_module.addImport("sqlz", sqlz_dep.module("sqlz"));
+exe.root_module.addImport("sqlz", app_db.runtime_module);
 exe.root_module.addImport("app_queries", app_db.queries_module);
 exe.step.dependOn(app_db.check_step);
 ```
@@ -55,6 +55,7 @@ pub const ProjectOptions = struct {
 };
 
 pub const Project = struct {
+    runtime_module: *std.Build.Module,
     queries_module: *std.Build.Module,
     check_step: *std.Build.Step,
 };
@@ -86,13 +87,13 @@ keep its previously generated bindings. A configuration supplied as a generated
 path cannot be enumerated at configure time and keeps the narrower dependency on
 the file itself.
 
-The current SQLite-first slice has this smaller build contract. `addProject`
-requires a unique name and returns a generated query module plus its internal
-check step. Each codec binding is passed to the checker and added to the
+`addProject` requires a unique name and returns the configured runtime facade,
+generated query module, and internal check step. Each codec binding is passed to
+the checker and added to the
 generated module as an import named `sqlz_codec_<id>`; a configured ID without a
 binding, or a binding the configuration never declares, fails the check.
-Runtime-backend registration and the embedded-migration module will extend these
-structures in later phases.
+The runtime facade always exposes backend-neutral query contracts and conditionally
+exports `sqlz.sqlite` and `sqlz.postgres` according to dependency options.
 
 `sqlz.ziggy` owns paths, profile selection, root aliases, supplements, limits,
 project identity, and database codec patterns. Build registration owns only Zig
