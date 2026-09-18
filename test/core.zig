@@ -65,6 +65,23 @@ test "owned text rows release all duplicated fields" {
     try std.testing.expectEqualStrings("first", owned.note.?);
 }
 
+test "owned array rows recursively duplicate borrowed elements" {
+    const Row = struct {
+        tags: []const ?[]const u8,
+        ratings: ?[]const ?i64,
+    };
+    const tags = [_]?[]const u8{ "zig", null, "sql" };
+    const ratings = [_]?i64{ 5, null, 8 };
+    const row: Row = .{ .tags = &tags, .ratings = &ratings };
+    var owned = try sqlz.cloneRow(std.testing.allocator, row);
+    defer sqlz.deinitOwnedRow(std.testing.allocator, &owned);
+    try std.testing.expectEqualStrings("zig", owned.tags[0].?);
+    try std.testing.expect(owned.tags[1] == null);
+    try std.testing.expectEqual(@as(?i64, 8), owned.ratings.?[2]);
+    try std.testing.expect(owned.tags.ptr != row.tags.ptr);
+    try std.testing.expect(owned.tags[0].?.ptr != row.tags[0].?.ptr);
+}
+
 const Profile = struct { label: []const u8, tag: ?[:0]const u8 };
 const Kind = enum(i64) { basic, premium };
 const WideRow = struct {

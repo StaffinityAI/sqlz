@@ -247,6 +247,20 @@ fn cloneValue(allocator: std.mem.Allocator, comptime T: type, value: T) !T {
     }
     return switch (@typeInfo(T)) {
         .optional => |optional| if (value) |inner| try cloneValue(allocator, optional.child, inner) else null,
+        .pointer => |pointer| if (pointer.size == .slice) blk: {
+            const Mutable = []pointer.child;
+            const copy: Mutable = try allocator.alloc(pointer.child, value.len);
+            var initialized: usize = 0;
+            errdefer {
+                for (copy[0..initialized]) |item| deinitValue(allocator, pointer.child, item);
+                allocator.free(copy);
+            }
+            for (value, copy) |item, *destination| {
+                destination.* = try cloneValue(allocator, pointer.child, item);
+                initialized += 1;
+            }
+            break :blk copy;
+        } else value,
         .@"struct" => |info| blk: {
             var result: T = undefined;
             inline for (info.fields, 0..) |field, index| {
@@ -283,6 +297,10 @@ fn deinitValue(allocator: std.mem.Allocator, comptime T: type, value: T) void {
     }
     switch (@typeInfo(T)) {
         .optional => |optional| if (value) |inner| deinitValue(allocator, optional.child, inner),
+        .pointer => |pointer| if (pointer.size == .slice) {
+            for (value) |item| deinitValue(allocator, pointer.child, item);
+            allocator.free(value);
+        },
         .@"struct" => |info| inline for (info.fields) |field|
             deinitValue(allocator, field.type, @field(value, field.name)),
         else => {},

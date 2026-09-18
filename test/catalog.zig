@@ -250,3 +250,34 @@ test "drops PostgreSQL enums and domains" {
     try std.testing.expect(schema.databaseType("app.user_role") == null);
     try std.testing.expect(schema.databaseType("app.user_id") == null);
 }
+
+test "replays one-dimensional PostgreSQL array columns" {
+    var parsed = try parser.parse(
+        std.testing.allocator,
+        "CREATE TABLE app.posts (id BIGINT PRIMARY KEY, tags TEXT[] NOT NULL, ratings INTEGER[])",
+    );
+    defer parsed.deinit();
+    var schema = catalog.Catalog.init(std.testing.allocator);
+    defer schema.deinit();
+    try schema.applyParserTree(parsed.tree);
+    const posts = schema.table("app.posts").?;
+    try std.testing.expectEqualStrings("text", posts.columns.get("tags").?.database_type);
+    try std.testing.expectEqual(@as(u8, 1), posts.columns.get("tags").?.array_dimensions);
+    try std.testing.expect(!posts.columns.get("tags").?.nullable);
+    try std.testing.expectEqual(@as(u8, 1), posts.columns.get("ratings").?.array_dimensions);
+    try std.testing.expect(posts.columns.get("ratings").?.nullable);
+}
+
+test "rejects multidimensional PostgreSQL array columns" {
+    var parsed = try parser.parse(
+        std.testing.allocator,
+        "CREATE TABLE app.matrix (values INTEGER[][] NOT NULL)",
+    );
+    defer parsed.deinit();
+    var schema = catalog.Catalog.init(std.testing.allocator);
+    defer schema.deinit();
+    try std.testing.expectError(
+        error.UnsupportedArrayDimensions,
+        schema.applyParserTree(parsed.tree),
+    );
+}

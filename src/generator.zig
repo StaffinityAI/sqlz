@@ -382,10 +382,14 @@ fn writeType(
     if (value.codec) |id| {
         const binding = findBinding(codecs, id) orelse return error.UnknownCodec;
         if (value.nullable) try output.append(allocator, '?');
+        if (value.array_dimensions == 1) try output.appendSlice(allocator, "[]const ?");
         try output.print(allocator, "{s}.{s}", .{ binding.import_name, binding.declaration });
         return;
     }
     const spelling = analysis.zigTypeName(value.scalar_type) orelse return error.UnsupportedType;
     if (value.nullable) try output.append(allocator, '?');
+    if (value.array_dimensions == 1) {
+        try output.appendSlice(allocator, "[]const ?");
+    } else if (value.array_dimensions != 0) return error.UnsupportedType;
     try output.appendSlice(allocator, spelling);
 }

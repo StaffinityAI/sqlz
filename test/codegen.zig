@@ -100,6 +100,21 @@ test "generates PostgreSQL enum codecs and domain base types" {
     try std.testing.expect(std.mem.indexOf(u8, generated, "role: sqlz_codec_role.Role,") != null);
 }
 
+test "generates PostgreSQL array contracts" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try writeArrayProject(&tmp);
+    const generated = try codegen.generateProject(
+        std.testing.allocator,
+        std.testing.io,
+        tmp.dir,
+        "sqlz.ziggy",
+    );
+    defer std.testing.allocator.free(generated);
+    try std.testing.expect(std.mem.indexOf(u8, generated, "tags: []const ?[]const u8,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, generated, "ratings: ?[]const ?i64,") != null);
+}
+
 fn writeProject(tmp: *std.testing.TmpDir, mismatch: bool) !void {
     try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "sqlz.ziggy",
@@ -392,6 +407,59 @@ fn writeCustomTypeProject(tmp: *std.testing.TmpDir) !void {
         \\-- sqlz.column.role: role
         \\
         \\SELECT id, role FROM users WHERE role=:role
+        ,
+    });
+}
+
+fn writeArrayProject(tmp: *std.testing.TmpDir) !void {
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "sqlz.ziggy",
+        .data =
+        \\.format_version = 1,
+        \\.project_id = "550e8400-e29b-41d4-a716-446655440000",
+        \\.migrations = "migrations",
+        \\.sql_roots = .{ .app = "queries" },
+        \\.zig_roots = [],
+        \\.backends = .{ .postgres = .{ .profile = "15" } },
+        ,
+    });
+    var migration = try tmp.dir.createDirPathOpen(
+        std.testing.io,
+        "migrations/aaaaaaaaaaaa_create_posts",
+        .{},
+    );
+    defer migration.close(std.testing.io);
+    try migration.writeFile(std.testing.io, .{
+        .sub_path = "revision.ziggy",
+        .data =
+        \\.format_version = 1,
+        \\.revision = "aaaaaaaaaaaa",
+        \\.parents = [],
+        \\.description = "create posts",
+        \\.created_utc = "2026-09-18T12:00:00Z",
+        \\.backends = [.postgres],
+        \\.reversible = true,
+        \\.transaction = .{ .postgres = .always },
+        ,
+    });
+    try migration.writeFile(std.testing.io, .{
+        .sub_path = "postgres.up.sql",
+        .data = "CREATE TABLE posts (id BIGINT PRIMARY KEY, tags TEXT[] NOT NULL, ratings INTEGER[])",
+    });
+    try migration.writeFile(std.testing.io, .{
+        .sub_path = "postgres.down.sql",
+        .data = "DROP TABLE posts",
+    });
+    var queries = try tmp.dir.createDirPathOpen(std.testing.io, "queries", .{});
+    defer queries.close(std.testing.io);
+    try queries.writeFile(std.testing.io, .{
+        .sub_path = "list.sql",
+        .data =
+        \\-- sqlz.name: list_posts
+        \\-- sqlz.backends: postgres
+        \\-- sqlz.cardinality: many
+        \\
+        \\SELECT tags, ratings FROM posts
         ,
     });
 }

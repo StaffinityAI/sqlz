@@ -334,6 +334,126 @@ test "PostgreSQL domains use their base scalar and enums require a matching code
     ));
 }
 
+test "PostgreSQL arrays infer element types and nullability" {
+    var schema = catalog.Catalog.init(std.testing.allocator);
+    defer schema.deinit();
+    try checker.applyPostgresRevisionAtomic(
+        &schema,
+        std.testing.allocator,
+        "CREATE TABLE posts (id BIGINT PRIMARY KEY, tags TEXT[] NOT NULL, ratings INTEGER[])",
+        "",
+    );
+    var source = try query_files.parse(std.testing.allocator, "posts/by_tags.sql",
+        \\-- sqlz.name: posts_by_tags
+        \\-- sqlz.backends: postgres
+        \\-- sqlz.cardinality: many
+        \\
+        \\SELECT tags, ratings FROM posts WHERE tags=:tags
+    );
+    defer source.deinit();
+    var checked = try checker.checkNamedPostgres(std.testing.allocator, &schema, &source);
+    defer checked.deinit();
+    try std.testing.expectEqual(analysis.ScalarType.text, checked.analysis.parameters[0].scalar_type);
+    try std.testing.expectEqual(@as(u8, 1), checked.analysis.parameters[0].array_dimensions);
+    try std.testing.expect(!checked.analysis.parameters[0].nullable);
+    try std.testing.expect(checked.analysis.parameters[0].element_nullable);
+    try std.testing.expectEqual(@as(u8, 1), checked.analysis.columns[0].array_dimensions);
+    try std.testing.expect(!checked.analysis.columns[0].nullable);
+    try std.testing.expectEqual(analysis.ScalarType.integer, checked.analysis.columns[1].scalar_type);
+    try std.testing.expect(checked.analysis.columns[1].nullable);
+}
+
+test "PostgreSQL array codecs require an array type pattern" {
+    var schema = catalog.Catalog.init(std.testing.allocator);
+    defer schema.deinit();
+    try checker.applyPostgresRevisionAtomic(
+        &schema,
+        std.testing.allocator,
+        "CREATE TYPE app.user_role AS ENUM ('member', 'admin');" ++
+            "CREATE TABLE app.teams (roles app.user_role[] NOT NULL)",
+        "",
+    );
+    try schema.setPostgresSearchPath(&.{"app"});
+    var source = try query_files.parse(std.testing.allocator, "teams/roles.sql",
+        \\-- sqlz.name: team_roles
+        \\-- sqlz.backends: postgres
+        \\-- sqlz.cardinality: many
+        \\-- sqlz.column.roles: role
+        \\
+        \\SELECT roles FROM teams
+    );
+    defer source.deinit();
+    const scalar_patterns = [_][]const u8{"app.user_role"};
+    const scalar_codec = [_]checker.CodecInfo{.{
+        .id = "role",
+        .postgres_patterns = &scalar_patterns,
+    }};
+    try std.testing.expectError(error.IncompatibleCodec, checker.checkNamedPostgresWithCodecs(
+        std.testing.allocator,
+        &schema,
+        &source,
+        .{},
+        &scalar_codec,
+    ));
+    const array_patterns = [_][]const u8{"app.user_role[]"};
+    const array_codec = [_]checker.CodecInfo{.{
+        .id = "role",
+        .postgres_patterns = &array_patterns,
+    }};
+    var checked = try checker.checkNamedPostgresWithCodecs(
+        std.testing.allocator,
+        &schema,
+        &source,
+        .{},
+        &array_codec,
+    );
+    defer checked.deinit();
+    try std.testing.expectEqualStrings("role", checked.analysis.columns[0].codec.?);
+}
+
+test "embedded PostgreSQL array declarations require nullable elements" {
+    var schema = catalog.Catalog.init(std.testing.allocator);
+    defer schema.deinit();
+    try checker.applyPostgresRevisionAtomic(
+        &schema,
+        std.testing.allocator,
+        "CREATE TABLE posts (tags TEXT[] NOT NULL)",
+        "",
+    );
+    var valid = try zig_queries.parse(std.testing.allocator, "src/posts.zig",
+        \\const sqlz = @import("sqlz");
+        \\pub const list = sqlz.Query(.{
+        \\    .sql = "SELECT tags FROM posts",
+        \\    .backends = .{ .postgres = true },
+        \\    .cardinality = .many,
+        \\    .row = struct { tags: []const ?[]const u8 },
+        \\});
+    );
+    defer valid.deinit();
+    var checked = try checker.checkNamedPostgres(
+        std.testing.allocator,
+        &schema,
+        &valid.sources[0],
+    );
+    checked.deinit();
+
+    var invalid = try zig_queries.parse(std.testing.allocator, "src/posts.zig",
+        \\const sqlz = @import("sqlz");
+        \\pub const list = sqlz.Query(.{
+        \\    .sql = "SELECT tags FROM posts",
+        \\    .backends = .{ .postgres = true },
+        \\    .cardinality = .many,
+        \\    .row = struct { tags: []const []const u8 },
+        \\});
+    );
+    defer invalid.deinit();
+    try std.testing.expectError(error.DeclaredTypeMismatch, checker.checkNamedPostgres(
+        std.testing.allocator,
+        &schema,
+        &invalid.sources[0],
+    ));
+}
+
 test "discovery and replay apply common SQL before SQLite SQL" {
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();

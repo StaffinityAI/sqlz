@@ -200,7 +200,9 @@ fn verifyNullability(
 }
 
 fn verifyType(field: query_files.DeclaredField, value: analysis.ResultColumn) Error!void {
-    const declared_scalar = analysis.classifyZigType(field.type_text);
+    const array_element = if (value.array_dimensions == 1) arrayElementType(field.type_text) else null;
+    if (value.array_dimensions == 1 and array_element == null) return error.DeclaredTypeMismatch;
+    const declared_scalar = analysis.classifyZigType(array_element orelse field.type_text);
     if (value.codec != null) {
         // A codec maps the application's own type; a built-in spelling there
         // means the codec was pinned to the wrong field.
@@ -211,6 +213,12 @@ fn verifyType(field: query_files.DeclaredField, value: analysis.ResultColumn) Er
     if (value.scalar_type == .unknown) return error.UninferredDeclaredType;
     if (!analysis.scalarAccepts(declared_scalar.?, value.scalar_type))
         return error.DeclaredTypeMismatch;
+}
+
+fn arrayElementType(type_text: []const u8) ?[]const u8 {
+    const prefix = "[]const ?";
+    if (!std.mem.startsWith(u8, type_text, prefix) or type_text.len == prefix.len) return null;
+    return type_text[prefix.len..];
 }
 
 fn containsName(values: []const analysis.ResultColumn, name: []const u8) bool {
@@ -252,7 +260,7 @@ fn applyCodec(
     if (backend == .postgres and target.database_type != null and codec.postgres_patterns.len != 0) {
         var matched = false;
         for (codec.postgres_patterns) |pattern| {
-            if (std.ascii.eqlIgnoreCase(pattern, target.database_type.?)) {
+            if (postgresPatternMatches(pattern, target)) {
                 matched = true;
                 break;
             }
@@ -270,6 +278,13 @@ fn applyCodec(
         return;
     }
     target.codec = try storage.dupe(u8, codec.id);
+}
+
+fn postgresPatternMatches(pattern: []const u8, target: *const analysis.ResultColumn) bool {
+    const array = std.mem.endsWith(u8, pattern, "[]");
+    if (array != (target.array_dimensions == 1)) return false;
+    const base = if (array) pattern[0 .. pattern.len - 2] else pattern;
+    return std.ascii.eqlIgnoreCase(base, target.database_type.?);
 }
 
 fn findCodec(codecs: []const CodecInfo, id: []const u8) ?CodecInfo {

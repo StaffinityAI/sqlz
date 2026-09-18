@@ -5,6 +5,7 @@ const pg = parser.ast;
 pub const Column = struct {
     name: []const u8,
     database_type: []const u8,
+    array_dimensions: u8 = 0,
     nullable: bool,
     primary_key: bool,
     unique: bool,
@@ -74,6 +75,7 @@ pub const Error = error{
     DuplicateType,
     MissingType,
     DuplicateEnumValue,
+    UnsupportedArrayDimensions,
 } || std.mem.Allocator.Error;
 
 pub const Catalog = struct {
@@ -178,6 +180,7 @@ pub const Catalog = struct {
                 try table_copy.columns.putNoClobber(allocator, name, .{
                     .name = name,
                     .database_type = database_type,
+                    .array_dimensions = column.array_dimensions,
                     .nullable = column.nullable,
                     .primary_key = column.primary_key,
                     .unique = column.unique,
@@ -255,6 +258,7 @@ pub const Catalog = struct {
                 const right_column = right.columns.get(column_entry.key_ptr.*) orelse return false;
                 const left_column = column_entry.value_ptr;
                 if (!std.mem.eql(u8, left_column.database_type, right_column.database_type) or
+                    left_column.array_dimensions != right_column.array_dimensions or
                     left_column.nullable != right_column.nullable or
                     left_column.primary_key != right_column.primary_key or
                     left_column.unique != right_column.unique) return false;
@@ -728,6 +732,7 @@ fn addCopiedColumn(table: *Table, name_value: []const u8, source: *const Column,
     try table.columns.putNoClobber(table.allocator, name, .{
         .name = name,
         .database_type = database_type,
+        .array_dimensions = source.array_dimensions,
         .nullable = nullable,
         .primary_key = false,
         .unique = false,
@@ -757,8 +762,8 @@ fn addColumn(table: *Table, definition_ptr: [*c]pg.PgQuery__ColumnDef) Error!voi
     const definition = definition_ptr.*;
     const column_name = cString(definition.colname) orelse return error.InvalidAst;
     if (table.columns.contains(column_name)) return error.DuplicateColumn;
-    const database_type_value = try typeName(table.allocator, definition.type_name);
-    defer table.allocator.free(database_type_value);
+    const parsed_type = try parsedTypeName(table.allocator, definition.type_name);
+    defer table.allocator.free(parsed_type.name);
 
     var nullable = true;
     var primary_key = false;
@@ -777,11 +782,12 @@ fn addColumn(table: *Table, definition_ptr: [*c]pg.PgQuery__ColumnDef) Error!voi
 
     const name = try table.allocator.dupe(u8, column_name);
     errdefer table.allocator.free(name);
-    const database_type = try table.allocator.dupe(u8, database_type_value);
+    const database_type = try table.allocator.dupe(u8, parsed_type.name);
     errdefer table.allocator.free(database_type);
     try table.columns.putNoClobber(table.allocator, name, .{
         .name = name,
         .database_type = database_type,
+        .array_dimensions = parsed_type.array_dimensions,
         .nullable = nullable,
         .primary_key = primary_key,
         .unique = unique,
@@ -789,16 +795,34 @@ fn addColumn(table: *Table, definition_ptr: [*c]pg.PgQuery__ColumnDef) Error!voi
 }
 
 fn typeName(allocator: std.mem.Allocator, pointer: [*c]pg.PgQuery__TypeName) Error![]const u8 {
+    const parsed = try parsedTypeName(allocator, pointer);
+    if (parsed.array_dimensions != 0) {
+        allocator.free(parsed.name);
+        return error.UnsupportedArrayDimensions;
+    }
+    return parsed.name;
+}
+
+const ParsedTypeName = struct {
+    name: []const u8,
+    array_dimensions: u8,
+};
+
+fn parsedTypeName(allocator: std.mem.Allocator, pointer: [*c]pg.PgQuery__TypeName) Error!ParsedTypeName {
     if (pointer == null or pointer.*.n_names == 0) return error.InvalidAst;
-    if (pointer.*.n_array_bounds != 0) return error.UnsupportedStatement;
+    if (pointer.*.n_array_bounds > 1) return error.UnsupportedArrayDimensions;
+    const array_dimensions: u8 = @intCast(pointer.*.n_array_bounds);
     if (pointer.*.n_names == 2) {
         const schema = nodeString(pointer.*.names[0]) orelse return error.InvalidAst;
         if (std.mem.eql(u8, schema, "pg_catalog")) {
             const name = nodeString(pointer.*.names[1]) orelse return error.InvalidAst;
-            return allocator.dupe(u8, name);
+            return .{ .name = try allocator.dupe(u8, name), .array_dimensions = array_dimensions };
         }
     }
-    return qualifiedNodeName(allocator, pointer.*.names, pointer.*.n_names);
+    return .{
+        .name = try qualifiedNodeName(allocator, pointer.*.names, pointer.*.n_names),
+        .array_dimensions = array_dimensions,
+    };
 }
 
 fn qualifiedNodeName(

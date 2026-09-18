@@ -15,6 +15,8 @@ pub const ResultColumn = struct {
     name: []const u8,
     scalar_type: ScalarType,
     database_type: ?[]const u8 = null,
+    array_dimensions: u8 = 0,
+    element_nullable: bool = false,
     nullable: bool,
     /// Set when a `sqlz.param.<name>` / `sqlz.column.<name>` directive pinned
     /// this value to a registered codec; the generator then names the codec's
@@ -97,6 +99,8 @@ pub const Error = error{
 const ResolvedColumn = struct {
     scalar_type: ScalarType,
     database_type: ?[]const u8 = null,
+    array_dimensions: u8 = 0,
+    element_nullable: bool = false,
     nullable: bool,
 };
 
@@ -127,6 +131,8 @@ pub fn analyze(
                 const resolved = try resolvePhysicalColumn(schema, query.relation_bindings, reference);
                 result.scalar_type = resolved.scalar_type;
                 result.database_type = if (resolved.database_type) |value| try storage.dupe(u8, value) else null;
+                result.array_dimensions = resolved.array_dimensions;
+                result.element_nullable = resolved.element_nullable;
                 result.nullable = resolved.nullable;
             } else if (projection.hint) |hint| {
                 result.scalar_type = fromHint(hint.scalar_type);
@@ -166,6 +172,8 @@ pub fn analyze(
                     try storage.dupe(u8, database_type)
                 else
                     null;
+                result.array_dimensions = value.array_dimensions;
+                result.element_nullable = value.element_nullable;
                 result.nullable = value.nullable;
             }
         } else {
@@ -178,6 +186,8 @@ pub fn analyze(
             );
             result.scalar_type = resolved.scalar_type;
             result.database_type = if (resolved.database_type) |value| try storage.dupe(u8, value) else null;
+            result.array_dimensions = resolved.array_dimensions;
+            result.element_nullable = resolved.element_nullable;
             result.nullable = resolved.nullable;
         }
     }
@@ -202,6 +212,8 @@ pub fn analyze(
                 try storage.dupe(u8, database_type)
             else
                 null;
+            result.array_dimensions = value.array_dimensions;
+            result.element_nullable = value.element_nullable;
             result.nullable = value.nullable;
         }
     }
@@ -244,9 +256,13 @@ fn mergeResolved(
         prior.database_type
     else
         return conflict;
+    if (prior.array_dimensions != next.array_dimensions or
+        prior.element_nullable != next.element_nullable) return conflict;
     return .{
         .scalar_type = scalar_type,
         .database_type = database_type,
+        .array_dimensions = prior.array_dimensions,
+        .element_nullable = prior.element_nullable,
         .nullable = prior.nullable or next.nullable,
     };
 }
@@ -267,12 +283,15 @@ fn resolvePhysicalColumn(
         if (found) |prior| {
             if (prior.scalar_type != scalarTypeInCatalog(schema, column.database_type) or
                 (prior.database_type != null and !std.mem.eql(u8, prior.database_type.?, column.database_type)) or
+                prior.array_dimensions != column.array_dimensions or
                 prior.nullable != column.nullable)
                 return error.AmbiguousColumn;
         } else {
             found = .{
                 .scalar_type = scalarTypeInCatalog(schema, column.database_type),
                 .database_type = column.database_type,
+                .array_dimensions = column.array_dimensions,
+                .element_nullable = column.array_dimensions != 0,
                 .nullable = column.nullable,
             };
         }
@@ -301,6 +320,8 @@ fn resolveColumn(
             break :blk .{
                 .scalar_type = scalarTypeInCatalog(schema, column.database_type),
                 .database_type = column.database_type,
+                .array_dimensions = column.array_dimensions,
+                .element_nullable = column.array_dimensions != 0,
                 .nullable = column.nullable or binding.nullable,
             };
         } else if (findCte(ctes, binding.name)) |cte| blk: {

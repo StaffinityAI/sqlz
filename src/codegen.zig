@@ -300,6 +300,8 @@ fn valuesEqual(left: []const analysis.ResultColumn, right: []const analysis.Resu
     if (left.len != right.len) return false;
     for (left, right) |lhs, rhs| {
         if (!std.mem.eql(u8, lhs.name, rhs.name) or lhs.nullable != rhs.nullable) return false;
+        if (lhs.array_dimensions != rhs.array_dimensions or
+            lhs.element_nullable != rhs.element_nullable) return false;
         if ((lhs.codec == null) != (rhs.codec == null)) return false;
         if (lhs.codec) |codec| {
             if (!std.mem.eql(u8, codec, rhs.codec.?)) return false;
