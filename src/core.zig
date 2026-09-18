@@ -55,68 +55,96 @@ pub fn Query(comptime options: anytype) type {
     if (!sqlite and !postgres) @compileError("sqlz.Query requires at least one backend");
 
     const Params = if (@hasField(Options, "params")) options.params else struct {};
+    const parameter_names = if (@hasField(Options, "parameter_names")) options.parameter_names else .{};
     const cardinality: Cardinality = options.cardinality;
     return switch (cardinality) {
-        .exec => ExecQuery(options.sql, Params),
+        .exec => ExecQuery(options.sql, Params, parameter_names),
         .one => blk: {
             if (!@hasField(Options, "row")) @compileError("row-returning queries require .row");
-            break :blk OneQuery(options.sql, Params, options.row);
+            break :blk OneQuery(options.sql, Params, options.row, parameter_names);
         },
         .optional => blk: {
             if (!@hasField(Options, "row")) @compileError("row-returning queries require .row");
-            break :blk OptionalQuery(options.sql, Params, options.row);
+            break :blk OptionalQuery(options.sql, Params, options.row, parameter_names);
         },
         .many => blk: {
             if (!@hasField(Options, "row")) @compileError("row-returning queries require .row");
-            break :blk ManyQuery(options.sql, Params, options.row);
+            break :blk ManyQuery(options.sql, Params, options.row, parameter_names);
         },
     };
 }
 
-fn ExecQuery(comptime sql: []const u8, comptime Params: type) type {
+fn ExecQuery(comptime sql_text: anytype, comptime Params: type, comptime names: anytype) type {
     return struct {
         pub const params = Params;
         pub const cardinality: Cardinality = .exec;
+        pub const sql = sql_text;
+        pub const parameter_names = names;
 
-        pub fn execute(executor: anytype, args: Params) @TypeOf(executor.execute(sql, args)) {
-            return executor.execute(sql, args);
+        pub fn execute(executor: anytype, args: Params) @TypeOf(executor.execute(selectedSql(sql_text, @TypeOf(executor)), args)) {
+            return executor.execute(selectedSql(sql_text, @TypeOf(executor)), args);
         }
     };
 }
 
-fn OneQuery(comptime sql: []const u8, comptime Params: type, comptime Row: type) type {
+fn OneQuery(comptime sql_text: anytype, comptime Params: type, comptime Row: type, comptime names: anytype) type {
     return struct {
         pub const params = Params;
         pub const row_type = Row;
         pub const cardinality: Cardinality = .one;
+        pub const sql = sql_text;
+        pub const parameter_names = names;
 
-        pub fn fetchOne(executor: anytype, args: Params) @TypeOf(executor.fetchOne(Row, sql, args)) {
-            return executor.fetchOne(Row, sql, args);
+        pub fn fetchOne(executor: anytype, args: Params) @TypeOf(executor.fetchOne(Row, selectedSql(sql_text, @TypeOf(executor)), args)) {
+            return executor.fetchOne(Row, selectedSql(sql_text, @TypeOf(executor)), args);
         }
     };
 }
 
-fn OptionalQuery(comptime sql: []const u8, comptime Params: type, comptime Row: type) type {
+fn OptionalQuery(comptime sql_text: anytype, comptime Params: type, comptime Row: type, comptime names: anytype) type {
     return struct {
         pub const params = Params;
         pub const row_type = Row;
         pub const cardinality: Cardinality = .optional;
+        pub const sql = sql_text;
+        pub const parameter_names = names;
 
-        pub fn fetchOptional(executor: anytype, args: Params) @TypeOf(executor.fetchOptional(Row, sql, args)) {
-            return executor.fetchOptional(Row, sql, args);
+        pub fn fetchOptional(executor: anytype, args: Params) @TypeOf(executor.fetchOptional(Row, selectedSql(sql_text, @TypeOf(executor)), args)) {
+            return executor.fetchOptional(Row, selectedSql(sql_text, @TypeOf(executor)), args);
         }
     };
 }
 
-fn ManyQuery(comptime sql: []const u8, comptime Params: type, comptime Row: type) type {
+fn ManyQuery(comptime sql_text: anytype, comptime Params: type, comptime Row: type, comptime names: anytype) type {
     return struct {
         pub const params = Params;
         pub const row_type = Row;
         pub const cardinality: Cardinality = .many;
+        pub const sql = sql_text;
+        pub const parameter_names = names;
 
-        pub fn fetch(executor: anytype, args: Params) @TypeOf(executor.fetch(Row, sql, args)) {
-            return executor.fetch(Row, sql, args);
+        pub fn fetch(executor: anytype, args: Params) @TypeOf(executor.fetch(Row, selectedSql(sql_text, @TypeOf(executor)), args)) {
+            return executor.fetch(Row, selectedSql(sql_text, @TypeOf(executor)), args);
         }
+    };
+}
+
+fn selectedSql(comptime sql: anytype, comptime Executor: type) []const u8 {
+    if (@TypeOf(sql) == []const u8) return sql;
+    switch (@typeInfo(@TypeOf(sql))) {
+        .pointer => |pointer| if (pointer.size == .one and @typeInfo(pointer.child) == .array and
+            @typeInfo(pointer.child).array.child == u8) return sql,
+        else => {},
+    }
+    const T = switch (@typeInfo(Executor)) {
+        .pointer => |pointer| pointer.child,
+        else => Executor,
+    };
+    if (!@hasDecl(T, "backend"))
+        @compileError("sqlz executor must declare pub const backend");
+    return switch (T.backend) {
+        .sqlite => if (@hasField(@TypeOf(sql), "sqlite")) sql.sqlite else @compileError("query has no SQLite SQL variant"),
+        .postgres => if (@hasField(@TypeOf(sql), "postgres")) sql.postgres else @compileError("query has no PostgreSQL SQL variant"),
     };
 }
 

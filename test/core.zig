@@ -12,6 +12,39 @@ test "PostgreSQL query declarations are backend-neutral until execution" {
     try std.testing.expectEqual(sqlz.Cardinality.optional, query.cardinality);
 }
 
+test "query variants select SQL from the executor backend" {
+    const query = sqlz.Query(.{
+        .sql = .{
+            .sqlite = "SELECT ?1 AS id",
+            .postgres = "SELECT $1 AS id",
+        },
+        .backends = .{ .sqlite = true, .postgres = true },
+        .cardinality = .optional,
+        .parameter_names = .{"id"},
+        .params = struct { id: i64 },
+        .row = struct { id: i64 },
+    });
+    const SqliteExecutor = struct {
+        pub const backend: sqlz.Backend = .sqlite;
+        pub fn fetchOptional(_: *@This(), comptime Row: type, sql: []const u8, _: anytype) []const u8 {
+            _ = Row;
+            return sql;
+        }
+    };
+    const PostgresExecutor = struct {
+        pub const backend: sqlz.Backend = .postgres;
+        pub fn fetchOptional(_: *@This(), comptime Row: type, sql: []const u8, _: anytype) []const u8 {
+            _ = Row;
+            return sql;
+        }
+    };
+    var sqlite: SqliteExecutor = .{};
+    var postgres: PostgresExecutor = .{};
+    try std.testing.expectEqualStrings("SELECT ?1 AS id", query.fetchOptional(&sqlite, .{ .id = 1 }));
+    try std.testing.expectEqualStrings("SELECT $1 AS id", query.fetchOptional(&postgres, .{ .id = 1 }));
+    try std.testing.expectEqualStrings("id", query.parameter_names[0]);
+}
+
 test "Query exposes the cardinality-selected method" {
     const insert_user = sqlz.Query(.{
         .sql = "INSERT INTO users(name) VALUES (:name)",

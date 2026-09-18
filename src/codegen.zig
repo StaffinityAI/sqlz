@@ -154,6 +154,8 @@ pub fn generateProjectWithCodecs(
                 postgres_dialect,
                 codec_infos,
                 null,
+                null,
+                null,
             );
         }
     }
@@ -183,6 +185,8 @@ pub fn generateProjectWithCodecs(
         const inputs = try allocator.alloc(generator.CheckedInput, discovery.sources.len);
         errdefer allocator.free(inputs);
         for (discovery.sources) |*source| {
+            var sqlite_sql: ?[]const u8 = null;
+            var postgres_sql: ?[]const u8 = null;
             try checkSource(
                 allocator,
                 sqlite_schema,
@@ -192,9 +196,22 @@ pub fn generateProjectWithCodecs(
                 postgres_dialect,
                 codec_infos,
                 &checked[checked_count],
+                &sqlite_sql,
+                &postgres_sql,
             );
-            inputs[checked_count] = .{ .source = source, .checked = &checked[checked_count] };
+            inputs[checked_count] = .{
+                .source = source,
+                .checked = &checked[checked_count],
+                .sqlite_sql = sqlite_sql,
+                .postgres_sql = postgres_sql,
+            };
             checked_count += 1;
+            for (inputs[0 .. checked_count - 1]) |prior| {
+                if (!sameLogicalQuery(prior.source, source)) continue;
+                if (prior.source.cardinality != source.cardinality or
+                    !contractsEqual(prior.checked, &checked[checked_count - 1]))
+                    return error.IncompatibleBackendContract;
+            }
         }
         states[initialized] = .{
             .discovery = discovery,
@@ -207,6 +224,13 @@ pub fn generateProjectWithCodecs(
     return generator.generateProjectModuleWithCodecs(allocator, roots, generator_codecs);
 }
 
+fn sameLogicalQuery(left: *const query_files.Source, right: *const query_files.Source) bool {
+    if (!std.mem.eql(u8, left.name, right.name)) return false;
+    const left_parent = std.fs.path.dirname(left.path) orelse "";
+    const right_parent = std.fs.path.dirname(right.path) orelse "";
+    return std.mem.eql(u8, left_parent, right_parent);
+}
+
 fn checkSource(
     allocator: std.mem.Allocator,
     sqlite_schema: ?catalog.Catalog,
@@ -216,6 +240,8 @@ fn checkSource(
     postgres_dialect: checker.PostgresDialect,
     codecs: []const checker.CodecInfo,
     output: ?*checker.CheckedQuery,
+    output_sqlite_sql: ?*?[]const u8,
+    output_postgres_sql: ?*?[]const u8,
 ) !void {
     var sqlite_checked: ?checker.CheckedQuery = null;
     defer if (sqlite_checked) |*checked| checked.deinit();
@@ -251,9 +277,16 @@ fn checkSource(
     if (sqlite_checked) |checked| {
         destination.* = checked;
         sqlite_checked = null;
+        if (output_sqlite_sql) |slot|
+            slot.* = try destination.analysis.arena.allocator().dupe(u8, source.sql);
+        if (postgres_checked) |*postgres| {
+            if (output_postgres_sql) |slot|
+                slot.* = try destination.analysis.arena.allocator().dupe(u8, postgres.parsed.rewritten.sql);
+        }
     } else if (postgres_checked) |checked| {
         destination.* = checked;
         postgres_checked = null;
+        if (output_postgres_sql) |slot| slot.* = destination.parsed.rewritten.sql;
     } else unreachable;
 }
 

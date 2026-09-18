@@ -44,6 +44,8 @@ this slice.
 | Generator | Deterministic root/path namespace assembly | Complete |
 | Generator | Build-cache module integration | Complete |
 | Generator | PostgreSQL-only and portable shared-text query generation with contract comparison | Complete |
+| Generator | Disjoint SQLite/PostgreSQL query variants with static executor dispatch | Complete |
+| Generator | Backend SQL and ordered parameter-name metadata | Complete |
 | Runtime | Native enums at the parameter and row boundary | Complete |
 | Runtime | Connection-scoped owned rows and streaming owned conversion | Complete |
 | Runtime | Typed connection options and the native pool wrapper | Complete |
@@ -53,7 +55,7 @@ this slice.
 | Acceptance | Example runs all four cardinalities through generated and embedded queries (M3 gate) | Complete |
 | Hardening | Complete diagnostics, resource limits, and dependency matrix | Not started |
 | Deferred | PostgreSQL runtime backend | Deferred |
-| Deferred | PostgreSQL arrays, enums/domains, catalog signatures, dialect variants, and runtime execution | Deferred |
+| Deferred | PostgreSQL arrays, enums/domains, catalog signatures, and runtime execution | Deferred |
 | Deferred | Migration execution and full CLI | Deferred |
 
 ## Tracked divergences
@@ -77,6 +79,6 @@ an undocumented rule, per [README.md](README.md).
 
 ## Current next steps
 
-1. Add PostgreSQL dialect-variant grouping and backend SQL metadata.
-2. Add PostgreSQL arrays, enums/domains, and catalog signatures.
+1. Add PostgreSQL arrays, enums/domains, and catalog signatures.
+2. Implement the `pg.zig` runtime adapter against the generated backend SQL metadata.
 3. Harden diagnostics, source limits, and the supported dependency matrix.

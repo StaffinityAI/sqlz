@@ -52,6 +52,35 @@ test "portable codecs may bridge different backend scalar types" {
     try std.testing.expect(std.mem.indexOf(u8, generated, "sqlz_codec_user_id.UserId") != null);
 }
 
+test "groups disjoint backend query variants" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try writeVariantProject(&tmp, false);
+
+    const generated = try codegen.generateProject(
+        std.testing.allocator,
+        std.testing.io,
+        tmp.dir,
+        "sqlz.ziggy",
+    );
+    defer std.testing.allocator.free(generated);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, generated, "pub const search_users = sqlz.Query"));
+    try std.testing.expect(std.mem.indexOf(u8, generated, "name LIKE :pattern") != null);
+    try std.testing.expect(std.mem.indexOf(u8, generated, "name ILIKE $1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, generated, ".parameter_names = .{ \"pattern\",") != null);
+}
+
+test "rejects backend variants with incompatible contracts" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try writeVariantProject(&tmp, true);
+
+    try std.testing.expectError(
+        error.IncompatibleBackendContract,
+        codegen.generateProject(std.testing.allocator, std.testing.io, tmp.dir, "sqlz.ziggy"),
+    );
+}
+
 fn writeProject(tmp: *std.testing.TmpDir, mismatch: bool) !void {
     try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "sqlz.ziggy",
@@ -214,6 +243,78 @@ fn writeCodecProject(tmp: *std.testing.TmpDir) !void {
         \\-- sqlz.column.id: user_id
         \\
         \\SELECT id FROM users WHERE id=:id
+        ,
+    });
+}
+
+fn writeVariantProject(tmp: *std.testing.TmpDir, mismatch: bool) !void {
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "sqlz.ziggy",
+        .data =
+        \\.format_version = 1,
+        \\.project_id = "550e8400-e29b-41d4-a716-446655440000",
+        \\.migrations = "migrations",
+        \\.sql_roots = .{ .app = "queries" },
+        \\.zig_roots = [],
+        \\.backends = .{
+        \\    .sqlite = .{ .profile = "3.53" },
+        \\    .postgres = .{ .profile = "15" },
+        \\},
+        ,
+    });
+    var migration = try tmp.dir.createDirPathOpen(
+        std.testing.io,
+        "migrations/aaaaaaaaaaaa_create_users",
+        .{},
+    );
+    defer migration.close(std.testing.io);
+    try migration.writeFile(std.testing.io, .{
+        .sub_path = "revision.ziggy",
+        .data =
+        \\.format_version = 1,
+        \\.revision = "aaaaaaaaaaaa",
+        \\.parents = [],
+        \\.description = "create users",
+        \\.created_utc = "2026-09-18T12:00:00Z",
+        \\.backends = [.sqlite, .postgres],
+        \\.reversible = true,
+        \\.transaction = .{ .sqlite = .always, .postgres = .always },
+        ,
+    });
+    try migration.writeFile(std.testing.io, .{
+        .sub_path = "common.up.sql",
+        .data = "CREATE TABLE users (id BIGINT PRIMARY KEY, name TEXT NOT NULL)",
+    });
+    try migration.writeFile(std.testing.io, .{
+        .sub_path = "common.down.sql",
+        .data = "DROP TABLE users",
+    });
+    var queries = try tmp.dir.createDirPathOpen(std.testing.io, "queries/users", .{});
+    defer queries.close(std.testing.io);
+    try queries.writeFile(std.testing.io, .{
+        .sub_path = "search.sqlite.sql",
+        .data =
+        \\-- sqlz.name: search_users
+        \\-- sqlz.backends: sqlite
+        \\-- sqlz.cardinality: many
+        \\
+        \\SELECT id FROM users WHERE name LIKE :pattern
+        ,
+    });
+    try queries.writeFile(std.testing.io, .{
+        .sub_path = "search.postgres.sql",
+        .data = if (mismatch)
+            \\-- sqlz.name: search_users
+            \\-- sqlz.backends: postgres
+            \\-- sqlz.cardinality: optional
+            \\
+            \\SELECT id FROM users WHERE name ILIKE :pattern
+        else
+            \\-- sqlz.name: search_users
+            \\-- sqlz.backends: postgres
+            \\-- sqlz.cardinality: many
+            \\
+            \\SELECT id FROM users WHERE name ILIKE :pattern
         ,
     });
 }

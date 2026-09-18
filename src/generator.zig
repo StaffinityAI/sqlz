@@ -22,6 +22,8 @@ pub const CodecBinding = struct {
 pub const CheckedInput = struct {
     source: *const query_files.Source,
     checked: *const checker.CheckedQuery,
+    sqlite_sql: ?[]const u8 = null,
+    postgres_sql: ?[]const u8 = null,
 };
 
 pub const RootInput = struct {
@@ -40,7 +42,7 @@ pub fn generateQuery(
         \\const sqlz = @import("sqlz");
         \\
     );
-    try writeQuery(&output, allocator, source, checked, 0, &.{});
+    try writeQuery(&output, allocator, source, checked, 0, &.{}, null, null);
     return output.toOwnedSlice(allocator);
 }
 
@@ -126,7 +128,11 @@ fn writeRoot(
 
     try output.print(allocator, "pub const {s} = struct {{\n", .{root_alias});
     var previous: []const []const u8 = &.{};
-    for (entries) |entry| {
+    var entry_index: usize = 0;
+    while (entry_index < entries.len) {
+        const entry = entries[entry_index];
+        var group_end = entry_index + 1;
+        while (group_end < entries.len and sameQuery(entry, entries[group_end])) : (group_end += 1) {}
         const common = commonPrefix(previous, entry.directories);
         var close_index = previous.len;
         while (close_index > common) {
@@ -138,8 +144,9 @@ fn writeRoot(
             try writeIndent(output, allocator, depth + 1);
             try output.print(allocator, "pub const {s} = struct {{\n", .{directory});
         }
-        try writeQuery(output, allocator, entry.input.source, entry.input.checked, entry.directories.len + 1, codecs);
+        try writeQueryGroup(output, allocator, entries[entry_index..group_end], entry.directories.len + 1, codecs);
         previous = entry.directories;
+        entry_index = group_end;
     }
     var close_index = previous.len;
     while (close_index > 0) {
@@ -155,11 +162,60 @@ const Entry = struct {
     directories: []const []const u8,
 
     fn lessThan(_: void, lhs: Entry, rhs: Entry) bool {
-        const path_order = std.mem.order(u8, lhs.input.source.path, rhs.input.source.path);
-        if (path_order != .eq) return path_order == .lt;
-        return std.mem.lessThan(u8, lhs.input.source.name, rhs.input.source.name);
+        const directory_order = compareDirectories(lhs.directories, rhs.directories);
+        if (directory_order != .eq) return directory_order == .lt;
+        const name_order = std.mem.order(u8, lhs.input.source.name, rhs.input.source.name);
+        if (name_order != .eq) return name_order == .lt;
+        return std.mem.lessThan(u8, lhs.input.source.path, rhs.input.source.path);
     }
 };
+
+fn compareDirectories(lhs: []const []const u8, rhs: []const []const u8) std.math.Order {
+    const count = @min(lhs.len, rhs.len);
+    for (0..count) |index| {
+        const order = std.mem.order(u8, lhs[index], rhs[index]);
+        if (order != .eq) return order;
+    }
+    return std.math.order(lhs.len, rhs.len);
+}
+
+fn sameQuery(lhs: Entry, rhs: Entry) bool {
+    return compareDirectories(lhs.directories, rhs.directories) == .eq and
+        std.mem.eql(u8, lhs.input.source.name, rhs.input.source.name);
+}
+
+fn writeQueryGroup(
+    output: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    entries: []const Entry,
+    indent: usize,
+    codecs: []const CodecBinding,
+) Error!void {
+    const representative = entries[0].input;
+    var sqlite_sql: ?[]const u8 = null;
+    var postgres_sql: ?[]const u8 = null;
+    for (entries) |entry| {
+        const input = entry.input;
+        if (entrySql(.sqlite, input.source, input.checked, input.sqlite_sql, input.postgres_sql)) |sql| {
+            if (sqlite_sql != null) return error.NamespaceCollision;
+            sqlite_sql = sql;
+        }
+        if (entrySql(.postgres, input.source, input.checked, input.sqlite_sql, input.postgres_sql)) |sql| {
+            if (postgres_sql != null) return error.NamespaceCollision;
+            postgres_sql = sql;
+        }
+    }
+    try writeQuery(
+        output,
+        allocator,
+        representative.source,
+        representative.checked,
+        indent,
+        codecs,
+        sqlite_sql,
+        postgres_sql,
+    );
+}
 
 fn writeQuery(
     output: *std.ArrayList(u8),
@@ -168,20 +224,29 @@ fn writeQuery(
     checked: *const checker.CheckedQuery,
     indent: usize,
     codecs: []const CodecBinding,
+    sqlite_override: ?[]const u8,
+    postgres_override: ?[]const u8,
 ) Error!void {
     try writeIndent(output, allocator, indent);
     try output.print(allocator, "// Generated from {s}; do not edit.\n", .{source.path});
     try writeIndent(output, allocator, indent);
     try output.print(allocator, "pub const {s} = sqlz.Query(.{{\n", .{source.name});
     try writeIndent(output, allocator, indent + 1);
-    try output.print(allocator, ".sql = \"{f}\",\n", .{std.zig.fmtString(source.sql)});
+    const sqlite_sql = entrySql(.sqlite, source, checked, sqlite_override, postgres_override);
+    const postgres_sql = entrySql(.postgres, source, checked, sqlite_override, postgres_override);
+    try writeSql(output, allocator, indent + 1, sqlite_sql, postgres_sql);
     try writeIndent(output, allocator, indent + 1);
     try output.appendSlice(allocator, ".backends = .{");
-    if (source.backends.sqlite) try output.appendSlice(allocator, " .sqlite = true,");
-    if (source.backends.postgres) try output.appendSlice(allocator, " .postgres = true,");
+    if (sqlite_sql != null) try output.appendSlice(allocator, " .sqlite = true,");
+    if (postgres_sql != null) try output.appendSlice(allocator, " .postgres = true,");
     try output.appendSlice(allocator, " },\n");
     try writeIndent(output, allocator, indent + 1);
     try output.print(allocator, ".cardinality = .{s},\n", .{@tagName(source.cardinality)});
+    try writeIndent(output, allocator, indent + 1);
+    try output.appendSlice(allocator, ".parameter_names = .{");
+    for (checked.analysis.parameters) |parameter|
+        try output.print(allocator, " \"{f}\",", .{std.zig.fmtString(parameter.name)});
+    try output.appendSlice(allocator, " },\n");
     try writeIndent(output, allocator, indent + 1);
     try output.appendSlice(allocator, ".params = struct {\n");
     for (checked.analysis.parameters) |parameter| {
@@ -208,6 +273,49 @@ fn writeQuery(
     try output.appendSlice(allocator, "});\n");
 }
 
+const Backend = enum { sqlite, postgres };
+
+fn entrySql(
+    backend: Backend,
+    source: *const query_files.Source,
+    checked: *const checker.CheckedQuery,
+    sqlite_sql: ?[]const u8,
+    postgres_sql: ?[]const u8,
+) ?[]const u8 {
+    return switch (backend) {
+        .sqlite => sqlite_sql orelse if (source.backends.sqlite) checked.parsed.rewritten.sql else null,
+        .postgres => postgres_sql orelse if (source.backends.postgres) checked.parsed.rewritten.sql else null,
+    };
+}
+
+fn writeSql(
+    output: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    indent: usize,
+    sqlite_sql: ?[]const u8,
+    postgres_sql: ?[]const u8,
+) !void {
+    if (sqlite_sql != null and postgres_sql != null and
+        std.mem.eql(u8, sqlite_sql.?, postgres_sql.?))
+    {
+        try writeIndent(output, allocator, indent);
+        try output.print(allocator, ".sql = \"{f}\",\n", .{std.zig.fmtString(sqlite_sql.?)});
+        return;
+    }
+    try writeIndent(output, allocator, indent);
+    try output.appendSlice(allocator, ".sql = .{\n");
+    if (sqlite_sql) |sql| {
+        try writeIndent(output, allocator, indent + 1);
+        try output.print(allocator, ".sqlite = \"{f}\",\n", .{std.zig.fmtString(sql)});
+    }
+    if (postgres_sql) |sql| {
+        try writeIndent(output, allocator, indent + 1);
+        try output.print(allocator, ".postgres = \"{f}\",\n", .{std.zig.fmtString(sql)});
+    }
+    try writeIndent(output, allocator, indent);
+    try output.appendSlice(allocator, "},\n");
+}
+
 fn directories(allocator: std.mem.Allocator, path: []const u8) Error![]const []const u8 {
     const parent = std.fs.path.dirname(path) orelse return allocator.alloc([]const u8, 0);
     var result: std.ArrayList([]const u8) = .empty;
@@ -227,7 +335,13 @@ fn validateNamespaces(entries: []const Entry) Error!void {
             const common = commonPrefix(entry.directories, other.directories);
             if (common == entry.directories.len and common == other.directories.len and
                 std.mem.eql(u8, entry.input.source.name, other.input.source.name))
-                return error.NamespaceCollision;
+            {
+                const left = entry.input.source.backends;
+                const right = other.input.source.backends;
+                if ((left.sqlite and right.sqlite) or (left.postgres and right.postgres))
+                    return error.NamespaceCollision;
+                continue;
+            }
             if (common == entry.directories.len and other.directories.len > common and
                 std.mem.eql(u8, entry.input.source.name, other.directories[common]))
                 return error.NamespaceCollision;

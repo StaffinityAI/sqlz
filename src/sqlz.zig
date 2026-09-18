@@ -32,6 +32,8 @@ pub const blob = zqlite.blob;
 
 pub const sqlite = struct {
     pub const Conn = struct {
+        pub const backend: Backend = .sqlite;
+
         allocator: std.mem.Allocator,
         /// Retained from initialization so every handle derived from this
         /// connection reaches the same `std.Io` implementation the caller
@@ -300,6 +302,8 @@ pub const sqlite = struct {
     /// Wraps zqlite's native pool: sqlz adds no pool of its own, it only hands
     /// back sqlz connections with pooled release semantics.
     pub const Pool = struct {
+        pub const backend: Backend = .sqlite;
+
         allocator: std.mem.Allocator,
         /// Retained for the same reason a connection retains it: every handle
         /// derived from this pool reaches the caller's runtime.
@@ -629,6 +633,8 @@ pub const sqlite = struct {
     }
 
     pub const Transaction = struct {
+        pub const backend: Backend = .sqlite;
+
         connection: *Conn,
         active: bool = true,
 
