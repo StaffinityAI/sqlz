@@ -191,3 +191,19 @@ test "dropping a table removes its indexes" {
     try std.testing.expect(schema.table("users") == null);
     try std.testing.expect(schema.indexes.get("users_id_key") == null);
 }
+
+test "catalog retains PostgreSQL schema-qualified table identity" {
+    var parsed = try parser.parse(
+        std.testing.allocator,
+        "CREATE TABLE app.users (id BIGINT PRIMARY KEY)",
+    );
+    defer parsed.deinit();
+
+    var schema = catalog.Catalog.init(std.testing.allocator);
+    defer schema.deinit();
+    try schema.applyParserTree(parsed.tree);
+    try std.testing.expect(schema.table("app.users") != null);
+    try std.testing.expect(schema.table("users") == null);
+    try schema.setPostgresSearchPath(&.{"app"});
+    try std.testing.expect(schema.table("users") != null);
+}

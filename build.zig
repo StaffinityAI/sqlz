@@ -158,6 +158,7 @@ pub fn build(b: *std.Build) !void {
             .{ .name = "sqlz_checker", .module = checker_mod },
             .{ .name = "sqlz_analysis", .module = analysis_mod },
             .{ .name = "sqlz_generator", .module = generator_mod },
+            .{ .name = "sqlz_catalog", .module = catalog_mod },
         },
     });
     const codegen_exe = b.addExecutable(.{
@@ -289,6 +290,20 @@ pub fn build(b: *std.Build) !void {
     test_step.dependOn(&run_checker.step);
     const checker_step = b.step("test-checker", "Run offline checker pipeline tests");
     checker_step.dependOn(&run_checker.step);
+
+    const codegen_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/codegen.zig"),
+            .target = host_target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "sqlz_codegen", .module = codegen_mod }},
+        }),
+    });
+    const run_codegen_tests = b.addRunArtifact(codegen_tests);
+    test_step.dependOn(&run_codegen_tests.step);
+    const codegen_step = b.step("test-codegen", "Run complete host codegen tests");
+    codegen_step.dependOn(&run_codegen_tests.step);
 
     const ir_tests = b.addTest(.{
         .root_module = b.createModule(.{

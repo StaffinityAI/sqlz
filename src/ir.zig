@@ -2,7 +2,12 @@ const std = @import("std");
 const pg = @import("libpg_query");
 
 pub const StatementKind = enum { select, insert, update, delete };
-pub const Relation = struct { name: []const u8, alias: ?[]const u8, nullable: bool };
+pub const Relation = struct {
+    name: []const u8,
+    qualifier_name: []const u8,
+    alias: ?[]const u8,
+    nullable: bool,
+};
 pub const ColumnReference = struct { qualifier: ?[]const u8, name: []const u8 };
 pub const TypeHint = enum { integer, real, text, blob, boolean };
 pub const ExpressionHint = struct { scalar_type: TypeHint, nullable: bool };
@@ -64,19 +69,26 @@ const Context = struct {
     fn addRange(self: *Context, range_ptr: [*c]pg.PgQuery__RangeVar, nullable: bool, top: bool) Error!void {
         if (range_ptr == null) return error.InvalidAst;
         const name = cString(range_ptr.*.relname) orelse return error.InvalidAst;
-        if (!contains(self.relations.items, name))
-            try self.relations.append(self.allocator, try self.allocator.dupe(u8, name));
+        const schema = nonEmptyCString(range_ptr.*.schemaname);
+        const catalog_name = if (schema) |value|
+            try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ value, name })
+        else
+            try self.allocator.dupe(u8, name);
+        if (!contains(self.relations.items, catalog_name))
+            try self.relations.append(self.allocator, try self.allocator.dupe(u8, catalog_name));
         const alias = if (range_ptr.*.alias != null)
             try self.allocator.dupe(u8, cString(range_ptr.*.alias.*.aliasname) orelse return error.InvalidAst)
         else
             null;
         try self.bindings.append(self.allocator, .{
-            .name = try self.allocator.dupe(u8, name),
+            .name = catalog_name,
+            .qualifier_name = try self.allocator.dupe(u8, name),
             .alias = alias,
             .nullable = nullable,
         });
         if (top) try self.top_bindings.append(self.allocator, .{
-            .name = try self.allocator.dupe(u8, name),
+            .name = try self.allocator.dupe(u8, catalog_name),
+            .qualifier_name = try self.allocator.dupe(u8, name),
             .alias = if (alias) |value| try self.allocator.dupe(u8, value) else null,
             .nullable = nullable,
         });
@@ -524,6 +536,10 @@ fn nodeString(node: [*c]pg.PgQuery__Node) ?[]const u8 {
 }
 fn cString(value: [*c]u8) ?[]const u8 {
     return if (value == null) null else std.mem.span(value);
+}
+fn nonEmptyCString(value: [*c]u8) ?[]const u8 {
+    const result = cString(value) orelse return null;
+    return if (result.len == 0) null else result;
 }
 fn nodeSlice(pointer: [*c][*c]pg.PgQuery__Node, len: usize) []const [*c]pg.PgQuery__Node {
     return if (len == 0) &.{} else pointer[0..len];

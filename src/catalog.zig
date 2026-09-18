@@ -59,6 +59,7 @@ pub const Catalog = struct {
     allocator: std.mem.Allocator,
     tables: std.StringArrayHashMapUnmanaged(Table) = .empty,
     indexes: std.StringArrayHashMapUnmanaged(Index) = .empty,
+    postgres_search_path: []const []const u8 = &.{},
 
     pub fn init(allocator: std.mem.Allocator) Catalog {
         return .{ .allocator = allocator };
@@ -71,16 +72,45 @@ pub const Catalog = struct {
         var indexes = self.indexes.iterator();
         while (indexes.next()) |entry| entry.value_ptr.deinit();
         self.indexes.deinit(self.allocator);
+        for (self.postgres_search_path) |schema| self.allocator.free(schema);
+        self.allocator.free(self.postgres_search_path);
         self.* = undefined;
     }
 
     pub fn table(self: *const Catalog, name: []const u8) ?*const Table {
-        return self.tables.getPtr(name);
+        if (self.tables.getPtr(name)) |value| return value;
+        if (std.mem.indexOfScalar(u8, name, '.') != null) return null;
+        for (self.postgres_search_path) |schema| {
+            const qualified = std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ schema, name }) catch return null;
+            defer self.allocator.free(qualified);
+            if (self.tables.getPtr(qualified)) |value| return value;
+        }
+        return null;
+    }
+
+    pub fn setPostgresSearchPath(
+        self: *Catalog,
+        search_path: []const []const u8,
+    ) std.mem.Allocator.Error!void {
+        const owned = try self.allocator.alloc([]const u8, search_path.len);
+        var initialized: usize = 0;
+        errdefer {
+            for (owned[0..initialized]) |schema| self.allocator.free(schema);
+            self.allocator.free(owned);
+        }
+        for (search_path, owned) |schema, *destination| {
+            destination.* = try self.allocator.dupe(u8, schema);
+            initialized += 1;
+        }
+        for (self.postgres_search_path) |schema| self.allocator.free(schema);
+        self.allocator.free(self.postgres_search_path);
+        self.postgres_search_path = owned;
     }
 
     pub fn clone(self: *const Catalog, allocator: std.mem.Allocator) std.mem.Allocator.Error!Catalog {
         var copy = Catalog.init(allocator);
         errdefer copy.deinit();
+        try copy.setPostgresSearchPath(self.postgres_search_path);
 
         var tables = self.tables.iterator();
         while (tables.next()) |entry| {
@@ -191,7 +221,8 @@ pub const Catalog = struct {
     fn applyCreateTable(self: *Catalog, create_ptr: [*c]pg.PgQuery__CreateStmt) Error!void {
         if (create_ptr == null or create_ptr.*.relation == null) return error.InvalidAst;
         const create = create_ptr.*;
-        const table_name = cString(create.relation.*.relname) orelse return error.InvalidAst;
+        const table_name = try relationName(self.allocator, create.relation);
+        defer self.allocator.free(table_name);
         if (self.tables.contains(table_name)) return error.DuplicateTable;
 
         var table_value: Table = .{
@@ -216,7 +247,8 @@ pub const Catalog = struct {
         if (node_ptr == null or node_ptr.*.relation == null) return error.InvalidAst;
         const node = node_ptr.*;
         const index_name = cString(node.idxname) orelse return error.InvalidAst;
-        const table_name_value = cString(node.relation.*.relname) orelse return error.InvalidAst;
+        const table_name_value = try relationName(self.allocator, node.relation);
+        defer self.allocator.free(table_name_value);
         if (self.indexes.contains(index_name)) return error.DuplicateIndex;
         const table_ptr = self.tables.getPtr(table_name_value) orelse return error.MissingTable;
 
@@ -255,7 +287,8 @@ pub const Catalog = struct {
         const node = node_ptr.*;
         if (node.replace != 0 or node.query.*.node_case != pg.PG_QUERY__NODE__NODE_SELECT_STMT)
             return error.UnsupportedStatement;
-        const view_name = cString(node.view.*.relname) orelse return error.InvalidAst;
+        const view_name = try relationName(self.allocator, node.view);
+        defer self.allocator.free(view_name);
         if (self.tables.contains(view_name)) return error.DuplicateTable;
         const select = node.query.*.unnamed_0.select_stmt;
         if (select == null or select.*.op != pg.PG_QUERY__SET_OPERATION__SETOP_NONE)
@@ -291,7 +324,8 @@ pub const Catalog = struct {
     fn applyAlterTable(self: *Catalog, node_ptr: [*c]pg.PgQuery__AlterTableStmt) Error!void {
         if (node_ptr == null or node_ptr.*.relation == null) return error.InvalidAst;
         const node = node_ptr.*;
-        const table_name = cString(node.relation.*.relname) orelse return error.InvalidAst;
+        const table_name = try relationName(self.allocator, node.relation);
+        defer self.allocator.free(table_name);
         const table_ptr = self.tables.getPtr(table_name) orelse return error.MissingTable;
         for (nodeSlice(node.cmds, node.n_cmds)) |command_node| {
             if (command_node.*.node_case != pg.PG_QUERY__NODE__NODE_ALTER_TABLE_CMD)
@@ -345,7 +379,8 @@ pub const Catalog = struct {
     fn applyRename(self: *Catalog, node_ptr: [*c]pg.PgQuery__RenameStmt) Error!void {
         if (node_ptr == null or node_ptr.*.relation == null) return error.InvalidAst;
         const node = node_ptr.*;
-        const table_name = cString(node.relation.*.relname) orelse return error.InvalidAst;
+        const table_name = try relationName(self.allocator, node.relation);
+        defer self.allocator.free(table_name);
         const new_name = cString(node.newname) orelse return error.InvalidAst;
         if (new_name.len == 0) return error.InvalidAst;
         if (node.rename_type == pg.PG_QUERY__OBJECT_TYPE__OBJECT_TABLE) {
@@ -429,14 +464,16 @@ pub const Catalog = struct {
             pg.PG_QUERY__NODE__NODE_RANGE_VAR => {
                 const range = node.*.unnamed_0.range_var;
                 if (range == null) return error.InvalidAst;
-                const name = cString(range.*.relname) orelse return error.InvalidAst;
-                const table_ptr = self.tables.getPtr(name) orelse return error.MissingTable;
+                const name = try relationName(self.allocator, range);
+                defer self.allocator.free(name);
+                const table_ptr = self.table(name) orelse return error.MissingTable;
+                const qualifier_name = cString(range.*.relname) orelse return error.InvalidAst;
                 const alias = if (range.*.alias != null) value: {
                     const candidate = cString(range.*.alias.*.aliasname) orelse return error.InvalidAst;
                     break :value if (candidate.len == 0) null else candidate;
                 } else null;
                 try bindings.append(self.allocator, .{
-                    .name = name,
+                    .name = qualifier_name,
                     .alias = alias,
                     .table = table_ptr,
                     .nullable = nullable,
@@ -588,6 +625,18 @@ fn resTarget(node: [*c]pg.PgQuery__Node) ?*const pg.PgQuery__ResTarget {
 fn cString(value: [*c]u8) ?[]const u8 {
     if (value == null) return null;
     return std.mem.span(value);
+}
+
+fn relationName(
+    allocator: std.mem.Allocator,
+    range: [*c]pg.PgQuery__RangeVar,
+) (Error || std.mem.Allocator.Error)![]const u8 {
+    if (range == null) return error.InvalidAst;
+    const name = cString(range.*.relname) orelse return error.InvalidAst;
+    const schema_value = cString(range.*.schemaname) orelse return allocator.dupe(u8, name);
+    if (schema_value.len == 0) return allocator.dupe(u8, name);
+    const schema = schema_value;
+    return std.fmt.allocPrint(allocator, "{s}.{s}", .{ schema, name });
 }
 
 fn nodeSlice(value: [*c][*c]pg.PgQuery__Node, len: usize) []const [*c]pg.PgQuery__Node {

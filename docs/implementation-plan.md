@@ -26,6 +26,7 @@ this slice.
 | Catalog | Deterministic, atomic common + SQLite migration replay | Complete |
 | Catalog | Deterministic, atomic common + PostgreSQL migration replay | Complete |
 | Catalog | Reject divergent migration merge-parent catalogs | Complete |
+| Catalog | PostgreSQL schema-qualified objects and configured `search_path` resolution | Complete |
 | Catalog | Remaining SQLite 0.1 DDL objects and constraints | Complete |
 | Parser | SQLite-only syntax validation and capability gates | Complete |
 | Checker | Adapt statements, relations, parameters, and result names into IR | Complete |
@@ -42,6 +43,7 @@ this slice.
 | Generator | Deterministic, Zig-AST-validated binding source emission | Complete |
 | Generator | Deterministic root/path namespace assembly | Complete |
 | Generator | Build-cache module integration | Complete |
+| Generator | PostgreSQL-only and portable shared-text query generation with contract comparison | Complete |
 | Runtime | Native enums at the parameter and row boundary | Complete |
 | Runtime | Connection-scoped owned rows and streaming owned conversion | Complete |
 | Runtime | Typed connection options and the native pool wrapper | Complete |
@@ -51,7 +53,7 @@ this slice.
 | Acceptance | Example runs all four cardinalities through generated and embedded queries (M3 gate) | Complete |
 | Hardening | Complete diagnostics, resource limits, and dependency matrix | Not started |
 | Deferred | PostgreSQL runtime backend | Deferred |
-| Deferred | PostgreSQL namespaces, full type semantics, generated bindings, and runtime execution | Deferred |
+| Deferred | PostgreSQL arrays, enums/domains, catalog signatures, dialect variants, and runtime execution | Deferred |
 | Deferred | Migration execution and full CLI | Deferred |
 
 ## Tracked divergences
@@ -75,5 +77,6 @@ an undocumented rule, per [README.md](README.md).
 
 ## Current next steps
 
-1. Add PostgreSQL namespace/type semantics and generated-query integration.
-2. Harden diagnostics, source limits, and the supported dependency matrix.
+1. Add PostgreSQL dialect-variant grouping and backend SQL metadata.
+2. Add PostgreSQL arrays, enums/domains, and catalog signatures.
+3. Harden diagnostics, source limits, and the supported dependency matrix.

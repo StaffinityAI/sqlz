@@ -204,6 +204,81 @@ test "checks a named PostgreSQL query against replayed migrations" {
     try std.testing.expectEqualStrings("SELECT id, name FROM users WHERE id=$1", checked.parsed.rewritten.sql);
 }
 
+test "PostgreSQL codecs resolve against PostgreSQL type patterns" {
+    var schema = catalog.Catalog.init(std.testing.allocator);
+    defer schema.deinit();
+    try checker.applyPostgresRevisionAtomic(
+        &schema,
+        std.testing.allocator,
+        "CREATE TABLE accounts (id BIGINT PRIMARY KEY, tier INTEGER NOT NULL)",
+        "",
+    );
+    var source = try query_files.parse(std.testing.allocator, "accounts/by_tier.sql",
+        \\-- sqlz.name: accounts_by_tier
+        \\-- sqlz.backends: postgres
+        \\-- sqlz.cardinality: many
+        \\-- sqlz.param.tier: tier
+        \\-- sqlz.column.tier: tier
+        \\
+        \\SELECT id, tier FROM accounts WHERE tier=:tier
+    );
+    defer source.deinit();
+    const codecs = [_]checker.CodecInfo{.{ .id = "tier", .postgres_type = .integer }};
+    var checked = try checker.checkNamedPostgresWithCodecs(
+        std.testing.allocator,
+        &schema,
+        &source,
+        .{},
+        &codecs,
+    );
+    defer checked.deinit();
+    try std.testing.expectEqualStrings("tier", checked.analysis.parameters[0].codec.?);
+    try std.testing.expectEqualStrings("tier", checked.analysis.columns[1].codec.?);
+}
+
+test "PostgreSQL resolves qualified and search-path relations" {
+    const inputs = [_]checker.MigrationInput{
+        .{
+            .revision = .{ .id = "aaaaaaaaaaaa", .parents = &.{} },
+            .postgres_sql = "CREATE TABLE app.users (id BIGINT PRIMARY KEY, name TEXT NOT NULL)",
+        },
+    };
+    var schema = try checker.replayPostgres(std.testing.allocator, &inputs);
+    defer schema.deinit();
+    try schema.setPostgresSearchPath(&.{ "app", "public" });
+
+    var unqualified = try query_files.parse(std.testing.allocator, "users/get.sql",
+        \\-- sqlz.name: get_user
+        \\-- sqlz.backends: postgres
+        \\-- sqlz.cardinality: optional
+        \\
+        \\SELECT id, name FROM users WHERE id=:id
+    );
+    defer unqualified.deinit();
+    var checked_unqualified = try checker.checkNamedPostgres(
+        std.testing.allocator,
+        &schema,
+        &unqualified,
+    );
+    defer checked_unqualified.deinit();
+
+    var qualified = try query_files.parse(std.testing.allocator, "users/get_qualified.sql",
+        \\-- sqlz.name: get_qualified_user
+        \\-- sqlz.backends: postgres
+        \\-- sqlz.cardinality: optional
+        \\
+        \\SELECT users.id, users.name FROM app.users WHERE users.id=:id
+    );
+    defer qualified.deinit();
+    var checked_qualified = try checker.checkNamedPostgres(
+        std.testing.allocator,
+        &schema,
+        &qualified,
+    );
+    defer checked_qualified.deinit();
+    try std.testing.expectEqual(@as(usize, 2), checked_qualified.analysis.columns.len);
+}
+
 test "discovery and replay apply common SQL before SQLite SQL" {
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();

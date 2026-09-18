@@ -3,4 +3,7 @@
 .migrations = "migrations",
 .sql_roots = .{ .app = "queries" },
 .zig_roots = ["src"],
-.backends = .{ .sqlite = .{ .profile = "3.53" } },
+.backends = .{
+    .sqlite = .{ .profile = "3.53" },
+    .postgres = .{ .profile = "15" },
+},

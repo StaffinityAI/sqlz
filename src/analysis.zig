@@ -238,7 +238,7 @@ fn resolvePhysicalColumn(
     for (bindings) |binding| {
         if (reference.qualifier) |qualifier| {
             const alias_match = if (binding.alias) |alias| std.mem.eql(u8, alias, qualifier) else false;
-            if (!alias_match and !std.mem.eql(u8, binding.name, qualifier)) continue;
+            if (!alias_match and !std.mem.eql(u8, binding.qualifier_name, qualifier)) continue;
         }
         const table = schema.table(binding.name) orelse continue;
         const column = table.columns.getPtr(reference.name) orelse continue;
@@ -267,7 +267,7 @@ fn resolveColumn(
                 std.mem.eql(u8, alias, qualifier)
             else
                 false;
-            if (!matches_alias and !std.mem.eql(u8, binding.name, qualifier)) continue;
+            if (!matches_alias and !std.mem.eql(u8, binding.qualifier_name, qualifier)) continue;
         }
         const candidate: ?ResolvedColumn = if (schema.table(binding.name)) |table| blk: {
             const column = table.columns.getPtr(reference.name) orelse break :blk null;

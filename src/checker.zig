@@ -11,6 +11,11 @@ pub const SqliteProfile = parser.SqliteProfile;
 pub const PostgresDialect = parser.PostgresDialect;
 pub const PostgresProfile = parser.PostgresProfile;
 
+pub const PostgresCatalogOptions = struct {
+    dialect: PostgresDialect = .{},
+    search_path: []const []const u8 = &.{"public"},
+};
+
 pub const MigrationInput = struct {
     revision: migrations.Revision,
     common_sql: []const u8 = "",
@@ -64,6 +69,7 @@ pub fn checkNamedSqlite(
 pub const CodecInfo = struct {
     id: []const u8,
     sqlite_type: analysis.ScalarType = .unknown,
+    postgres_type: analysis.ScalarType = .unknown,
 };
 
 pub fn checkNamedSqliteWithDialect(
@@ -92,7 +98,7 @@ pub fn checkNamedSqliteWithCodecs(
     if (source.cardinality != .exec and !produces_rows) return error.MissingResultColumns;
     var analyzed = try analysis.analyze(allocator, schema, &query);
     errdefer analyzed.deinit();
-    try applyCodecs(&analyzed, source, codecs);
+    try applyCodecs(&analyzed, source, codecs, .sqlite);
     try verifyDeclaration(&analyzed, source);
     return .{ .parsed = parsed, .query = query, .analysis = analyzed };
 }
@@ -111,6 +117,16 @@ pub fn checkNamedPostgresWithDialect(
     source: *const query_files.Source,
     dialect: PostgresDialect,
 ) Error!CheckedQuery {
+    return checkNamedPostgresWithCodecs(allocator, schema, source, dialect, &.{});
+}
+
+pub fn checkNamedPostgresWithCodecs(
+    allocator: std.mem.Allocator,
+    schema: *const catalog.Catalog,
+    source: *const query_files.Source,
+    dialect: PostgresDialect,
+    codecs: []const CodecInfo,
+) Error!CheckedQuery {
     if (!source.backends.postgres) return error.BackendNotSelected;
     var parsed = try parser.parsePostgresWithDialect(allocator, source.sql, dialect);
     errdefer parsed.deinit();
@@ -121,6 +137,7 @@ pub fn checkNamedPostgresWithDialect(
     if (source.cardinality != .exec and !produces_rows) return error.MissingResultColumns;
     var analyzed = try analysis.analyze(allocator, schema, &query);
     errdefer analyzed.deinit();
+    try applyCodecs(&analyzed, source, codecs, .postgres);
     try verifyDeclaration(&analyzed, source);
     return .{ .parsed = parsed, .query = query, .analysis = analyzed };
 }
@@ -206,12 +223,13 @@ fn applyCodecs(
     analyzed: *analysis.Analysis,
     source: *const query_files.Source,
     codecs: []const CodecInfo,
+    backend: migrations.Backend,
 ) Error!void {
     const storage = analyzed.arena.allocator();
     for (source.param_codecs) |override|
-        try applyCodec(storage, analyzed.parameters, override, codecs);
+        try applyCodec(storage, analyzed.parameters, override, codecs, backend);
     for (source.column_codecs) |override|
-        try applyCodec(storage, analyzed.columns, override, codecs);
+        try applyCodec(storage, analyzed.columns, override, codecs, backend);
 }
 
 fn applyCodec(
@@ -219,16 +237,21 @@ fn applyCodec(
     values: []analysis.ResultColumn,
     override: query_files.CodecOverride,
     codecs: []const CodecInfo,
+    backend: migrations.Backend,
 ) Error!void {
     const codec = findCodec(codecs, override.codec) orelse return error.UnknownCodec;
     const target = findValue(values, override.name) orelse return error.UnknownCodecTarget;
     // The codec declares which database types it accepts, so a codec pinned to
     // a column of another shape is a contradiction, not a coercion. A value the
     // analyzer could not type is exactly what a codec is there to rescue.
-    if (codec.sqlite_type != .unknown) {
+    const database_type = switch (backend) {
+        .sqlite => codec.sqlite_type,
+        .postgres => codec.postgres_type,
+    };
+    if (database_type != .unknown) {
         if (target.scalar_type == .unknown)
-            target.scalar_type = codec.sqlite_type
-        else if (target.scalar_type != codec.sqlite_type)
+            target.scalar_type = database_type
+        else if (target.scalar_type != database_type)
             return error.IncompatibleCodec;
     }
     if (target.codec) |existing| {
@@ -371,6 +394,14 @@ pub fn replayDiscoveredPostgresWithDialect(
     discovery: *const migrations.Discovery,
     dialect: PostgresDialect,
 ) Error!catalog.Catalog {
+    return replayDiscoveredPostgresWithOptions(allocator, discovery, .{ .dialect = dialect });
+}
+
+pub fn replayDiscoveredPostgresWithOptions(
+    allocator: std.mem.Allocator,
+    discovery: *const migrations.Discovery,
+    options: PostgresCatalogOptions,
+) Error!catalog.Catalog {
     const inputs = try allocator.alloc(MigrationInput, discovery.revisions.len);
     defer allocator.free(inputs);
     for (discovery.revisions, inputs) |revision, *input| {
@@ -381,7 +412,10 @@ pub fn replayDiscoveredPostgresWithDialect(
             .postgres_sql = if (migrations.targetsBackend(manifest, .postgres)) revision.postgres_up else "",
         };
     }
-    return replayPostgresWithDialect(allocator, inputs, dialect);
+    var schema = try replayPostgresWithDialect(allocator, inputs, options.dialect);
+    errdefer schema.deinit();
+    try schema.setPostgresSearchPath(options.search_path);
+    return schema;
 }
 
 pub fn applySqliteRevisionAtomic(

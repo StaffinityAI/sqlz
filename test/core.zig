@@ -1,6 +1,17 @@
 const std = @import("std");
 const sqlz = @import("sqlz");
 
+test "PostgreSQL query declarations are backend-neutral until execution" {
+    const query = sqlz.Query(.{
+        .sql = "SELECT id FROM users WHERE id=:id",
+        .backends = .{ .postgres = true },
+        .cardinality = .optional,
+        .params = struct { id: i64 },
+        .row = struct { id: i64 },
+    });
+    try std.testing.expectEqual(sqlz.Cardinality.optional, query.cardinality);
+}
+
 test "Query exposes the cardinality-selected method" {
     const insert_user = sqlz.Query(.{
         .sql = "INSERT INTO users(name) VALUES (:name)",

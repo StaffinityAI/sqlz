@@ -6,13 +6,13 @@ const query_files = @import("sqlz_query_files");
 const zig_queries = @import("sqlz_zig_queries");
 const checker = @import("sqlz_checker");
 const analysis = @import("sqlz_analysis");
+const catalog = @import("sqlz_catalog");
 const generator = @import("sqlz_generator");
 
 pub const Error = error{
-    SqliteBackendRequired,
-    PostgresBackendDeferred,
     UnboundCodec,
     UnregisteredCodec,
+    IncompatibleBackendContract,
 };
 
 /// A codec binding as the build supplies it: the configured ID, plus the Zig
@@ -61,10 +61,12 @@ pub fn generateProjectWithCodecs(
     var loaded = try config.parse(allocator, config_source, &meta);
     defer loaded.deinit();
     const project = loaded.config();
-    const sqlite = project.backends.sqlite orelse return error.SqliteBackendRequired;
-    const dialect: checker.SqliteDialect = .{
+    const sqlite_dialect: checker.SqliteDialect = if (project.backends.sqlite) |sqlite| .{
         .profile = checker.SqliteProfile.fromString(sqlite.profile) orelse unreachable,
-    };
+    } else .{};
+    const postgres_dialect: checker.PostgresDialect = if (project.backends.postgres) |postgres| .{
+        .profile = checker.PostgresProfile.fromString(postgres.profile) orelse unreachable,
+    } else .{};
     const source_limit = std.math.cast(usize, project.limits.source_bytes) orelse return error.InvalidLimit;
 
     // Codec IDs and build bindings are one to one: the Ziggy file owns the
@@ -94,7 +96,21 @@ pub fn generateProjectWithCodecs(
             }
             sqlite_type = resolved;
         }
-        codec_infos[codec_index] = .{ .id = id, .sqlite_type = sqlite_type };
+        var postgres_type: analysis.ScalarType = .unknown;
+        for (entry.value_ptr.postgres_types) |pattern| {
+            const resolved = analysis.scalarType(pattern);
+            if (resolved == .unknown) continue;
+            if (postgres_type != .unknown and postgres_type != resolved) {
+                postgres_type = .unknown;
+                break;
+            }
+            postgres_type = resolved;
+        }
+        codec_infos[codec_index] = .{
+            .id = id,
+            .sqlite_type = sqlite_type,
+            .postgres_type = postgres_type,
+        };
         generator_codecs[codec_index] = .{
             .id = id,
             .import_name = binding.import_name,
@@ -106,12 +122,19 @@ pub fn generateProjectWithCodecs(
     defer migration_dir.close(io);
     var migration_discovery = try migrations.discover(allocator, io, migration_dir, source_limit);
     defer migration_discovery.deinit();
-    var schema = try checker.replayDiscoveredSqliteWithDialect(
-        allocator,
-        &migration_discovery,
-        dialect,
-    );
-    defer schema.deinit();
+    var sqlite_schema: ?catalog.Catalog = if (project.backends.sqlite != null)
+        try checker.replayDiscoveredSqliteWithDialect(allocator, &migration_discovery, sqlite_dialect)
+    else
+        null;
+    defer if (sqlite_schema) |*schema| schema.deinit();
+    var postgres_schema: ?catalog.Catalog = if (project.backends.postgres != null)
+        try checker.replayDiscoveredPostgresWithOptions(allocator, &migration_discovery, .{
+            .dialect = postgres_dialect,
+            .search_path = project.backends.postgres.?.search_path,
+        })
+    else
+        null;
+    defer if (postgres_schema) |*schema| schema.deinit();
 
     for (project.zig_roots) |zig_root| {
         var zig_dir = try project_dir.openDir(io, zig_root, .{ .iterate = true });
@@ -119,18 +142,19 @@ pub fn generateProjectWithCodecs(
         var embedded = try zig_queries.discover(allocator, io, zig_dir, source_limit);
         defer embedded.deinit();
         for (embedded.sources) |*source| {
-            if (source.backends.postgres) return error.PostgresBackendDeferred;
             // Embedded declarations produce no generated output; checking them
             // is the point — their `.params`/`.row` structs must agree with the
             // SQL they sit next to.
-            var checked = try checker.checkNamedSqliteWithCodecs(
+            try checkSource(
                 allocator,
-                &schema,
+                sqlite_schema,
+                postgres_schema,
                 source,
-                dialect,
+                sqlite_dialect,
+                postgres_dialect,
                 codec_infos,
+                null,
             );
-            checked.deinit();
         }
     }
 
@@ -150,27 +174,24 @@ pub fn generateProjectWithCodecs(
         defer sql_dir.close(io);
         var discovery = try query_files.discover(allocator, io, sql_dir, source_limit);
         errdefer discovery.deinit();
-        var sqlite_count: usize = 0;
-        for (discovery.sources) |source| {
-            if (source.backends.postgres) return error.PostgresBackendDeferred;
-            if (source.backends.sqlite) sqlite_count += 1;
-        }
-        const checked = try allocator.alloc(checker.CheckedQuery, sqlite_count);
+        const checked = try allocator.alloc(checker.CheckedQuery, discovery.sources.len);
         var checked_count: usize = 0;
         errdefer {
             for (checked[0..checked_count]) |*item| item.deinit();
             allocator.free(checked);
         }
-        const inputs = try allocator.alloc(generator.CheckedInput, sqlite_count);
+        const inputs = try allocator.alloc(generator.CheckedInput, discovery.sources.len);
         errdefer allocator.free(inputs);
         for (discovery.sources) |*source| {
-            if (!source.backends.sqlite) continue;
-            checked[checked_count] = try checker.checkNamedSqliteWithCodecs(
+            try checkSource(
                 allocator,
-                &schema,
+                sqlite_schema,
+                postgres_schema,
                 source,
-                dialect,
+                sqlite_dialect,
+                postgres_dialect,
                 codec_infos,
+                &checked[checked_count],
             );
             inputs[checked_count] = .{ .source = source, .checked = &checked[checked_count] };
             checked_count += 1;
@@ -184,6 +205,73 @@ pub fn generateProjectWithCodecs(
         initialized += 1;
     }
     return generator.generateProjectModuleWithCodecs(allocator, roots, generator_codecs);
+}
+
+fn checkSource(
+    allocator: std.mem.Allocator,
+    sqlite_schema: ?catalog.Catalog,
+    postgres_schema: ?catalog.Catalog,
+    source: *const query_files.Source,
+    sqlite_dialect: checker.SqliteDialect,
+    postgres_dialect: checker.PostgresDialect,
+    codecs: []const checker.CodecInfo,
+    output: ?*checker.CheckedQuery,
+) !void {
+    var sqlite_checked: ?checker.CheckedQuery = null;
+    defer if (sqlite_checked) |*checked| checked.deinit();
+    if (source.backends.sqlite) {
+        const schema = sqlite_schema orelse return error.BackendNotSelected;
+        sqlite_checked = try checker.checkNamedSqliteWithCodecs(
+            allocator,
+            &schema,
+            source,
+            sqlite_dialect,
+            codecs,
+        );
+    }
+
+    var postgres_checked: ?checker.CheckedQuery = null;
+    defer if (postgres_checked) |*checked| checked.deinit();
+    if (source.backends.postgres) {
+        const schema = postgres_schema orelse return error.BackendNotSelected;
+        postgres_checked = try checker.checkNamedPostgresWithCodecs(
+            allocator,
+            &schema,
+            source,
+            postgres_dialect,
+            codecs,
+        );
+    }
+
+    if (sqlite_checked != null and postgres_checked != null and
+        !contractsEqual(&sqlite_checked.?, &postgres_checked.?))
+        return error.IncompatibleBackendContract;
+
+    const destination = output orelse return;
+    if (sqlite_checked) |checked| {
+        destination.* = checked;
+        sqlite_checked = null;
+    } else if (postgres_checked) |checked| {
+        destination.* = checked;
+        postgres_checked = null;
+    } else unreachable;
+}
+
+fn contractsEqual(left: *const checker.CheckedQuery, right: *const checker.CheckedQuery) bool {
+    return valuesEqual(left.analysis.parameters, right.analysis.parameters) and
+        valuesEqual(left.analysis.columns, right.analysis.columns);
+}
+
+fn valuesEqual(left: []const analysis.ResultColumn, right: []const analysis.ResultColumn) bool {
+    if (left.len != right.len) return false;
+    for (left, right) |lhs, rhs| {
+        if (!std.mem.eql(u8, lhs.name, rhs.name) or lhs.nullable != rhs.nullable) return false;
+        if ((lhs.codec == null) != (rhs.codec == null)) return false;
+        if (lhs.codec) |codec| {
+            if (!std.mem.eql(u8, codec, rhs.codec.?)) return false;
+        } else if (lhs.scalar_type != rhs.scalar_type) return false;
+    }
+    return true;
 }
 
 fn findBinding(bindings: []const CodecBinding, id: []const u8) ?CodecBinding {

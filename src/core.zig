@@ -50,10 +50,9 @@ pub fn Query(comptime options: anytype) type {
     if (!@hasField(Options, "backends")) @compileError("sqlz.Query requires .backends");
     if (!@hasField(Options, "cardinality")) @compileError("sqlz.Query requires .cardinality");
     const BackendOptions = @TypeOf(options.backends);
-    if (@hasField(BackendOptions, "postgres") and options.backends.postgres)
-        @compileError("PostgreSQL execution is not implemented in this sqlz slice");
-    if (!@hasField(BackendOptions, "sqlite") or !options.backends.sqlite)
-        @compileError("sqlz.Query must select SQLite in this sqlz slice");
+    const sqlite = @hasField(BackendOptions, "sqlite") and options.backends.sqlite;
+    const postgres = @hasField(BackendOptions, "postgres") and options.backends.postgres;
+    if (!sqlite and !postgres) @compileError("sqlz.Query requires at least one backend");
 
     const Params = if (@hasField(Options, "params")) options.params else struct {};
     const cardinality: Cardinality = options.cardinality;
