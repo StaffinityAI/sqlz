@@ -4,6 +4,10 @@ This is the live implementation checklist for the first checked-query release.
 SQLite and the initial PostgreSQL runtime are implemented. Migration execution,
 the full CLI, and release hardening remain.
 
+The project-backed SQLite-to-PostgreSQL import is tracked separately in
+[sqlite-postgres-bootstrap-plan.md](sqlite-postgres-bootstrap-plan.md). Keep its
+progress tracker synchronized as prerequisite or bootstrap-specific work lands.
+
 ## Recommended Remaining Sequence
 
 This is the source of truth for work ordering. Keep it current whenever a slice

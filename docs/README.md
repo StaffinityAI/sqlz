@@ -70,6 +70,9 @@ not for ordinary schema or PRAGMA work.
 - [Build integration](build-integration.md) defines feature flags, public modules,
   host tools, generated modules, consumer setup, and the build matrix.
 - [CLI](cli.md) defines the unified build-integrated command and output contract.
+- [SQLite-to-PostgreSQL bootstrap plan](sqlite-postgres-bootstrap-plan.md) tracks
+  the scoped design, destructive wipe policy, implementation phases, and status
+  for project-backed database bootstrap.
 - [Compatibility](compatibility.md), [testing](testing.md),
   [performance](performance.md), and [security](security.md) define release policy.
 - [Design audit](design-audit.md) tracks resolved and deferred detail, while the
