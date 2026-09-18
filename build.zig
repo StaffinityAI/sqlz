@@ -263,6 +263,29 @@ pub fn build(b: *std.Build) !void {
     const test_step = b.step("test", "Run the complete sqlz test suite");
     const offline_step = b.step("test-offline", "Run quick tests that need no database or network service");
     const integration_step = b.step("test-integration", "Run SQLite and live PostgreSQL integration tests");
+    const postgres_test_host = b.option([]const u8, "postgres_test_host", "Live PostgreSQL test host") orelse "127.0.0.1";
+    const postgres_test_port = b.option(u16, "postgres_test_port", "Live PostgreSQL test port") orelse 55432;
+    const postgres_test_database = b.option([]const u8, "postgres_test_database", "Live PostgreSQL test database") orelse "sqlz_test";
+    const postgres_test_username = b.option([]const u8, "postgres_test_username", "Live PostgreSQL test username") orelse "sqlz_test";
+    const postgres_test_password = b.option([]const u8, "postgres_test_password", "Live PostgreSQL test password") orelse "sqlz_test";
+    const postgres_test_major = b.option(u16, "postgres_test_major", "Expected live PostgreSQL major") orelse 18;
+
+    const postgres_config_mod = b.createModule(.{
+        .root_source_file = b.path("test/support/postgres_config.zig"),
+        .target = host_target,
+        .optimize = optimize,
+    });
+    const postgres_config_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/postgres_config.zig"),
+            .target = host_target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "postgres_config", .module = postgres_config_mod }},
+        }),
+    });
+    const run_postgres_config = b.addRunArtifact(postgres_config_tests);
+    test_step.dependOn(&run_postgres_config.step);
+    offline_step.dependOn(&run_postgres_config.step);
     const core_step = b.step("test-core", "Run backend-neutral tests");
     const examples_step = b.step("examples", "Build all examples");
 
@@ -750,9 +773,20 @@ pub fn build(b: *std.Build) !void {
                 .root_source_file = b.path("test/postgres_integration.zig"),
                 .target = target,
                 .optimize = optimize,
-                .imports = &.{.{ .name = "sqlz", .module = sqlz_mod }},
+                .imports = &.{
+                    .{ .name = "sqlz", .module = sqlz_mod },
+                    .{ .name = "postgres_config", .module = postgres_config_mod },
+                },
             }),
         });
+        const postgres_integration_options = b.addOptions();
+        postgres_integration_options.addOption([]const u8, "host", postgres_test_host);
+        postgres_integration_options.addOption(u16, "port", postgres_test_port);
+        postgres_integration_options.addOption([]const u8, "database", postgres_test_database);
+        postgres_integration_options.addOption([]const u8, "username", postgres_test_username);
+        postgres_integration_options.addOption([]const u8, "password", postgres_test_password);
+        postgres_integration_options.addOption(u16, "expected_major", postgres_test_major);
+        postgres_integration_tests.root_module.addOptions("postgres_test_options", postgres_integration_options);
         const run_postgres_integration = b.addRunArtifact(postgres_integration_tests);
         integration_step.dependOn(&run_postgres_integration.step);
         const postgres_integration_step = b.step("test-postgres-integration", "Run tests against PostgreSQL on localhost:55432");

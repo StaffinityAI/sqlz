@@ -27,6 +27,10 @@ exercise the actual SQLite runtime and an actual PostgreSQL server. The command
 owns service teardown and removes its disposable volume even after failure or
 interruption.
 
+Hosted CI may add service-container matrices beyond the single local Compose
+service. ADR 0038 defines the PostgreSQL 15–18 matrix and keeps it on the complete
+gate rather than pre-commit.
+
 Narrow Zig build steps remain available for adapter-focused development, but
 support claims and merge gates use `mise run ci` rather than assembling an
 ad-hoc subset.
@@ -52,3 +56,4 @@ documented compatibility matrix together.
 
 - [Testing](../testing.md)
 - [Compatibility](../compatibility.md)
+- [ADR 0038](0038-postgresql-live-engine-conformance.md)

@@ -15,6 +15,10 @@ The repository has two intentionally separate validation gates:
   pinned PostgreSQL service from `compose.yaml`, runs `zig build test`, and then
   runs `zig build test-integration` against SQLite and PostgreSQL. A shell trap
   always removes the Compose service and volume.
+- Hosted CI additionally runs `test-postgres-integration` as a service-container
+  matrix against PostgreSQL 15, 16, 17, and 18. The build passes the expected
+  major explicitly and the test rejects a mismatched server before exercising
+  the adapter.
 
 `zig build test-postgres` remains a compile/API test and does not connect to a
 server. `zig build test-postgres-integration` is the live PostgreSQL-only gate;
@@ -72,6 +76,10 @@ Differential parser/conformance CI runs against SQLite profiles 3.45–3.53 and 
 PostgreSQL major 15–18. Full runtime tests run on x86_64 Linux and arm64 macOS;
 Windows receives a compile check. Bundled SQLite uses a known capability manifest;
 system/custom builds have runtime option verification tests.
+
+The PostgreSQL 15–18 matrix covers live plain-TCP runtime behavior. TLS-enabled
+driver compilation is part of the build matrix; live TLS conformance requires a
+separate certificate-backed service job and is not implied by the plain matrix.
 
 Every defect gains the narrowest regression test and, when it crosses a component
 boundary, an integration fixture. Tests must not require a production database or

@@ -46,3 +46,55 @@ jobs:
 
       - name: Run CI
         run: mise run ci
+
+  postgres-conformance:
+    name: PostgreSQL ${{ matrix.postgres }} conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: [15, 16, 17, 18]
+
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}-alpine
+        env:
+          POSTGRES_DB: sqlz_test
+          POSTGRES_PASSWORD: sqlz_test
+          POSTGRES_USER: sqlz_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sqlz_test -d sqlz_test"
+          --health-interval 1s
+          --health-timeout 5s
+          --health-retries 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+          use-cache: true
+          cache-key: postgres-${{ matrix.postgres }}-${{ hashFiles('build.zig.zon') }}
+
+      - name: Restore fetched Zig dependencies
+        uses: actions/cache@v6
+        with:
+          path: zig-pkg
+          key: zig-pkg-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build.zig.zon') }}
+          restore-keys: |
+            zig-pkg-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Run live PostgreSQL conformance
+        run: >-
+          zig build test-postgres-integration
+          -Dsqlite=false
+          -Dpostgres=true
+          -Dpostgres_test_host=127.0.0.1
+          -Dpostgres_test_port=5432
+          -Dpostgres_test_major=${{ matrix.postgres }}

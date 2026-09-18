@@ -790,3 +790,10 @@ test "PostgreSQL array lowering preserves nulls and enum storage" {
         try postgres.restoreArrayElement(?IntegerRole, @as(?i32, null)),
     );
 }
+
+test "PostgreSQL SQLSTATE classes are stable" {
+    try std.testing.expectEqual(ErrorClass.constraint, postgres.classifySqlState("23505"));
+    try std.testing.expectEqual(ErrorClass.cancelled, postgres.classifySqlState("57014"));
+    try std.testing.expectEqual(ErrorClass.unavailable, postgres.classifySqlState("08006"));
+    try std.testing.expectEqual(ErrorClass.other, postgres.classifySqlState("42601"));
+}
