@@ -47,3 +47,4 @@ be replaced only by a new ADR. Records use [0000-template.md](0000-template.md).
 | [0034](0034-typed-sqlite-connection-options-and-pool-wrapper.md) | Connection options and pool wrapper | Accepted |
 | [0035](0035-derived-enum-codecs.md) | Derived enum codecs | Accepted |
 | [0036](0036-checkpoint-migrations-and-history-compaction.md) | Checkpoint migrations and history compaction | Proposed |
+| [0037](0037-offline-hooks-and-compose-backed-ci.md) | Offline hooks and Compose-backed CI | Accepted |

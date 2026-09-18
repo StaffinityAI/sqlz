@@ -1,0 +1,14 @@
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: sqlz_test
+      POSTGRES_PASSWORD: sqlz_test
+      POSTGRES_USER: sqlz_test
+    ports:
+      - "127.0.0.1:55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sqlz_test -d sqlz_test"]
+      interval: 1s
+      timeout: 5s
+      retries: 30

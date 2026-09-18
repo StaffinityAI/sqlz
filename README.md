@@ -97,18 +97,29 @@ sequence and acceptance gates.
 
 ## Development
 
-Formatting and the pre-commit pipeline run through [hk](https://hk.jdx.dev),
-configured in [`hk.pkl`](hk.pkl). hk reads its config with
-[pkl](https://pkl-lang.org), so install both, then wire the git hook:
+The repository pins Zig, [hk](https://hk.jdx.dev), and
+[pkl](https://pkl-lang.org) with [mise](https://mise.jdx.dev). Install the
+toolchain and wire the git hook with:
 
 ```sh
-mise use -g hk pkl
+mise install
 hk install
 ```
 
-`hk check` runs `zig fmt --check` over the tracked Zig and ZON sources and then
-the full `zig build test` suite; `hk fix` formats in place. The same two steps
-run on every commit.
+`mise run check` and the hk pre-commit hook run only quick offline checks:
+formatting plus `zig build test-offline`. They never start Docker, open a
+database connection, or require network access.
+
+Run the complete local CI gate with:
+
+```sh
+mise run ci
+```
+
+That command first runs the offline gate, then starts PostgreSQL 18 with Docker
+Compose and runs the full test suite plus integration tests against both the
+in-process SQLite engine and the live PostgreSQL service. Compose teardown runs
+on success, failure, or interruption.
 
 ## License
 

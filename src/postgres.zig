@@ -97,7 +97,7 @@ pub const postgres = struct {
                 return .{ .err = staticError(.other, .fetch, "unable to lower PostgreSQL parameters") };
             const native = self.conn.row(sql, bound) catch |cause|
                 return .{ .err = makeError(self.allocator, self.conn, .fetch, cause) };
-            const row = native orelse return .{ .err = staticError(.invalid_data, .fetch, "query expected one row but returned none") };
+            var row = native orelse return .{ .err = staticError(.invalid_data, .fetch, "query expected one row but returned none") };
             var arena: std.heap.ArenaAllocator = .init(self.allocator);
             const value = decodeRow(Row, &row, arena.allocator()) catch |cause| {
                 arena.deinit();
@@ -120,7 +120,7 @@ pub const postgres = struct {
                 return .{ .err = staticError(.other, .fetch, "unable to lower PostgreSQL parameters") };
             const native = self.conn.row(sql, bound) catch |cause|
                 return .{ .err = makeError(self.allocator, self.conn, .fetch, cause) };
-            const row = native orelse return .{ .ok = null };
+            var row = native orelse return .{ .ok = null };
             var arena: std.heap.ArenaAllocator = .init(self.allocator);
             const value = decodeRow(Row, &row, arena.allocator()) catch |cause| {
                 arena.deinit();
@@ -237,7 +237,7 @@ pub const postgres = struct {
                 return .{ .err = staticError(.other, .fetch, "unable to lower PostgreSQL parameters") };
             const native = self.pool.row(sql, bound) catch |cause|
                 return .{ .err = poolError(.fetch, cause) };
-            const row = native orelse return .{ .err = staticError(.invalid_data, .fetch, "query expected one row but returned none") };
+            var row = native orelse return .{ .err = staticError(.invalid_data, .fetch, "query expected one row but returned none") };
             var arena: std.heap.ArenaAllocator = .init(self.allocator);
             const value = decodeRow(Row, &row, arena.allocator()) catch |cause| {
                 arena.deinit();
@@ -260,7 +260,7 @@ pub const postgres = struct {
                 return .{ .err = staticError(.other, .fetch, "unable to lower PostgreSQL parameters") };
             const native = self.pool.row(sql, bound) catch |cause|
                 return .{ .err = poolError(.fetch, cause) };
-            const row = native orelse return .{ .ok = null };
+            var row = native orelse return .{ .ok = null };
             var arena: std.heap.ArenaAllocator = .init(self.allocator);
             const value = decodeRow(Row, &row, arena.allocator()) catch |cause| {
                 arena.deinit();

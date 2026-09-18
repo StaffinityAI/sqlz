@@ -12,12 +12,10 @@ local projectSteps = new Mapping<String, Step> {
     check = "zig fmt --check {{files}}"
     fix = "zig fmt {{files}}"
   }
-  // `zig build test` is the whole suite: core, parser, config, catalog,
-  // migrations, checker, generator, sqlite, zio, examples, and the external
-  // build-API fixture. It is a single whole-project command, so no `glob`, and
-  // `exclusive` keeps it from racing the formatter for the build cache.
-  ["test"] {
-    check = "zig build test"
+  // Keep hooks deterministic and independent of Docker, network access, or a
+  // running database. Runtime and end-to-end coverage belongs to `mise run ci`.
+  ["test-offline"] {
+    check = "zig build test-offline"
     exclusive = true
     depends = "fmt"
   }

@@ -1,0 +1,22 @@
+[tools]
+hk = "1.56.1"
+pkl = "0.32.1"
+zig = "0.16.0"
+
+[tasks.check]
+description = "Run quick offline checks used by pre-commit hooks"
+run = "hk check"
+
+[tasks.ci]
+description = "Run all checks and SQLite/PostgreSQL integration tests"
+run = '''
+set -eu
+cleanup() {
+  docker compose down --volumes --remove-orphans
+}
+trap cleanup EXIT INT TERM
+mise run check
+docker compose up --detach --wait postgres
+zig build test
+zig build test-integration
+'''

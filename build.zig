@@ -261,6 +261,8 @@ pub fn build(b: *std.Build) !void {
     });
 
     const test_step = b.step("test", "Run the complete sqlz test suite");
+    const offline_step = b.step("test-offline", "Run quick tests that need no database or network service");
+    const integration_step = b.step("test-integration", "Run SQLite and live PostgreSQL integration tests");
     const core_step = b.step("test-core", "Run backend-neutral tests");
     const examples_step = b.step("examples", "Build all examples");
 
@@ -278,6 +280,7 @@ pub fn build(b: *std.Build) !void {
     });
     const run_bootstrap_tests = b.addRunArtifact(bootstrap_tests);
     test_step.dependOn(&run_bootstrap_tests.step);
+    offline_step.dependOn(&run_bootstrap_tests.step);
     const bootstrap_step = b.step("test-bootstrap", "Run bootstrap planning tests");
     bootstrap_step.dependOn(&run_bootstrap_tests.step);
 
@@ -292,6 +295,7 @@ pub fn build(b: *std.Build) !void {
     const run_core = b.addRunArtifact(core_tests);
     core_step.dependOn(&run_core.step);
     test_step.dependOn(&run_core.step);
+    offline_step.dependOn(&run_core.step);
 
     const build_options_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -301,7 +305,9 @@ pub fn build(b: *std.Build) !void {
             .imports = &.{.{ .name = "sqlz_build", .module = b.modules.get("sqlz_build").? }},
         }),
     });
-    test_step.dependOn(&b.addRunArtifact(build_options_tests).step);
+    const run_build_options = b.addRunArtifact(build_options_tests);
+    test_step.dependOn(&run_build_options.step);
+    offline_step.dependOn(&run_build_options.step);
 
     const parser_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -314,6 +320,7 @@ pub fn build(b: *std.Build) !void {
     });
     const run_parser = b.addRunArtifact(parser_tests);
     test_step.dependOn(&run_parser.step);
+    offline_step.dependOn(&run_parser.step);
 
     const config_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -328,6 +335,7 @@ pub fn build(b: *std.Build) !void {
     });
     const run_config = b.addRunArtifact(config_tests);
     test_step.dependOn(&run_config.step);
+    offline_step.dependOn(&run_config.step);
     const config_step = b.step("test-config", "Run project configuration tests");
     config_step.dependOn(&run_config.step);
 
@@ -339,7 +347,9 @@ pub fn build(b: *std.Build) !void {
             .imports = &.{.{ .name = "sqlz_zig_queries", .module = zig_queries_mod }},
         }),
     });
-    test_step.dependOn(&b.addRunArtifact(zig_query_tests).step);
+    const run_zig_queries = b.addRunArtifact(zig_query_tests);
+    test_step.dependOn(&run_zig_queries.step);
+    offline_step.dependOn(&run_zig_queries.step);
 
     const catalog_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -355,6 +365,7 @@ pub fn build(b: *std.Build) !void {
     });
     const run_catalog = b.addRunArtifact(catalog_tests);
     test_step.dependOn(&run_catalog.step);
+    offline_step.dependOn(&run_catalog.step);
     const catalog_step = b.step("test-catalog", "Run offline catalog replay tests");
     catalog_step.dependOn(&run_catalog.step);
 
@@ -371,6 +382,7 @@ pub fn build(b: *std.Build) !void {
     });
     const run_migrations = b.addRunArtifact(migration_tests);
     test_step.dependOn(&run_migrations.step);
+    offline_step.dependOn(&run_migrations.step);
     const migrations_step = b.step("test-migrations", "Run migration graph tests");
     migrations_step.dependOn(&run_migrations.step);
 
@@ -392,6 +404,7 @@ pub fn build(b: *std.Build) !void {
     });
     const run_checker = b.addRunArtifact(checker_tests);
     test_step.dependOn(&run_checker.step);
+    offline_step.dependOn(&run_checker.step);
     const checker_step = b.step("test-checker", "Run offline checker pipeline tests");
     checker_step.dependOn(&run_checker.step);
 
@@ -406,6 +419,7 @@ pub fn build(b: *std.Build) !void {
     });
     const run_codegen_tests = b.addRunArtifact(codegen_tests);
     test_step.dependOn(&run_codegen_tests.step);
+    offline_step.dependOn(&run_codegen_tests.step);
     const codegen_step = b.step("test-codegen", "Run complete host codegen tests");
     codegen_step.dependOn(&run_codegen_tests.step);
 
@@ -423,6 +437,7 @@ pub fn build(b: *std.Build) !void {
     });
     const run_ir = b.addRunArtifact(ir_tests);
     test_step.dependOn(&run_ir.step);
+    offline_step.dependOn(&run_ir.step);
     const ir_step = b.step("test-ir", "Run checker IR adapter tests");
     ir_step.dependOn(&run_ir.step);
 
@@ -442,6 +457,7 @@ pub fn build(b: *std.Build) !void {
     });
     const run_analysis = b.addRunArtifact(analysis_tests);
     test_step.dependOn(&run_analysis.step);
+    offline_step.dependOn(&run_analysis.step);
     const analysis_step = b.step("test-analysis", "Run query semantic analysis tests");
     analysis_step.dependOn(&run_analysis.step);
 
@@ -455,6 +471,7 @@ pub fn build(b: *std.Build) !void {
     });
     const run_query_files = b.addRunArtifact(query_file_tests);
     test_step.dependOn(&run_query_files.step);
+    offline_step.dependOn(&run_query_files.step);
     const query_files_step = b.step("test-query-files", "Run named SQL discovery tests");
     query_files_step.dependOn(&run_query_files.step);
 
@@ -474,6 +491,7 @@ pub fn build(b: *std.Build) !void {
     });
     const run_generator = b.addRunArtifact(generator_tests);
     test_step.dependOn(&run_generator.step);
+    offline_step.dependOn(&run_generator.step);
     const generator_step = b.step("test-generator", "Run checked binding generator tests");
     generator_step.dependOn(&run_generator.step);
 
@@ -498,6 +516,7 @@ pub fn build(b: *std.Build) !void {
     });
     const run_generated_module = b.addRunArtifact(generated_module_tests);
     test_step.dependOn(&run_generated_module.step);
+    offline_step.dependOn(&run_generated_module.step);
 
     if (zio_dep) |zio| {
         // The host pipeline reads every input through the caller's `std.Io`;
@@ -570,6 +589,7 @@ pub fn build(b: *std.Build) !void {
         });
         const run_sqlite = b.addRunArtifact(sqlite_tests);
         test_step.dependOn(&run_sqlite.step);
+        integration_step.dependOn(&run_sqlite.step);
         const sqlite_step = b.step("test-sqlite", "Run the SQLite runtime tests");
         sqlite_step.dependOn(&run_sqlite.step);
 
@@ -695,6 +715,7 @@ pub fn build(b: *std.Build) !void {
         test_step.dependOn(&run_examples.step);
     } else {
         test_step.dependOn(&b.addFail("zqlite is required for the complete test suite").step);
+        integration_step.dependOn(&b.addFail("zqlite is required for integration tests").step);
     }
 
     if (pg_dep) |dep| {
@@ -723,8 +744,22 @@ pub fn build(b: *std.Build) !void {
         test_step.dependOn(&run_postgres.step);
         const postgres_step = b.step("test-postgres", "Run PostgreSQL adapter compile tests");
         postgres_step.dependOn(&run_postgres.step);
+
+        const postgres_integration_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("test/postgres_integration.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "sqlz", .module = sqlz_mod }},
+            }),
+        });
+        const run_postgres_integration = b.addRunArtifact(postgres_integration_tests);
+        integration_step.dependOn(&run_postgres_integration.step);
+        const postgres_integration_step = b.step("test-postgres-integration", "Run tests against PostgreSQL on localhost:55432");
+        postgres_integration_step.dependOn(&run_postgres_integration.step);
     } else {
         test_step.dependOn(&b.addFail("pg.zig is required for the complete test suite").step);
+        integration_step.dependOn(&b.addFail("pg.zig is required for integration tests").step);
     }
 }
 

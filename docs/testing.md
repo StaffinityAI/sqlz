@@ -3,6 +3,30 @@
 Testing is layered so parser correctness, schema replay, generated Zig, driver
 behavior, and migration safety fail independently.
 
+## Developer and CI gates
+
+The repository has two intentionally separate validation gates:
+
+- `mise run check` is the quick offline gate. It delegates to `hk check`, checks
+  formatting, and runs `zig build test-offline`. It is deterministic, requires
+  no network or database service, and is the only gate installed as the hk
+  pre-commit hook.
+- `mise run ci` is the complete gate. It runs the offline gate, starts the
+  pinned PostgreSQL service from `compose.yaml`, runs `zig build test`, and then
+  runs `zig build test-integration` against SQLite and PostgreSQL. A shell trap
+  always removes the Compose service and volume.
+
+`zig build test-postgres` remains a compile/API test and does not connect to a
+server. `zig build test-postgres-integration` is the live PostgreSQL-only gate;
+`zig build test-sqlite` is the SQLite-only runtime gate. These narrower commands
+are useful while developing an adapter, but `mise run ci` is the required
+pre-push and continuous-integration command.
+
+Long-running, service-backed, and end-to-end tests must not be added to
+`test-offline` or the hk hook. Quick parser, catalog, migration-planning,
+checker, generator, and generated-code tests should remain offline where
+possible so they can fail before integration infrastructure is involved.
+
 ## Required suites
 
 - lexer/parser unit tests, golden ASTs, recovery diagnostics, property tests, and
@@ -48,7 +72,9 @@ system/custom builds have runtime option verification tests.
 
 Every defect gains the narrowest regression test and, when it crosses a component
 boundary, an integration fixture. Tests must not require a production database or
-network access after dependencies and engine images are provisioned.
+network access after dependencies and engine images are provisioned. The
+PostgreSQL integration suite uses only the disposable Compose service; SQLite
+integration tests use an in-process or temporary database.
 
 Checkpoint tests use both schema-only and DML-bearing histories. They prove only
 empty-database schema equivalence and verify that the tool never claims historical
