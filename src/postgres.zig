@@ -29,7 +29,7 @@ pub const postgres = struct {
         auth: pg.Conn.AuthOpts = .{},
     };
 
-    pub const Ownership = enum { owned, borrowed };
+    pub const Ownership = enum { owned, borrowed, pooled };
 
     pub const Conn = struct {
         pub const backend: Backend = .postgres;
@@ -42,9 +42,13 @@ pub const postgres = struct {
         row_free: bool = true,
 
         pub fn deinit(self: *Conn) void {
-            if (self.ownership == .owned) {
-                self.conn.deinit();
-                self.allocator.destroy(self.conn);
+            switch (self.ownership) {
+                .owned => {
+                    self.conn.deinit();
+                    self.allocator.destroy(self.conn);
+                },
+                .borrowed => {},
+                .pooled => self.conn.release(),
             }
             self.* = undefined;
         }
@@ -151,6 +155,106 @@ pub const postgres = struct {
             .ownership = .borrowed,
         };
     }
+
+    pub const PoolOptions = pg.Pool.Opts;
+
+    pub const Pool = struct {
+        pub const backend: Backend = .postgres;
+
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        pool: *pg.Pool,
+
+        pub fn init(
+            allocator: std.mem.Allocator,
+            io: std.Io,
+            options: PoolOptions,
+        ) !Pool {
+            return .{
+                .allocator = allocator,
+                .io = io,
+                .pool = try pg.Pool.init(io, allocator, options),
+            };
+        }
+
+        pub fn deinit(self: *Pool) void {
+            self.pool.deinit();
+            self.* = undefined;
+        }
+
+        pub fn acquire(self: *Pool) !Conn {
+            return .{
+                .allocator = self.allocator,
+                .io = self.io,
+                .conn = try self.pool.acquire(),
+                .ownership = .pooled,
+            };
+        }
+
+        pub fn execute(self: *Pool, sql: []const u8, args: anytype) Result(ExecResult) {
+            const affected = self.pool.exec(sql, positionalArgs(args)) catch |cause|
+                return .{ .err = poolError(.execute, cause) };
+            return .{ .ok = .{ .rows_affected = if (affected) |value| @intCast(value) else null } };
+        }
+
+        pub fn executeScript(self: *Pool, sql: []const u8) Result(void) {
+            _ = self.pool.exec(sql, .{}) catch |cause|
+                return .{ .err = poolError(.execute, cause) };
+            return .{ .ok = {} };
+        }
+
+        pub fn fetchOne(self: *Pool, comptime Row: type, sql: []const u8, args: anytype) Result(Single(Row)) {
+            const native = self.pool.row(sql, positionalArgs(args)) catch |cause|
+                return .{ .err = poolError(.fetch, cause) };
+            const row = native orelse return .{ .err = staticError(.invalid_data, .fetch, "query expected one row but returned none") };
+            const value = decodeRow(Row, &row) catch |cause| {
+                deinitQueryRow(&row);
+                return .{ .err = decodeError(cause) };
+            };
+            return .{ .ok = .{
+                .native = row,
+                .value = value,
+                .row_allocator = null,
+                .row_free = true,
+            } };
+        }
+
+        pub fn fetchOptional(self: *Pool, comptime Row: type, sql: []const u8, args: anytype) Result(?Single(Row)) {
+            const native = self.pool.row(sql, positionalArgs(args)) catch |cause|
+                return .{ .err = poolError(.fetch, cause) };
+            const row = native orelse return .{ .ok = null };
+            const value = decodeRow(Row, &row) catch |cause| {
+                deinitQueryRow(&row);
+                return .{ .err = decodeError(cause) };
+            };
+            return .{ .ok = .{
+                .native = row,
+                .value = value,
+                .row_allocator = null,
+                .row_free = true,
+            } };
+        }
+
+        pub fn fetch(self: *Pool, comptime Row: type, sql: []const u8, args: anytype) Result(Rows(Row)) {
+            const native = self.pool.query(sql, positionalArgs(args)) catch |cause|
+                return .{ .err = poolError(.fetch, cause) };
+            return .{ .ok = .{
+                .allocator = self.allocator,
+                .connection = null,
+                .native = native,
+                .row_allocator = null,
+                .row_free = true,
+            } };
+        }
+
+        pub fn raw(self: *Pool) *pg.Pool {
+            return self.pool;
+        }
+
+        pub fn stats(self: *Pool) pg.Pool.Stats {
+            return self.pool.stats();
+        }
+    };
 
     pub const ScopeOptions = struct { free_rows: bool = true };
 
@@ -288,7 +392,7 @@ pub const postgres = struct {
     pub fn Rows(comptime Row: type) type {
         return struct {
             allocator: std.mem.Allocator,
-            connection: *pg.Conn,
+            connection: ?*pg.Conn,
             native: *pg.Result,
             finished: bool = false,
             row_allocator: ?std.mem.Allocator,
@@ -297,7 +401,10 @@ pub const postgres = struct {
             pub fn next(self: *@This()) Result(?Row) {
                 if (self.finished) return .{ .ok = null };
                 const native_row = self.native.next() catch |cause|
-                    return .{ .err = makeError(self.allocator, self.connection, .iterate, cause) };
+                    return .{ .err = if (self.connection) |connection|
+                        makeError(self.allocator, connection, .iterate, cause)
+                    else
+                        poolError(.iterate, cause) };
                 const row = native_row orelse {
                     self.finished = true;
                     return .{ .ok = null };
@@ -359,7 +466,10 @@ pub const postgres = struct {
 
             pub fn drain(self: *@This()) Result(void) {
                 self.native.drain() catch |cause|
-                    return .{ .err = makeError(self.allocator, self.connection, .iterate, cause) };
+                    return .{ .err = if (self.connection) |connection|
+                        makeError(self.allocator, connection, .iterate, cause)
+                    else
+                        poolError(.iterate, cause) };
                 self.finished = true;
                 return .{ .ok = {} };
             }
@@ -507,6 +617,10 @@ pub const postgres = struct {
 
     fn staticError(class: ErrorClass, operation: Operation, message: []const u8) Error {
         return .{ .class = class, .backend = .postgres, .operation = operation, .message = message };
+    }
+
+    fn poolError(operation: Operation, cause: anyerror) Error {
+        return staticError(classify(cause), operation, @errorName(cause));
     }
 
     fn classifySqlState(code: []const u8) ErrorClass {

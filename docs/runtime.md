@@ -57,6 +57,15 @@ borrowed one does nothing, and a pooled one releases to its pool. A pooled
 handle that a pool produced together with a result — `Single` or `Rows` — is
 released by that result's `deinit`, so it must not outlive it.
 
+The PostgreSQL wrapper delegates pooling to `pg.zig`. Pool executor methods keep
+their native checkout inside the returned result until `deinit`. If an early-stop
+drain fails, the native connection remains non-idle; `pg.zig` then destroys and
+replaces it instead of returning it as reusable. Explicit `drain()` is still the
+only path that reports the drain error. A pool-direct operation cannot currently
+copy a PostgreSQL server error payload after the driver has released its internal
+checkout, so it reports the safe Zig error name; explicitly acquired connections
+retain the detailed SQLSTATE and message behavior.
+
 `sqlz.sqlite.OpenOptions` names the connection settings sqlz applies itself:
 open flags, `foreign_keys`, `journal_mode`, `synchronous`, and
 `busy_timeout_ms`. Each is optional, `null` keeps SQLite's default, and they are

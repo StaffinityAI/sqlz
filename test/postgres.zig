@@ -5,6 +5,7 @@ const sqlz = @import("sqlz");
 test "PostgreSQL adapter exposes the executor contract" {
     try std.testing.expectEqual(sqlz.Backend.postgres, sqlz.postgres.Conn.backend);
     try std.testing.expectEqual(sqlz.Backend.postgres, sqlz.postgres.Transaction.backend);
+    try std.testing.expectEqual(sqlz.Backend.postgres, sqlz.postgres.Pool.backend);
     try std.testing.expect(@hasDecl(sqlz.postgres.Conn, "execute"));
     try std.testing.expect(@hasDecl(sqlz.postgres.Conn, "fetchOne"));
     try std.testing.expect(@hasDecl(sqlz.postgres.Conn, "fetchOptional"));
@@ -46,6 +47,15 @@ test "PostgreSQL generic executor paths compile" {
             .text_role = @as(?TextRole, .member),
         });
         _ = conn.begin(.{});
+
+        var pool: sqlz.postgres.Pool = undefined;
+        _ = pool.acquire();
+        _ = pool.execute("update users set active=$1", .{ .active = true });
+        _ = pool.executeScript("create temporary table users_copy(id bigint)");
+        _ = pool.fetchOne(Row, "select id, active, name, role, text_role from users", .{});
+        _ = pool.fetchOptional(Row, "select id, active, name, role, text_role from users", .{});
+        _ = pool.fetch(Row, "select id, active, name, role, text_role from users", .{});
+        _ = pool.stats();
 
         var single: sqlz.postgres.Single(Row) = undefined;
         _ = single.toOwned(std.testing.allocator);

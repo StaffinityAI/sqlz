@@ -52,6 +52,7 @@ this slice.
 | Generator | Borrowed array contracts with nullable element and array nullability metadata | Complete |
 | Runtime | Recursive owned cloning/deinitialization for array-shaped rows | Complete |
 | Runtime | PostgreSQL owned/borrowed connections, scalar execution, rows, and transactions | Complete |
+| Runtime | PostgreSQL native pool wrapper, pooled executor methods, and dirty-connection replacement | Complete |
 | Runtime | Native enums at the parameter and row boundary | Complete |
 | Runtime | Connection-scoped owned rows and streaming owned conversion | Complete |
 | Runtime | Typed connection options and the native pool wrapper | Complete |
@@ -61,7 +62,7 @@ this slice.
 | Acceptance | Example runs all four cardinalities through generated and embedded queries (M3 gate) | Complete |
 | Hardening | Complete diagnostics, resource limits, and dependency matrix | Not started |
 | Deferred | PostgreSQL runtime backend | Deferred |
-| Deferred | PostgreSQL pools, array wire binding/decoding, TLS, builtin catalog signatures, and live-engine conformance | Deferred |
+| Deferred | PostgreSQL array wire binding/decoding, TLS, builtin catalog signatures, and live-engine conformance | Deferred |
 | Deferred | Migration execution and full CLI | Deferred |
 
 ## Tracked divergences
@@ -85,7 +86,7 @@ an undocumented rule, per [README.md](README.md).
 
 ## Current next steps
 
-1. Add PostgreSQL pools, release/discard semantics, and live-engine conformance tests.
+1. Add opt-in PostgreSQL live-engine conformance tests.
 2. Add PostgreSQL array wire binding/decoding and TLS options.
 3. Add PostgreSQL builtin catalog signatures.
 4. Harden diagnostics, source limits, and the supported dependency matrix.
