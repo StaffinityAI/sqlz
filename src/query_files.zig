@@ -47,6 +47,8 @@ pub const Source = struct {
     sql_offset: usize = 0,
     sql_line: usize = 1,
     sql_column: usize = 1,
+    sql_source_offsets: ?[]const usize = null,
+    source_text: ?[]const u8 = null,
     param_codecs: []const CodecOverride = &.{},
     column_codecs: []const CodecOverride = &.{},
     declared: Declared = .{},
@@ -55,6 +57,8 @@ pub const Source = struct {
         self.allocator.free(self.path);
         self.allocator.free(self.name);
         self.allocator.free(self.sql);
+        if (self.sql_source_offsets) |offsets| self.allocator.free(offsets);
+        if (self.source_text) |text| self.allocator.free(text);
         freeOverrides(self.allocator, self.param_codecs);
         freeOverrides(self.allocator, self.column_codecs);
         if (self.declared.params) |fields| freeDeclaredFields(self.allocator, fields);

@@ -132,8 +132,11 @@ fn parseQuery(
     const cardinality_node = fieldValue(tree, options.ast.fields, "cardinality") orelse
         return error.MissingCardinality;
 
-    const sql = try stringValue(allocator, tree, sql_node);
-    errdefer allocator.free(sql);
+    const sql_value = try mappedStringValue(allocator, tree, sql_node);
+    errdefer {
+        allocator.free(sql_value.text);
+        allocator.free(sql_value.offsets);
+    }
     const backends = try backendValue(tree, backend_node);
     const cardinality = std.meta.stringToEnum(
         query_files.Cardinality,
@@ -164,13 +167,17 @@ fn parseQuery(
     errdefer allocator.free(owned_path);
     const owned_name = try allocator.dupe(u8, name);
     errdefer allocator.free(owned_name);
+    const source_text = try allocator.dupe(u8, tree.source);
+    errdefer allocator.free(source_text);
     return .{
         .allocator = allocator,
         .path = owned_path,
         .name = owned_name,
         .backends = backends,
         .cardinality = cardinality,
-        .sql = sql,
+        .sql = sql_value.text,
+        .sql_source_offsets = sql_value.offsets,
+        .source_text = source_text,
         .param_codecs = try param_codecs.toOwnedSlice(allocator),
         .column_codecs = try column_codecs.toOwnedSlice(allocator),
         .declared = .{
@@ -332,6 +339,64 @@ fn stringValue(
                 try output.appendSlice(allocator, line[2..]);
             }
             break :result try output.toOwnedSlice(allocator);
+        },
+        else => error.InvalidSqlExpression,
+    };
+}
+
+const MappedString = struct { text: []u8, offsets: []usize };
+
+fn mappedStringValue(
+    allocator: std.mem.Allocator,
+    tree: *const std.zig.Ast,
+    node: std.zig.Ast.Node.Index,
+) Error!MappedString {
+    const token = tree.nodeMainToken(node);
+    const token_start = tree.tokens.items(.start)[token];
+    return switch (tree.nodeTag(node)) {
+        .string_literal => result: {
+            const raw = tree.tokenSlice(token);
+            const text = try std.zig.string_literal.parseAlloc(allocator, raw);
+            errdefer allocator.free(text);
+            const offsets = try allocator.alloc(usize, text.len + 1);
+            var raw_index: usize = 1;
+            var output_index: usize = 0;
+            while (output_index < text.len and raw_index + 1 < raw.len) {
+                offsets[output_index] = token_start + raw_index;
+                if (raw[raw_index] == '\\') {
+                    raw_index += 1;
+                    if (raw_index < raw.len and raw[raw_index] == 'x') raw_index += 2;
+                }
+                raw_index += 1;
+                output_index += 1;
+            }
+            while (output_index < text.len) : (output_index += 1) offsets[output_index] = token_start + 1;
+            offsets[text.len] = token_start + raw.len - 1;
+            break :result .{ .text = text, .offsets = offsets };
+        },
+        .multiline_string_literal => result: {
+            const tokens = tree.nodeData(node).token_and_token;
+            var output: std.ArrayList(u8) = .empty;
+            errdefer output.deinit(allocator);
+            var offsets: std.ArrayList(usize) = .empty;
+            errdefer offsets.deinit(allocator);
+            var current = tokens[0];
+            while (current <= tokens[1]) : (current += 1) {
+                const line = tree.tokenSlice(current);
+                if (line.len < 2) return error.InvalidSqlExpression;
+                if (current != tokens[0]) {
+                    try output.append(allocator, '\n');
+                    try offsets.append(allocator, tree.tokens.items(.start)[current] - 1);
+                }
+                const start = tree.tokens.items(.start)[current];
+                try output.appendSlice(allocator, line[2..]);
+                for (2..line.len) |index| try offsets.append(allocator, start + index);
+            }
+            try offsets.append(allocator, tree.tokens.items(.start)[tokens[1]] + tree.tokenSlice(tokens[1]).len);
+            break :result .{
+                .text = try output.toOwnedSlice(allocator),
+                .offsets = try offsets.toOwnedSlice(allocator),
+            };
         },
         else => error.InvalidSqlExpression,
     };

@@ -103,7 +103,7 @@ is completed, split, deferred, or newly discovered.
 | Diagnostics | Parser original-source spans and labels in code generation | Complete |
 | Diagnostics | Deterministic query-file error accumulation and configured cap, including values above the CLI default | Complete |
 | Diagnostics | Migration manifest and graph spans, multi-file labels, and fixes | Complete |
-| Diagnostics | Catalog/query semantic labels and suggested fixes | Not started |
+| Diagnostics | Catalog/query semantic labels and suggested fixes | Complete |
 | Acceptance | Live PostgreSQL CRUD, rows, owned values, transactions, arrays, enums/domains, pools, and version checks | Complete |
 | Acceptance | Hosted live PostgreSQL 15–18 conformance matrix | Complete |
 | Acceptance | Certificate-backed PostgreSQL TLS and cancellation conformance | Not started |
@@ -131,7 +131,7 @@ an undocumented rule, per [README.md](README.md).
 
 | Promise | Document | State |
 | --- | --- | --- |
-| Diagnostics with stable codes, source spans, labels, and JSON rendering | [sql-checker.md](sql-checker.md) | transport/rendering, process contracts, parser spans, migration manifest/graph labels, checked-source declaration classification, and bounded query-file accumulation exist; catalog/query semantic failures still need rich labels and fixes |
+| Diagnostics with stable codes, source spans, labels, and JSON rendering | [sql-checker.md](sql-checker.md) | complete for parser, migration graph, catalog replay, query semantics, checked declarations, deterministic accumulation, human output, and versioned JSON |
 | Named `Row` and `OwnedRow` types per row-returning query | [sql-checker.md](sql-checker.md) | generated bindings carry an anonymous `.row` struct; the runtime supplies `Single(Row)`/`Owned(Row)` |
 | General codec interface: `Binder`/`Decoder`, `borrows_result`, ownership hooks | [query-api.md](query-api.md) | only enum codecs are derived; `sqlz.assertCodec` rejects any other declaration |
 | `sqlz.Uuid` built-in mapping | [query-api.md](query-api.md) | not implemented |

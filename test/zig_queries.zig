@@ -23,6 +23,10 @@ test "discovers direct embedded query declarations in containers" {
     try std.testing.expectEqualStrings("find", discovery.sources[0].name);
     try std.testing.expectEqualStrings("SELECT id\nFROM users WHERE id=:id", discovery.sources[0].sql);
     try std.testing.expect(discovery.sources[0].backends.sqlite);
+    try std.testing.expect(discovery.sources[0].sql_source_offsets != null);
+    const sql_offset = std.mem.indexOf(u8, discovery.sources[0].sql, "users").?;
+    const file_offset = discovery.sources[0].sql_source_offsets.?[sql_offset];
+    try std.testing.expectEqualStrings("users", source[file_offset .. file_offset + 5]);
 }
 
 test "rejects computed SQL in embedded declarations" {

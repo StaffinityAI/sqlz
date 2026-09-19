@@ -684,6 +684,16 @@ fn hasCte(ctes: []const ir.Cte, name: []const u8) bool {
 }
 
 fn querySpan(source: *const query_files.Source, offset: usize, length: usize) diagnostics.Span {
+    if (source.sql_source_offsets) |offsets| {
+        const start_offset = offsets[@min(offset, offsets.len - 1)];
+        const end_offset = offsets[@min(offset + length, offsets.len - 1)];
+        const text = source.source_text.?;
+        return .{
+            .path = source.path,
+            .start = diagnostics.positionAt(text, start_offset),
+            .end = diagnostics.positionAt(text, end_offset),
+        };
+    }
     const local_start = diagnostics.positionAt(source.sql, offset);
     const local_end = diagnostics.positionAt(source.sql, offset + length);
     return .{

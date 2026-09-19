@@ -180,6 +180,27 @@ test "semantic type conflicts label both SQL uses" {
     try std.testing.expect(std.mem.indexOf(u8, list.slice()[1].help.?, "cast") != null);
 }
 
+test "missing relations and ambiguous columns use specific diagnostics" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try writeRelationDiagnosticProject(&tmp);
+    var list: diagnostics.List = .init(std.testing.allocator, 100);
+    defer list.deinit();
+    try std.testing.expectError(error.ProjectCheckFailed, codegen.generateProjectWithCodecsAndDiagnostics(
+        std.testing.allocator,
+        std.testing.io,
+        tmp.dir,
+        "sqlz.ziggy",
+        &.{},
+        &list,
+    ));
+    try std.testing.expectEqual(@as(usize, 2), list.slice().len);
+    try std.testing.expectEqualStrings("Q022", list.slice()[0].code);
+    try std.testing.expect(std.mem.indexOf(u8, list.slice()[0].help.?, "qualify") != null);
+    try std.testing.expectEqualStrings("Q020", list.slice()[1].code);
+    try std.testing.expectEqualStrings("did you mean `users`?", list.slice()[1].help.?);
+}
+
 test "portable project queries require matching backend contracts" {
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
@@ -868,4 +889,60 @@ fn writeDuplicateCatalogDiagnosticProject(tmp: *std.testing.TmpDir) !void {
         try migration.writeFile(std.testing.io, .{ .sub_path = "common.up.sql", .data = "CREATE TABLE users (id BIGINT)" });
         try migration.writeFile(std.testing.io, .{ .sub_path = "common.down.sql", .data = "DROP TABLE users" });
     }
+}
+
+fn writeRelationDiagnosticProject(tmp: *std.testing.TmpDir) !void {
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "sqlz.ziggy",
+        .data =
+        \\.format_version = 1,
+        \\.project_id = "550e8400-e29b-41d4-a716-446655440000",
+        \\.migrations = "migrations",
+        \\.sql_roots = .{ .app = "queries" },
+        \\.zig_roots = [],
+        \\.backends = .{ .sqlite = .{ .profile = "3.53" } },
+        ,
+    });
+    var migration = try tmp.dir.createDirPathOpen(std.testing.io, "migrations/aaaaaaaaaaaa_tables", .{});
+    defer migration.close(std.testing.io);
+    try migration.writeFile(std.testing.io, .{
+        .sub_path = "revision.ziggy",
+        .data =
+        \\.format_version = 1,
+        \\.revision = "aaaaaaaaaaaa",
+        \\.parents = [],
+        \\.description = "tables",
+        \\.created_utc = "2026-09-18T12:00:00Z",
+        \\.backends = [.sqlite],
+        \\.reversible = true,
+        \\.transaction = .{ .sqlite = .always },
+        ,
+    });
+    try migration.writeFile(std.testing.io, .{
+        .sub_path = "common.up.sql",
+        .data = "CREATE TABLE users (id BIGINT); CREATE TABLE profiles (id BIGINT)",
+    });
+    try migration.writeFile(std.testing.io, .{ .sub_path = "common.down.sql", .data = "DROP TABLE profiles; DROP TABLE users" });
+    var queries = try tmp.dir.createDirPathOpen(std.testing.io, "queries", .{});
+    defer queries.close(std.testing.io);
+    try queries.writeFile(std.testing.io, .{
+        .sub_path = "a.sql",
+        .data =
+        \\-- sqlz.name: ambiguous
+        \\-- sqlz.backends: sqlite
+        \\-- sqlz.cardinality: many
+        \\
+        \\SELECT id FROM users JOIN profiles ON users.id=profiles.id
+        ,
+    });
+    try queries.writeFile(std.testing.io, .{
+        .sub_path = "b.sql",
+        .data =
+        \\-- sqlz.name: missing_relation
+        \\-- sqlz.backends: sqlite
+        \\-- sqlz.cardinality: many
+        \\
+        \\SELECT id FROM usres
+        ,
+    });
 }
