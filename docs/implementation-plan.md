@@ -112,7 +112,6 @@ is completed, split, deferred, or newly discovered.
 | Acceptance | Example runs all four cardinalities through generated and embedded queries (M3 gate) | Complete |
 | Acceptance | Every example query checks offline against both SQLite and PostgreSQL catalogs | Complete |
 | Hardening | Complete remaining diagnostics, resource limits, and dependency matrix | Not started |
-| Deferred | PostgreSQL runtime backend | Deferred |
 | Deferred | PostgreSQL builtin catalog signatures and remaining live-engine conformance | Deferred |
 | Deferred | Migration execution and full CLI | Deferred |
 | Deferred | Checkpoint migrations and history compaction | Deferred |
