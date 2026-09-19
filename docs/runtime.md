@@ -66,6 +66,14 @@ copy a PostgreSQL server error payload after the driver has released its interna
 checkout, so it reports the safe Zig error name; explicitly acquired connections
 retain the detailed SQLSTATE and message behavior.
 
+PostgreSQL connection options include a runtime version policy. The selected
+profile is a minimum compatibility major: profile 15 accepts tested servers 15–18,
+while profile 17 accepts 17–18. Direct connections and pools query
+`server_version_num` after authentication, expose the detected version, reject
+older servers, and reject versions newer than the tested maximum unless
+`allow_untested_version` is explicit. Pool checkouts revalidate replacement
+connections against the same policy.
+
 PostgreSQL one-dimensional arrays bind and decode through `pg.zig`'s binary array
 support. Result slices and borrowed text elements live in result-local storage and
 remain valid until the next streaming row or result deinitialization; owned-row

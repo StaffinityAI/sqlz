@@ -19,6 +19,8 @@ The repository has two intentionally separate validation gates:
   matrix against PostgreSQL 15, 16, 17, and 18. The build passes the expected
   major explicitly and the test rejects a mismatched server before exercising
   the adapter.
+  Each major also verifies direct and pooled connection policy: its matching
+  profile succeeds, and majors 15–17 reject a deliberately higher profile.
 
 `zig build test-postgres` remains a compile/API test and does not connect to a
 server. `zig build test-postgres-integration` is the live PostgreSQL-only gate;

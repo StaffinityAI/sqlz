@@ -21,6 +21,41 @@ test "PostgreSQL connection options wrap the pinned driver" {
     try std.testing.expectEqualStrings("localhost", options.connect.host.?);
     try std.testing.expectEqual(@as(u16, 5432), options.connect.port.?);
     try std.testing.expect(@TypeOf(options.connect) == pg.Conn.Opts);
+    try std.testing.expectEqual(@as(u16, 15), options.version.profile);
+}
+
+test "PostgreSQL runtime version policy enforces compatibility bounds" {
+    const v15 = try sqlz.postgres.Version.parse(150_012);
+    const v18 = try sqlz.postgres.Version.parse(180_001);
+    const v19 = try sqlz.postgres.Version.parse(190_000);
+    try std.testing.expectEqual(@as(u16, 15), v15.major);
+    try std.testing.expectEqual(@as(u16, 12), v15.patch);
+    try (sqlz.postgres.VersionPolicy{ .profile = 15 }).validate(v18);
+    try (sqlz.postgres.VersionPolicy{ .profile = 18 }).validate(v18);
+    try std.testing.expectError(
+        error.ServerTooOld,
+        (sqlz.postgres.VersionPolicy{ .profile = 18 }).validate(v15),
+    );
+    try std.testing.expectError(
+        error.ServerTooNew,
+        (sqlz.postgres.VersionPolicy{ .profile = 15 }).validate(v19),
+    );
+    try (sqlz.postgres.VersionPolicy{
+        .profile = 15,
+        .allow_untested_version = true,
+    }).validate(v19);
+    try std.testing.expectError(
+        error.ServerTooOld,
+        (sqlz.postgres.VersionPolicy{
+            .profile = 18,
+            .allow_untested_version = true,
+        }).validate(v15),
+    );
+    try std.testing.expectError(error.InvalidServerVersion, sqlz.postgres.Version.parse(0));
+    try std.testing.expectError(
+        error.UnsupportedProfile,
+        (sqlz.postgres.VersionPolicy{ .profile = 14 }).validate(v15),
+    );
 }
 
 test "PostgreSQL generic executor paths compile" {

@@ -69,6 +69,7 @@ test "PostgreSQL server major matches the selected conformance target" {
     try selected.validate();
     var conn = try open();
     defer conn.deinit();
+    try std.testing.expectEqual(selected.expected_major, conn.server_version.major);
     var version = try unwrap(conn.fetchOne(
         struct { major: i32 },
         "SELECT current_setting('server_version_num')::integer / 10000 AS major",
@@ -76,6 +77,51 @@ test "PostgreSQL server major matches the selected conformance target" {
     ));
     defer version.deinit();
     try std.testing.expectEqual(@as(i32, @intCast(selected.expected_major)), version.row().major);
+}
+
+test "PostgreSQL direct and pooled connections enforce the selected profile" {
+    const selected = config();
+    const rejected_profile: u16 = if (selected.expected_major < 18)
+        selected.expected_major + 1
+    else
+        18;
+    if (selected.expected_major < 18) {
+        try std.testing.expectError(error.ServerTooOld, sqlz.postgres.open(allocator, io, .{
+            .connect = .{ .host = selected.host, .port = selected.port },
+            .auth = .{
+                .username = selected.username,
+                .password = selected.password,
+                .database = selected.database,
+            },
+            .version = .{ .profile = rejected_profile },
+        }));
+        try std.testing.expectError(error.ServerTooOld, sqlz.postgres.Pool.init(allocator, io, .{
+            .size = 1,
+            .connect = .{ .host = selected.host, .port = selected.port },
+            .auth = .{
+                .username = selected.username,
+                .password = selected.password,
+                .database = selected.database,
+            },
+            .version = .{ .profile = rejected_profile },
+        }));
+    }
+
+    var pool = try sqlz.postgres.Pool.init(allocator, io, .{
+        .size = 1,
+        .connect = .{ .host = selected.host, .port = selected.port },
+        .auth = .{
+            .username = selected.username,
+            .password = selected.password,
+            .database = selected.database,
+        },
+        .version = .{ .profile = selected.expected_major },
+    });
+    defer pool.deinit();
+    try std.testing.expectEqual(selected.expected_major, pool.server_version.major);
+    var pooled = try pool.acquire();
+    defer pooled.deinit();
+    try std.testing.expectEqual(selected.expected_major, pooled.server_version.major);
 }
 
 test "PostgreSQL executes all cardinalities and owned conversion" {
@@ -256,6 +302,7 @@ fn open() !sqlz.postgres.Conn {
             .password = selected.password,
             .database = selected.database,
         },
+        .version = .{ .profile = selected.expected_major },
     });
 }
 

@@ -23,6 +23,9 @@ honest. `std.Io.Evented` is not claimed for 0.16.0: on macOS it resolves to
 Profiles govern accepted syntax and offline catalogs. Runtime version checks reject
 older engines and, by default, versions newer than the tested range. The explicit
 `allow_untested_version` setting permits only the newer case with a warning/event.
+For PostgreSQL, the selected profile is the minimum accepted major; any tested
+major from that profile through 18 is valid. Direct and pooled connections expose
+the detected `server_version_num` and enforce the same policy.
 
 ## APIs and persisted data
 

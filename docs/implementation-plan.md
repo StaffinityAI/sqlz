@@ -15,8 +15,9 @@ This is the source of truth for work ordering. Keep it current whenever a slice
 is completed, split, deferred, or newly discovered.
 
 1. Complete the remaining PostgreSQL conformance edges: cancellation/timeouts,
-   runtime version-policy overrides, zio-backed sockets, certificate-backed TLS,
-   and detailed SQLSTATE payloads after the pg.zig recovery limitation is fixed.
+   zio-backed sockets, certificate-backed TLS, and detailed SQLSTATE payloads
+   after the pg.zig recovery limitation is fixed. Runtime version-policy
+   enforcement is complete.
 2. Convert manifest, graph, catalog, and semantic query-analysis failures onto
    richer component-specific source labels/fixes. Parser syntax spans and
    deterministic query-file accumulation up to the configured limit are complete;
@@ -105,6 +106,7 @@ is completed, split, deferred, or newly discovered.
 | Acceptance | Live PostgreSQL CRUD, rows, owned values, transactions, arrays, enums/domains, pools, and version checks | Complete |
 | Acceptance | Hosted live PostgreSQL 15–18 conformance matrix | Complete |
 | Acceptance | Certificate-backed PostgreSQL TLS and cancellation conformance | Not started |
+| Runtime | PostgreSQL direct/pool server-version detection and profile enforcement | Complete |
 | Runtime | Native enums at the parameter and row boundary | Complete |
 | Runtime | Connection-scoped owned rows and streaming owned conversion | Complete |
 | Runtime | Typed connection options and the native pool wrapper | Complete |

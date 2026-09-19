@@ -24,9 +24,49 @@ pub fn assertCodec(comptime T: type) void {
 }
 
 pub const postgres = struct {
+    pub const tested_max_major: u16 = 18;
+
+    pub const Version = struct {
+        number: u32,
+        major: u16,
+        patch: u16,
+
+        pub fn parse(number: i64) error{InvalidServerVersion}!Version {
+            if (number <= 0 or number > std.math.maxInt(u32))
+                return error.InvalidServerVersion;
+            const raw: u32 = @intCast(number);
+            const major_value = raw / 10_000;
+            if (major_value == 0 or major_value > std.math.maxInt(u16))
+                return error.InvalidServerVersion;
+            return .{
+                .number = raw,
+                .major = @intCast(major_value),
+                .patch = @intCast(raw % 10_000),
+            };
+        }
+    };
+
+    pub const VersionPolicy = struct {
+        profile: u16 = 15,
+        allow_untested_version: bool = false,
+
+        pub fn validate(self: VersionPolicy, version: Version) error{
+            UnsupportedProfile,
+            ServerTooOld,
+            ServerTooNew,
+        }!void {
+            if (self.profile < 15 or self.profile > tested_max_major)
+                return error.UnsupportedProfile;
+            if (version.major < self.profile) return error.ServerTooOld;
+            if (version.major > tested_max_major and !self.allow_untested_version)
+                return error.ServerTooNew;
+        }
+    };
+
     pub const OpenOptions = struct {
         connect: pg.Conn.Opts = .{},
         auth: pg.Conn.AuthOpts = .{},
+        version: VersionPolicy = .{},
     };
 
     pub const Ownership = enum { owned, borrowed, pooled };
@@ -38,6 +78,8 @@ pub const postgres = struct {
         io: std.Io,
         conn: *pg.Conn,
         ownership: Ownership,
+        server_version: Version,
+        version_policy: VersionPolicy,
         row_allocator: ?std.mem.Allocator = null,
         row_free: bool = true,
 
@@ -162,24 +204,55 @@ pub const postgres = struct {
         const native = try allocator.create(pg.Conn);
         errdefer allocator.destroy(native);
         native.* = try pg.Conn.openAndAuth(io, allocator, options.connect, options.auth);
+        errdefer native.deinit();
+        const version = try detectVersion(native);
+        try options.version.validate(version);
         return .{
             .allocator = allocator,
             .io = io,
             .conn = native,
             .ownership = .owned,
+            .server_version = version,
+            .version_policy = options.version,
         };
     }
 
-    pub fn borrow(allocator: std.mem.Allocator, io: std.Io, native: *pg.Conn) Conn {
+    pub fn borrow(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        native: *pg.Conn,
+        policy: VersionPolicy,
+    ) !Conn {
+        const version = try detectVersion(native);
+        try policy.validate(version);
         return .{
             .allocator = allocator,
             .io = io,
             .conn = native,
             .ownership = .borrowed,
+            .server_version = version,
+            .version_policy = policy,
         };
     }
 
-    pub const PoolOptions = pg.Pool.Opts;
+    pub const PoolOptions = struct {
+        size: u16 = 10,
+        auth: pg.Conn.AuthOpts = .{},
+        connect: pg.Conn.Opts = .{},
+        timeout: u32 = 10 * std.time.ms_per_s,
+        connect_on_init_count: ?u16 = null,
+        version: VersionPolicy = .{},
+
+        fn driver(self: PoolOptions) pg.Pool.Opts {
+            return .{
+                .size = self.size,
+                .auth = self.auth,
+                .connect = self.connect,
+                .timeout = self.timeout,
+                .connect_on_init_count = self.connect_on_init_count,
+            };
+        }
+    };
 
     pub const Pool = struct {
         pub const backend: Backend = .postgres;
@@ -187,16 +260,32 @@ pub const postgres = struct {
         allocator: std.mem.Allocator,
         io: std.Io,
         pool: *pg.Pool,
+        server_version: Version,
+        version_policy: VersionPolicy,
 
         pub fn init(
             allocator: std.mem.Allocator,
             io: std.Io,
             options: PoolOptions,
         ) !Pool {
+            const native = try pg.Pool.init(io, allocator, options.driver());
+            errdefer native.deinit();
+            const connection = try native.acquire();
+            const version = detectVersion(connection) catch |err| {
+                connection.release();
+                return err;
+            };
+            options.version.validate(version) catch |err| {
+                connection.release();
+                return err;
+            };
+            connection.release();
             return .{
                 .allocator = allocator,
                 .io = io,
-                .pool = try pg.Pool.init(io, allocator, options),
+                .pool = native,
+                .server_version = version,
+                .version_policy = options.version,
             };
         }
 
@@ -206,11 +295,22 @@ pub const postgres = struct {
         }
 
         pub fn acquire(self: *Pool) !Conn {
+            const native = try self.pool.acquire();
+            const version = detectVersion(native) catch |err| {
+                native.release();
+                return err;
+            };
+            self.version_policy.validate(version) catch |err| {
+                native.release();
+                return err;
+            };
             return .{
                 .allocator = self.allocator,
                 .io = self.io,
-                .conn = try self.pool.acquire(),
+                .conn = native,
                 .ownership = .pooled,
+                .server_version = version,
+                .version_policy = self.version_policy,
             };
         }
 
@@ -741,6 +841,15 @@ pub const postgres = struct {
 
     fn poolError(operation: Operation, cause: anyerror) Error {
         return staticError(classify(cause), operation, @errorName(cause));
+    }
+
+    fn detectVersion(native: *pg.Conn) !Version {
+        var row = (try native.row(
+            "SELECT current_setting('server_version_num')::bigint",
+            .{},
+        )) orelse return error.InvalidServerVersion;
+        defer row.deinit() catch {};
+        return Version.parse(try row.get(i64, 0));
     }
 
     fn classifySqlState(code: []const u8) ErrorClass {
