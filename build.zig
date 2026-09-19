@@ -165,6 +165,7 @@ pub fn build(b: *std.Build) !void {
             .{ .name = "sqlz_ir", .module = ir_mod },
             .{ .name = "sqlz_analysis", .module = analysis_mod },
             .{ .name = "sqlz_query_files", .module = query_files_mod },
+            .{ .name = "sqlz_diagnostics", .module = diagnostics_mod },
         },
     });
     const bootstrap_mod = b.addModule("sqlz_bootstrap", .{
@@ -329,7 +330,10 @@ pub fn build(b: *std.Build) !void {
     _ = diagnostics_accumulated.addOutputFileArg("accumulated_queries.zig");
     diagnostics_accumulated.addArgs(&.{ "--format", "json" });
     diagnostics_accumulated.expectExitCode(1);
-    diagnostics_accumulated.expectStdOutMatch("\"code\":\"C001\"");
+    diagnostics_accumulated.expectStdOutMatch("\"code\":\"Q021\"");
+    diagnostics_accumulated.expectStdOutMatch("\"line\":5,\"column\":8");
+    diagnostics_accumulated.expectStdOutMatch("aaaaaaaaaaaa_create_users/common.up.sql");
+    diagnostics_accumulated.expectStdOutMatch("did you mean `id`?");
     diagnostics_accumulated.expectStdOutMatch("\"path\":\"a.sql\"");
     diagnostics_accumulated.expectStdOutMatch("\"code\":\"S099\"");
     diagnostics_accumulated.expectStdErrEqual("");

@@ -7,8 +7,13 @@ pub const Relation = struct {
     qualifier_name: []const u8,
     alias: ?[]const u8,
     nullable: bool,
+    offset: usize = 0,
 };
-pub const ColumnReference = struct { qualifier: ?[]const u8, name: []const u8 };
+pub const ColumnReference = struct {
+    qualifier: ?[]const u8,
+    name: []const u8,
+    offset: usize = 0,
+};
 pub const TypeHint = enum { integer, real, text, blob, boolean };
 pub const ExpressionHint = struct { scalar_type: TypeHint, nullable: bool };
 pub const SetOperand = struct {
@@ -65,6 +70,14 @@ const Context = struct {
     ctes: std.ArrayList(Cte) = .empty,
     result_names: std.ArrayList([]const u8) = .empty,
     projections: std.ArrayList(Projection) = .empty,
+    original_offsets: ?[]const usize = null,
+
+    fn originalOffset(self: *const Context, rewritten: c_int) usize {
+        if (rewritten < 0) return 0;
+        const offset: usize = @intCast(rewritten);
+        if (self.original_offsets) |offsets| return offsets[@min(offset, offsets.len - 1)];
+        return offset;
+    }
 
     fn addRange(self: *Context, range_ptr: [*c]pg.PgQuery__RangeVar, nullable: bool, top: bool) Error!void {
         if (range_ptr == null) return error.InvalidAst;
@@ -85,12 +98,14 @@ const Context = struct {
             .qualifier_name = try self.allocator.dupe(u8, name),
             .alias = alias,
             .nullable = nullable,
+            .offset = self.originalOffset(range_ptr.*.location),
         });
         if (top) try self.top_bindings.append(self.allocator, .{
             .name = try self.allocator.dupe(u8, catalog_name),
             .qualifier_name = try self.allocator.dupe(u8, name),
             .alias = if (alias) |value| try self.allocator.dupe(u8, value) else null,
             .nullable = nullable,
+            .offset = self.originalOffset(range_ptr.*.location),
         });
     }
 };
@@ -99,6 +114,15 @@ pub fn adapt(
     allocator: std.mem.Allocator,
     tree: *const pg.PgQuery__ParseResult,
     parameter_names: []const []const u8,
+) Error!Query {
+    return adaptWithOffsets(allocator, tree, parameter_names, null);
+}
+
+pub fn adaptWithOffsets(
+    allocator: std.mem.Allocator,
+    tree: *const pg.PgQuery__ParseResult,
+    parameter_names: []const []const u8,
+    original_offsets: ?[]const usize,
 ) Error!Query {
     if (tree.n_stmts != 1) return error.MultipleStatements;
     const raw = tree.stmts[0];
@@ -117,7 +141,12 @@ pub fn adapt(
         try parameters.append(storage, owned);
         use.* = .{ .name = owned };
     }
-    var context: Context = .{ .allocator = storage, .uses = uses, .constraints = constraints };
+    var context: Context = .{
+        .allocator = storage,
+        .uses = uses,
+        .constraints = constraints,
+        .original_offsets = original_offsets,
+    };
 
     const kind, const mutation_target = switch (statement.*.node_case) {
         pg.PG_QUERY__NODE__NODE_SELECT_STMT => result: {
@@ -206,7 +235,7 @@ fn collectSetProjections(ctx: *Context, pointer: [*c]pg.PgQuery__SelectStmt) Err
         for (branches.items, operands) |branch, *operand| {
             const target = resTarget(branch.targets[column_index]) orelse return error.InvalidAst;
             operand.* = .{
-                .column = try columnReference(ctx.allocator, target.val),
+                .column = try columnReference(ctx, target.val),
                 .hint = try inferExpression(target.val),
                 .bindings = branch.bindings,
             };
@@ -292,7 +321,7 @@ fn collectProjections(ctx: *Context, values: []const [*c]pg.PgQuery__Node) Error
         try ctx.result_names.append(ctx.allocator, owned_name);
         try ctx.projections.append(ctx.allocator, .{
             .name = owned_name,
-            .column = try columnReference(ctx.allocator, target.val),
+            .column = try columnReference(ctx, target.val),
             .hint = try inferExpression(target.val),
         });
     }
@@ -314,7 +343,7 @@ fn collectCtes(ctx: *Context, clause: [*c]pg.PgQuery__WithClause) Error!void {
             const target = resTarget(target_node) orelse return error.InvalidAst;
             column.* = .{
                 .name = try ctx.allocator.dupe(u8, nodeString(alias_node) orelse return error.InvalidAst),
-                .column = try columnReference(ctx.allocator, target.val),
+                .column = try columnReference(ctx, target.val),
                 .hint = try inferExpression(target.val),
             };
         }
@@ -346,8 +375,8 @@ fn walkExpression(ctx: *Context, node: [*c]pg.PgQuery__Node) Error!void {
     switch (node.*.node_case) {
         pg.PG_QUERY__NODE__NODE_A_EXPR => {
             const expression = node.*.unnamed_0.a_expr;
-            if (try columnReference(ctx.allocator, expression.*.lexpr)) |column| try bindParameter(ctx, expression.*.rexpr, column);
-            if (try columnReference(ctx.allocator, expression.*.rexpr)) |column| try bindParameter(ctx, expression.*.lexpr, column);
+            if (try columnReference(ctx, expression.*.lexpr)) |column| try bindParameter(ctx, expression.*.rexpr, column);
+            if (try columnReference(ctx, expression.*.rexpr)) |column| try bindParameter(ctx, expression.*.lexpr, column);
             try walkExpression(ctx, expression.*.lexpr);
             try walkExpression(ctx, expression.*.rexpr);
         },
@@ -421,17 +450,18 @@ fn parameterOrdinal(node: [*c]pg.PgQuery__Node) ?usize {
     return if (number > 0) @intCast(number) else null;
 }
 
-fn columnReference(allocator: std.mem.Allocator, node: [*c]pg.PgQuery__Node) Error!?ColumnReference {
+fn columnReference(ctx: *Context, node: [*c]pg.PgQuery__Node) Error!?ColumnReference {
     if (node == null or node.*.node_case != pg.PG_QUERY__NODE__NODE_COLUMN_REF) return null;
     const column = node.*.unnamed_0.column_ref;
     if (column == null or column.*.n_fields == 0) return error.InvalidAst;
     const fields = nodeSlice(column.*.fields, column.*.n_fields);
     return .{
         .qualifier = if (fields.len >= 2)
-            try allocator.dupe(u8, nodeString(fields[fields.len - 2]) orelse return error.InvalidAst)
+            try ctx.allocator.dupe(u8, nodeString(fields[fields.len - 2]) orelse return error.InvalidAst)
         else
             null,
-        .name = try allocator.dupe(u8, nodeString(fields[fields.len - 1]) orelse return error.InvalidAst),
+        .name = try ctx.allocator.dupe(u8, nodeString(fields[fields.len - 1]) orelse return error.InvalidAst),
+        .offset = ctx.originalOffset(column.*.location),
     };
 }
 

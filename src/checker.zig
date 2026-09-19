@@ -5,6 +5,7 @@ const migrations = @import("sqlz_migrations");
 const ir = @import("sqlz_ir");
 const analysis = @import("sqlz_analysis");
 const query_files = @import("sqlz_query_files");
+const diagnostics = @import("sqlz_diagnostics");
 
 pub const SqliteDialect = parser.SqliteDialect;
 pub const SqliteProfile = parser.SqliteProfile;
@@ -16,11 +17,161 @@ pub const PostgresCatalogOptions = struct {
     search_path: []const []const u8 = &.{"public"},
 };
 
+const CatalogSqlSource = struct { path: []const u8, sql: []const u8 };
+
+pub fn appendCatalogDiagnostic(
+    allocator: std.mem.Allocator,
+    err: anyerror,
+    discovery: *const migrations.Discovery,
+    backend: migrations.Backend,
+    list: *diagnostics.List,
+) !bool {
+    if (err != error.DuplicateTable and err != error.DuplicateColumn and
+        err != error.MissingTable and err != error.MissingColumn and
+        err != error.DuplicateIndex and err != error.MissingIndex and
+        err != error.DuplicateType and err != error.MissingType and
+        err != error.UnsupportedStatement and err != error.UnsupportedArrayDimensions)
+        return false;
+
+    const revisions = try allocator.alloc(migrations.Revision, discovery.revisions.len);
+    defer allocator.free(revisions);
+    for (discovery.revisions, revisions) |revision, *node| node.* = .{
+        .id = revision.manifest.manifest().revision,
+        .parents = revision.manifest.manifest().parents,
+    };
+    var order = try migrations.validateAndOrder(allocator, revisions);
+    defer order.deinit();
+    var scratch = catalog.Catalog.init(allocator);
+    defer scratch.deinit();
+
+    for (order.indices) |revision_index| {
+        const revision = discovery.revisions[revision_index];
+        const manifest = revision.manifest.manifest();
+        if (!migrations.targetsBackend(manifest, backend)) continue;
+        const sources = switch (backend) {
+            .sqlite => [_]CatalogSqlSource{
+                .{ .path = "common.up.sql", .sql = revision.common_up },
+                .{ .path = "sqlite.up.sql", .sql = revision.sqlite_up },
+            },
+            .postgres => [_]CatalogSqlSource{
+                .{ .path = "common.up.sql", .sql = revision.common_up },
+                .{ .path = "postgres.up.sql", .sql = revision.postgres_up },
+            },
+        };
+        for (sources, 0..) |source, source_index| {
+            if (std.mem.trim(u8, source.sql, &std.ascii.whitespace).len == 0) continue;
+            var parsed = switch (if (source_index == 0) migrations.Backend.postgres else backend) {
+                .sqlite => parser.parseSqlite(allocator, source.sql),
+                .postgres => parser.parse(allocator, source.sql),
+            } catch continue;
+            defer parsed.deinit();
+            const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ revision.directory, source.path });
+            defer allocator.free(path);
+            scratch.applyParserTreeWithSource(parsed.tree, .{
+                .path = path,
+                .sql = source.sql,
+                .revision = manifest.revision,
+            }) catch |candidate| {
+                if (candidate != err) continue;
+                const message = catalogMessage(err);
+                var labels: [1]diagnostics.Label = undefined;
+                const conflict_origin = catalogConflictOrigin(&scratch, err, source.sql);
+                if (conflict_origin) |origin| {
+                    labels[0] = .{ .span = originSpan(origin, 1), .message = "previous declaration" };
+                }
+                try list.appendDiagnostic(.{
+                    .severity = .err,
+                    .code = catalogCode(err),
+                    .message = message,
+                    .primary = diagnostics.spanAt(path, source.sql, 0, @min(source.sql.len, @as(usize, 1))),
+                    .labels = if (conflict_origin != null) labels[0..1] else labels[0..0],
+                    .notes = &.{manifest.revision},
+                    .help = catalogHelp(err),
+                });
+                return true;
+            };
+        }
+    }
+    return false;
+}
+
+fn catalogConflictOrigin(schema: *const catalog.Catalog, err: anyerror, sql: []const u8) ?catalog.Origin {
+    if (err == error.DuplicateTable) {
+        var tables = schema.tables.iterator();
+        while (tables.next()) |entry| {
+            if (containsIdentifier(sql, entry.key_ptr.*)) return entry.value_ptr.origin;
+        }
+    } else if (err == error.DuplicateColumn) {
+        var tables = schema.tables.iterator();
+        while (tables.next()) |entry| {
+            var columns = entry.value_ptr.columns.iterator();
+            while (columns.next()) |column| {
+                if (containsIdentifier(sql, column.key_ptr.*)) return column.value_ptr.origin;
+            }
+        }
+    }
+    return null;
+}
+
+fn containsIdentifier(sql: []const u8, name: []const u8) bool {
+    var start: usize = 0;
+    while (std.mem.indexOfPos(u8, sql, start, name)) |index| {
+        const before_ok = index == 0 or (!std.ascii.isAlphanumeric(sql[index - 1]) and sql[index - 1] != '_');
+        const end = index + name.len;
+        const after_ok = end == sql.len or (!std.ascii.isAlphanumeric(sql[end]) and sql[end] != '_');
+        if (before_ok and after_ok) return true;
+        start = end;
+    }
+    return false;
+}
+
+fn catalogCode(err: anyerror) []const u8 {
+    return switch (err) {
+        error.DuplicateTable => "C010",
+        error.DuplicateColumn => "C011",
+        error.MissingTable => "C020",
+        error.MissingColumn => "C021",
+        error.DuplicateIndex => "C012",
+        error.MissingIndex => "C022",
+        error.DuplicateType => "C013",
+        error.MissingType => "C023",
+        error.UnsupportedArrayDimensions => "C030",
+        else => "C001",
+    };
+}
+
+fn catalogMessage(err: anyerror) []const u8 {
+    return switch (err) {
+        error.DuplicateTable => "migration declares a table that already exists",
+        error.DuplicateColumn => "migration declares a column that already exists",
+        error.MissingTable => "migration references a table that does not exist",
+        error.MissingColumn => "migration references a column that does not exist",
+        error.DuplicateIndex => "migration declares an index that already exists",
+        error.MissingIndex => "migration references an index that does not exist",
+        error.DuplicateType => "migration declares a type that already exists",
+        error.MissingType => "migration references a type that does not exist",
+        error.UnsupportedArrayDimensions => "only one-dimensional PostgreSQL arrays are supported",
+        else => "migration contains unsupported catalog SQL",
+    };
+}
+
+fn catalogHelp(err: anyerror) ?[]const u8 {
+    return switch (err) {
+        error.DuplicateTable, error.DuplicateColumn, error.DuplicateIndex, error.DuplicateType => "rename the new object or alter the existing object instead",
+        error.MissingTable, error.MissingColumn, error.MissingIndex, error.MissingType => "create the referenced object earlier or correct its name",
+        error.UnsupportedArrayDimensions => "use a one-dimensional array or a registered codec",
+        else => null,
+    };
+}
+
 pub const MigrationInput = struct {
     revision: migrations.Revision,
     common_sql: []const u8 = "",
     sqlite_sql: []const u8 = "",
     postgres_sql: []const u8 = "",
+    common_path: ?[]const u8 = null,
+    sqlite_path: ?[]const u8 = null,
+    postgres_path: ?[]const u8 = null,
 };
 
 pub const Error = migrations.Error || parser.ParseError || catalog.Error || ir.Error || analysis.Error || error{
@@ -54,6 +205,230 @@ pub const CheckedQuery = struct {
         self.* = undefined;
     }
 };
+
+pub fn appendSemanticDiagnostic(
+    allocator: std.mem.Allocator,
+    err: anyerror,
+    schema: *const catalog.Catalog,
+    source: *const query_files.Source,
+    backend: migrations.Backend,
+    sqlite_dialect: SqliteDialect,
+    postgres_dialect: PostgresDialect,
+    list: *diagnostics.List,
+) !bool {
+    if (err != error.MissingRelation and err != error.MissingColumn and err != error.AmbiguousColumn)
+        return false;
+    var parsed = switch (backend) {
+        .sqlite => try parser.parseSqliteWithDialect(allocator, source.sql, sqlite_dialect),
+        .postgres => try parser.parsePostgresWithDialect(allocator, source.sql, postgres_dialect),
+    };
+    defer parsed.deinit();
+    var query = try ir.adaptWithOffsets(
+        allocator,
+        parsed.tree,
+        parsed.rewritten.names,
+        parsed.rewritten.original_offsets,
+    );
+    defer query.deinit();
+
+    if (err == error.MissingRelation) {
+        for (query.relation_bindings) |binding| {
+            if (schema.table(binding.name) != null or hasCte(query.ctes, binding.name)) continue;
+            const suggestion = nearestTable(schema, binding.name);
+            const message = try std.fmt.allocPrint(allocator, "relation `{s}` does not exist", .{binding.name});
+            defer allocator.free(message);
+            const help = if (suggestion) |name|
+                try std.fmt.allocPrint(allocator, "did you mean `{s}`?", .{name})
+            else
+                null;
+            defer if (help) |value| allocator.free(value);
+            var labels: [1]diagnostics.Label = undefined;
+            const label_slice = if (suggestion) |name| label: {
+                const table = schema.table(name).?;
+                if (table.origin) |origin| {
+                    labels[0] = .{ .span = originSpan(origin, name.len), .message = "available relation" };
+                    break :label labels[0..1];
+                }
+                break :label labels[0..0];
+            } else labels[0..0];
+            try list.appendDiagnostic(.{
+                .severity = .err,
+                .code = "Q020",
+                .message = message,
+                .primary = querySpan(source, binding.offset, binding.name.len),
+                .labels = label_slice,
+                .help = help,
+            });
+            return true;
+        }
+    }
+
+    const reference = firstFailingColumn(schema, &query, err == error.AmbiguousColumn) orelse return false;
+    const suggestion = if (err == error.MissingColumn) nearestVisibleColumn(schema, &query, reference) else null;
+    const message = if (err == error.AmbiguousColumn)
+        try std.fmt.allocPrint(allocator, "column `{s}` is ambiguous", .{reference.name})
+    else
+        try std.fmt.allocPrint(allocator, "column `{s}` does not exist", .{reference.name});
+    defer allocator.free(message);
+    const help = if (err == error.AmbiguousColumn)
+        try std.fmt.allocPrint(allocator, "qualify `{s}` with a table name or alias", .{reference.name})
+    else if (suggestion) |candidate|
+        try std.fmt.allocPrint(allocator, "did you mean `{s}`?", .{candidate.column.name})
+    else
+        null;
+    defer if (help) |value| allocator.free(value);
+    var labels: [1]diagnostics.Label = undefined;
+    const label_slice = if (suggestion) |candidate| label: {
+        if (candidate.column.origin) |origin| {
+            labels[0] = .{ .span = originSpan(origin, candidate.column.name.len), .message = "available column" };
+            break :label labels[0..1];
+        }
+        break :label labels[0..0];
+    } else labels[0..0];
+    try list.appendDiagnostic(.{
+        .severity = .err,
+        .code = if (err == error.AmbiguousColumn) "Q022" else "Q021",
+        .message = message,
+        .primary = querySpan(source, reference.offset, reference.name.len),
+        .labels = label_slice,
+        .help = help,
+    });
+    return true;
+}
+
+const ColumnCandidate = struct {
+    column: *const catalog.Column,
+    distance: usize,
+};
+
+fn firstFailingColumn(
+    schema: *const catalog.Catalog,
+    query: *const ir.Query,
+    ambiguous: bool,
+) ?ir.ColumnReference {
+    const expected: u2 = if (ambiguous) 2 else 0;
+    for (query.projections) |projection| {
+        if (projection.set_operands.len != 0) {
+            for (projection.set_operands) |operand| if (operand.column) |reference|
+                if (columnMatchCount(schema, operand.bindings, reference) == expected) return reference;
+        } else if (projection.column) |reference| {
+            if (columnMatchCount(schema, query.top_level_bindings, reference) == expected)
+                return reference;
+        }
+    }
+    for (query.parameter_uses) |use| for (use.columns) |reference| {
+        if (columnMatchCount(schema, query.relation_bindings, reference) == expected)
+            return reference;
+    };
+    return null;
+}
+
+fn columnMatchCount(schema: *const catalog.Catalog, bindings: []const ir.Relation, reference: ir.ColumnReference) u2 {
+    var count: u2 = 0;
+    for (bindings) |binding| {
+        if (reference.qualifier) |qualifier| {
+            const alias_match = if (binding.alias) |alias| std.mem.eql(u8, alias, qualifier) else false;
+            if (!alias_match and !std.mem.eql(u8, binding.qualifier_name, qualifier)) continue;
+        }
+        const table = schema.table(binding.name) orelse continue;
+        if (!table.columns.contains(reference.name)) continue;
+        count = @min(count + 1, 2);
+    }
+    return count;
+}
+
+fn nearestVisibleColumn(
+    schema: *const catalog.Catalog,
+    query: *const ir.Query,
+    reference: ir.ColumnReference,
+) ?ColumnCandidate {
+    var best: ?ColumnCandidate = null;
+    for (query.relation_bindings) |binding| {
+        if (reference.qualifier) |qualifier| {
+            const alias_match = if (binding.alias) |alias| std.mem.eql(u8, alias, qualifier) else false;
+            if (!alias_match and !std.mem.eql(u8, binding.qualifier_name, qualifier)) continue;
+        }
+        const table = schema.table(binding.name) orelse continue;
+        var columns = table.columns.iterator();
+        while (columns.next()) |entry| {
+            const distance = editDistance(reference.name, entry.key_ptr.*);
+            if (!plausibleSuggestion(reference.name.len, distance)) continue;
+            if (best == null or distance < best.?.distance or
+                (distance == best.?.distance and std.mem.lessThan(u8, entry.key_ptr.*, best.?.column.name)))
+                best = .{ .column = entry.value_ptr, .distance = distance };
+        }
+    }
+    return best;
+}
+
+fn nearestTable(schema: *const catalog.Catalog, name: []const u8) ?[]const u8 {
+    var best: ?[]const u8 = null;
+    var best_distance: usize = std.math.maxInt(usize);
+    var tables = schema.tables.iterator();
+    while (tables.next()) |entry| {
+        const distance = editDistance(name, entry.key_ptr.*);
+        if (!plausibleSuggestion(name.len, distance)) continue;
+        if (distance < best_distance or (distance == best_distance and
+            (best == null or std.mem.lessThan(u8, entry.key_ptr.*, best.?))))
+        {
+            best = entry.key_ptr.*;
+            best_distance = distance;
+        }
+    }
+    return best;
+}
+
+fn plausibleSuggestion(length: usize, distance: usize) bool {
+    const limit: usize = if (length <= 4) 1 else if (length <= 8) 2 else 3;
+    return distance <= limit;
+}
+
+fn editDistance(left: []const u8, right: []const u8) usize {
+    var previous: [256]usize = undefined;
+    var current: [256]usize = undefined;
+    if (right.len >= previous.len) return std.math.maxInt(usize);
+    for (0..right.len + 1) |index| previous[index] = index;
+    for (left, 1..) |left_byte, row| {
+        current[0] = row;
+        for (right, 1..) |right_byte, column| {
+            const substitution = previous[column - 1] + @intFromBool(std.ascii.toLower(left_byte) != std.ascii.toLower(right_byte));
+            current[column] = @min(@min(current[column - 1] + 1, previous[column] + 1), substitution);
+        }
+        @memcpy(previous[0 .. right.len + 1], current[0 .. right.len + 1]);
+    }
+    return previous[right.len];
+}
+
+fn hasCte(ctes: []const ir.Cte, name: []const u8) bool {
+    for (ctes) |cte| if (std.mem.eql(u8, cte.name, name)) return true;
+    return false;
+}
+
+fn querySpan(source: *const query_files.Source, offset: usize, length: usize) diagnostics.Span {
+    const local_start = diagnostics.positionAt(source.sql, offset);
+    const local_end = diagnostics.positionAt(source.sql, offset + length);
+    return .{
+        .path = source.path,
+        .start = .{
+            .offset = source.sql_offset + local_start.offset,
+            .line = source.sql_line + local_start.line - 1,
+            .column = if (local_start.line == 1) source.sql_column + local_start.column - 1 else local_start.column,
+        },
+        .end = .{
+            .offset = source.sql_offset + local_end.offset,
+            .line = source.sql_line + local_end.line - 1,
+            .column = if (local_end.line == 1) source.sql_column + local_end.column - 1 else local_end.column,
+        },
+    };
+}
+
+fn originSpan(origin: catalog.Origin, length: usize) diagnostics.Span {
+    return .{
+        .path = origin.path,
+        .start = .{ .offset = origin.offset, .line = origin.line, .column = origin.column },
+        .end = .{ .offset = origin.offset + length, .line = origin.line, .column = origin.column + length },
+    };
+}
 
 pub fn checkNamedSqlite(
     allocator: std.mem.Allocator,
@@ -92,7 +467,7 @@ pub fn checkNamedSqliteWithCodecs(
     if (!source.backends.sqlite) return error.BackendNotSelected;
     var parsed = try parser.parseSqliteWithDialect(allocator, source.sql, dialect);
     errdefer parsed.deinit();
-    var query = try ir.adapt(allocator, parsed.tree, parsed.rewritten.names);
+    var query = try ir.adaptWithOffsets(allocator, parsed.tree, parsed.rewritten.names, parsed.rewritten.original_offsets);
     errdefer query.deinit();
     const produces_rows = query.projections.len != 0;
     if (source.cardinality == .exec and produces_rows) return error.UnexpectedResultColumns;
@@ -131,7 +506,7 @@ pub fn checkNamedPostgresWithCodecs(
     if (!source.backends.postgres) return error.BackendNotSelected;
     var parsed = try parser.parsePostgresWithDialect(allocator, source.sql, dialect);
     errdefer parsed.deinit();
-    var query = try ir.adapt(allocator, parsed.tree, parsed.rewritten.names);
+    var query = try ir.adaptWithOffsets(allocator, parsed.tree, parsed.rewritten.names, parsed.rewritten.original_offsets);
     errdefer query.deinit();
     const produces_rows = query.projections.len != 0;
     if (source.cardinality == .exec and produces_rows) return error.UnexpectedResultColumns;
@@ -371,6 +746,14 @@ fn replayBackend(
             backend,
             sqlite_dialect,
             postgres_dialect,
+            .{ .path = input.common_path, .revision = input.revision.id },
+            .{
+                .path = switch (backend) {
+                    .sqlite => input.sqlite_path,
+                    .postgres => input.postgres_path,
+                },
+                .revision = input.revision.id,
+            },
         );
         snapshots[index] = schema;
     }
@@ -403,8 +786,14 @@ pub fn replayDiscoveredSqliteWithDialect(
             .revision = .{ .id = manifest.revision, .parents = manifest.parents },
             .common_sql = if (migrations.targetsBackend(manifest, .sqlite)) revision.common_up else "",
             .sqlite_sql = if (migrations.targetsBackend(manifest, .sqlite)) revision.sqlite_up else "",
+            .common_path = try std.fmt.allocPrint(allocator, "{s}/common.up.sql", .{revision.directory}),
+            .sqlite_path = try std.fmt.allocPrint(allocator, "{s}/sqlite.up.sql", .{revision.directory}),
         };
     }
+    defer for (inputs) |input| {
+        if (input.common_path) |path| allocator.free(path);
+        if (input.sqlite_path) |path| allocator.free(path);
+    };
     return replaySqliteWithDialect(allocator, inputs, dialect);
 }
 
@@ -436,8 +825,14 @@ pub fn replayDiscoveredPostgresWithOptions(
             .revision = .{ .id = manifest.revision, .parents = manifest.parents },
             .common_sql = if (migrations.targetsBackend(manifest, .postgres)) revision.common_up else "",
             .postgres_sql = if (migrations.targetsBackend(manifest, .postgres)) revision.postgres_up else "",
+            .common_path = try std.fmt.allocPrint(allocator, "{s}/common.up.sql", .{revision.directory}),
+            .postgres_path = try std.fmt.allocPrint(allocator, "{s}/postgres.up.sql", .{revision.directory}),
         };
     }
+    defer for (inputs) |input| {
+        if (input.common_path) |path| allocator.free(path);
+        if (input.postgres_path) |path| allocator.free(path);
+    };
     var schema = try replayPostgresWithDialect(allocator, inputs, options.dialect);
     errdefer schema.deinit();
     try schema.setPostgresSearchPath(options.search_path);
@@ -460,7 +855,7 @@ pub fn applySqliteRevisionAtomicWithDialect(
     sqlite_sql: []const u8,
     dialect: SqliteDialect,
 ) (parser.ParseError || catalog.Error)!void {
-    return applyRevisionAtomic(schema, allocator, common_sql, sqlite_sql, .sqlite, dialect, .{});
+    return applyRevisionAtomic(schema, allocator, common_sql, sqlite_sql, .sqlite, dialect, .{}, .{}, .{});
 }
 
 pub fn applyPostgresRevisionAtomic(
@@ -479,7 +874,7 @@ pub fn applyPostgresRevisionAtomicWithDialect(
     postgres_sql: []const u8,
     dialect: PostgresDialect,
 ) (parser.ParseError || catalog.Error)!void {
-    return applyRevisionAtomic(schema, allocator, common_sql, postgres_sql, .postgres, .{}, dialect);
+    return applyRevisionAtomic(schema, allocator, common_sql, postgres_sql, .postgres, .{}, dialect, .{}, .{});
 }
 
 fn applyRevisionAtomic(
@@ -490,15 +885,22 @@ fn applyRevisionAtomic(
     backend: migrations.Backend,
     sqlite_dialect: SqliteDialect,
     postgres_dialect: PostgresDialect,
+    common_source: SourceContext,
+    backend_source: SourceContext,
 ) (parser.ParseError || catalog.Error)!void {
     var staged = try schema.clone(allocator);
     errdefer staged.deinit();
-    try parseAndApply(&staged, allocator, common_sql, .postgres, sqlite_dialect, postgres_dialect);
-    try parseAndApply(&staged, allocator, backend_sql, backend, sqlite_dialect, postgres_dialect);
+    try parseAndApply(&staged, allocator, common_sql, .postgres, sqlite_dialect, postgres_dialect, common_source);
+    try parseAndApply(&staged, allocator, backend_sql, backend, sqlite_dialect, postgres_dialect, backend_source);
 
     schema.deinit();
     schema.* = staged;
 }
+
+const SourceContext = struct {
+    path: ?[]const u8 = null,
+    revision: ?[]const u8 = null,
+};
 
 fn parseAndApply(
     schema: *catalog.Catalog,
@@ -507,6 +909,7 @@ fn parseAndApply(
     backend: migrations.Backend,
     sqlite_dialect: SqliteDialect,
     postgres_dialect: PostgresDialect,
+    source: SourceContext,
 ) (parser.ParseError || catalog.Error)!void {
     if (std.mem.trim(u8, sql, &std.ascii.whitespace).len == 0) return;
     var parsed = switch (backend) {
@@ -514,7 +917,13 @@ fn parseAndApply(
         .postgres => try parser.parsePostgresWithDialect(allocator, sql, postgres_dialect),
     };
     defer parsed.deinit();
-    try schema.applyParserTree(parsed.tree);
+    if (source.path) |path| {
+        try schema.applyParserTreeWithSource(parsed.tree, .{
+            .path = path,
+            .sql = sql,
+            .revision = source.revision,
+        });
+    } else try schema.applyParserTree(parsed.tree);
 }
 
 fn revisionIndex(revisions: []const migrations.Revision, id: []const u8) ?usize {

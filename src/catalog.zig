@@ -2,6 +2,26 @@ const std = @import("std");
 const parser = @import("sqlz_parser");
 const pg = parser.ast;
 
+pub const Origin = struct {
+    path: []const u8,
+    revision: ?[]const u8,
+    offset: usize,
+    line: usize,
+    column: usize,
+
+    fn deinit(self: *Origin, allocator: std.mem.Allocator) void {
+        allocator.free(self.path);
+        if (self.revision) |revision| allocator.free(revision);
+        self.* = undefined;
+    }
+};
+
+pub const Source = struct {
+    path: []const u8,
+    sql: []const u8,
+    revision: ?[]const u8 = null,
+};
+
 pub const Column = struct {
     name: []const u8,
     database_type: []const u8,
@@ -9,6 +29,7 @@ pub const Column = struct {
     nullable: bool,
     primary_key: bool,
     unique: bool,
+    origin: ?Origin = null,
 };
 
 pub const Index = struct {
@@ -32,14 +53,17 @@ pub const Table = struct {
     name: []const u8,
     is_view: bool = false,
     columns: std.StringArrayHashMapUnmanaged(Column) = .empty,
+    origin: ?Origin = null,
 
     pub fn deinit(self: *Table) void {
         var iterator = self.columns.iterator();
         while (iterator.next()) |entry| {
+            if (entry.value_ptr.origin) |*origin| origin.deinit(self.allocator);
             self.allocator.free(entry.value_ptr.name);
             self.allocator.free(entry.value_ptr.database_type);
         }
         self.columns.deinit(self.allocator);
+        if (self.origin) |*origin| origin.deinit(self.allocator);
         self.allocator.free(self.name);
         self.* = undefined;
     }
@@ -84,6 +108,7 @@ pub const Catalog = struct {
     indexes: std.StringArrayHashMapUnmanaged(Index) = .empty,
     types: std.StringArrayHashMapUnmanaged(DatabaseType) = .empty,
     postgres_search_path: []const []const u8 = &.{},
+    active_source: ?Source = null,
 
     pub fn init(allocator: std.mem.Allocator) Catalog {
         return .{ .allocator = allocator };
@@ -168,6 +193,7 @@ pub const Catalog = struct {
                 .allocator = allocator,
                 .name = try allocator.dupe(u8, source.name),
                 .is_view = source.is_view,
+                .origin = try cloneOrigin(allocator, source.origin),
             };
             errdefer table_copy.deinit();
             var columns = source.columns.iterator();
@@ -184,6 +210,7 @@ pub const Catalog = struct {
                     .nullable = column.nullable,
                     .primary_key = column.primary_key,
                     .unique = column.unique,
+                    .origin = try cloneOrigin(allocator, column.origin),
                 });
             }
             try copy.tables.putNoClobber(allocator, table_copy.name, table_copy);
@@ -290,6 +317,17 @@ pub const Catalog = struct {
     }
 
     pub fn applyParserTree(self: *Catalog, tree: *const pg.PgQuery__ParseResult) Error!void {
+        return self.applyParserTreeWithSource(tree, null);
+    }
+
+    pub fn applyParserTreeWithSource(
+        self: *Catalog,
+        tree: *const pg.PgQuery__ParseResult,
+        source: ?Source,
+    ) Error!void {
+        const previous = self.active_source;
+        self.active_source = source;
+        defer self.active_source = previous;
         for (rawSlice(tree.stmts, tree.n_stmts)) |raw| {
             if (raw == null or raw.*.stmt == null) return error.InvalidAst;
             const node = raw.*.stmt;
@@ -318,12 +356,17 @@ pub const Catalog = struct {
         var table_value: Table = .{
             .allocator = self.allocator,
             .name = try self.allocator.dupe(u8, table_name),
+            .origin = try self.originAt(create.relation.*.location),
         };
         errdefer table_value.deinit();
 
         for (nodeSlice(create.table_elts, create.n_table_elts)) |element| {
             if (element.*.node_case == pg.PG_QUERY__NODE__NODE_COLUMN_DEF)
-                try addColumn(&table_value, element.*.unnamed_0.column_def);
+                try addColumn(
+                    &table_value,
+                    element.*.unnamed_0.column_def,
+                    try self.originAt(element.*.unnamed_0.column_def.*.location),
+                );
         }
         for (nodeSlice(create.table_elts, create.n_table_elts)) |element| {
             if (element.*.node_case == pg.PG_QUERY__NODE__NODE_CONSTRAINT)
@@ -472,6 +515,7 @@ pub const Catalog = struct {
             .allocator = self.allocator,
             .name = try self.allocator.dupe(u8, view_name),
             .is_view = true,
+            .origin = try self.originAt(node.view.*.location),
         };
         errdefer view.deinit();
         for (targets, 0..) |target_node, index| {
@@ -500,13 +544,21 @@ pub const Catalog = struct {
             if (command.subtype == pg.PG_QUERY__ALTER_TABLE_TYPE__AT_AddColumn) {
                 if (command.def == null or command.def.*.node_case != pg.PG_QUERY__NODE__NODE_COLUMN_DEF)
                     return error.InvalidAst;
-                try addColumn(table_ptr, command.def.*.unnamed_0.column_def);
+                try addColumn(
+                    table_ptr,
+                    command.def.*.unnamed_0.column_def,
+                    try self.originAt(command.def.*.unnamed_0.column_def.*.location),
+                );
             } else if (command.subtype == pg.PG_QUERY__ALTER_TABLE_TYPE__AT_DropColumn) {
                 const name = cString(command.name) orelse return error.InvalidAst;
                 const removed = table_ptr.columns.fetchOrderedRemove(name) orelse
                     return error.MissingColumn;
                 table_ptr.allocator.free(removed.value.name);
                 table_ptr.allocator.free(removed.value.database_type);
+                if (removed.value.origin) |origin| {
+                    table_ptr.allocator.free(origin.path);
+                    if (origin.revision) |revision| table_ptr.allocator.free(revision);
+                }
             } else {
                 return error.UnsupportedStatement;
             }
@@ -680,7 +732,38 @@ pub const Catalog = struct {
             else => return error.UnsupportedStatement,
         }
     }
+
+    fn originAt(self: *const Catalog, raw_offset: c_int) std.mem.Allocator.Error!?Origin {
+        const source = self.active_source orelse return null;
+        const offset: usize = if (raw_offset < 0) 0 else @min(@as(usize, @intCast(raw_offset)), source.sql.len);
+        var line: usize = 1;
+        var column: usize = 1;
+        for (source.sql[0..offset]) |byte| {
+            if (byte == '\n') {
+                line += 1;
+                column = 1;
+            } else column += 1;
+        }
+        return .{
+            .path = try self.allocator.dupe(u8, source.path),
+            .revision = if (source.revision) |revision| try self.allocator.dupe(u8, revision) else null,
+            .offset = offset,
+            .line = line,
+            .column = column,
+        };
+    }
 };
+
+fn cloneOrigin(allocator: std.mem.Allocator, value: ?Origin) std.mem.Allocator.Error!?Origin {
+    const origin = value orelse return null;
+    return .{
+        .path = try allocator.dupe(u8, origin.path),
+        .revision = if (origin.revision) |revision| try allocator.dupe(u8, revision) else null,
+        .offset = origin.offset,
+        .line = origin.line,
+        .column = origin.column,
+    };
+}
 
 const ViewBinding = struct {
     name: []const u8,
@@ -736,6 +819,7 @@ fn addCopiedColumn(table: *Table, name_value: []const u8, source: *const Column,
         .nullable = nullable,
         .primary_key = false,
         .unique = false,
+        .origin = try cloneOrigin(table.allocator, source.origin),
     });
 }
 
@@ -757,7 +841,9 @@ fn applyTableConstraint(table: *Table, constraint_ptr: [*c]pg.PgQuery__Constrain
     }
 }
 
-fn addColumn(table: *Table, definition_ptr: [*c]pg.PgQuery__ColumnDef) Error!void {
+fn addColumn(table: *Table, definition_ptr: [*c]pg.PgQuery__ColumnDef, origin: ?Origin) Error!void {
+    var owned_origin = origin;
+    errdefer if (owned_origin) |*value| value.deinit(table.allocator);
     if (definition_ptr == null or definition_ptr.*.type_name == null) return error.InvalidAst;
     const definition = definition_ptr.*;
     const column_name = cString(definition.colname) orelse return error.InvalidAst;
@@ -791,7 +877,9 @@ fn addColumn(table: *Table, definition_ptr: [*c]pg.PgQuery__ColumnDef) Error!voi
         .nullable = nullable,
         .primary_key = primary_key,
         .unique = unique,
+        .origin = owned_origin,
     });
+    owned_origin = null;
 }
 
 fn typeName(allocator: std.mem.Allocator, pointer: [*c]pg.PgQuery__TypeName) Error![]const u8 {

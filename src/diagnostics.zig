@@ -17,6 +17,28 @@ pub const Span = struct {
     end: Position,
 };
 
+pub fn positionAt(source: []const u8, offset: usize) Position {
+    var line: usize = 1;
+    var column: usize = 1;
+    for (source[0..@min(offset, source.len)]) |byte| {
+        if (byte == '\n') {
+            line += 1;
+            column = 1;
+        } else {
+            column += 1;
+        }
+    }
+    return .{ .offset = @min(offset, source.len), .line = line, .column = column };
+}
+
+pub fn spanAt(path: []const u8, source: []const u8, start: usize, end: usize) Span {
+    return .{
+        .path = path,
+        .start = positionAt(source, start),
+        .end = positionAt(source, @max(start, end)),
+    };
+}
+
 pub const Label = struct {
     span: Span,
     message: []const u8,
@@ -233,7 +255,10 @@ pub fn codeForError(err: anyerror) []const u8 {
         error.ParseError, error.EmptyInput, error.UnsupportedSqliteFeature => "S010",
         error.InvalidRevisionId, error.InvalidParentId, error.MissingParent, error.Cycle, error.MultipleHeads, error.DivergentMerge => "M001",
         error.MissingUpgradeSql, error.MissingDowngradeSql, error.UnexpectedBackendSql => "M002",
-        error.MissingRelation, error.MissingColumn, error.AmbiguousColumn, error.UnsupportedStatement, error.DuplicateTable, error.DuplicateColumn => "C001",
+        error.MissingRelation => "Q020",
+        error.MissingColumn => "Q021",
+        error.AmbiguousColumn => "Q022",
+        error.UnsupportedStatement, error.DuplicateTable, error.DuplicateColumn => "C001",
         error.BackendNotSelected, error.UnexpectedResultColumns, error.MissingResultColumns, error.ConflictingResultType, error.ConflictingParameterType, error.MissingDeclaredField, error.UnexpectedDeclaredField, error.DeclaredFieldOrder, error.DeclaredTypeMismatch, error.DeclaredNullabilityMismatch, error.UninferredDeclaredType, error.MissingDeclaredRow, error.UnexpectedDeclaredRow => "Q001",
         error.UnknownCodec, error.UnknownCodecTarget, error.IncompatibleCodec, error.MissingCodecForDeclaredType => "T001",
         error.InvalidNamespace, error.NamespaceCollision, error.UnsupportedType, error.IncompatibleBackendContract => "G001",

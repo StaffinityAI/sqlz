@@ -44,6 +44,9 @@ pub const Source = struct {
     backends: Backends,
     cardinality: Cardinality,
     sql: []const u8,
+    sql_offset: usize = 0,
+    sql_line: usize = 1,
+    sql_column: usize = 1,
     param_codecs: []const CodecOverride = &.{},
     column_codecs: []const CodecOverride = &.{},
     declared: Declared = .{},
@@ -170,7 +173,9 @@ pub fn parse(allocator: std.mem.Allocator, path: []const u8, contents: []const u
         }
     }
 
-    const sql = std.mem.trim(u8, contents[sql_start orelse contents.len ..], &std.ascii.whitespace);
+    const raw_sql_start = sql_start orelse contents.len;
+    const raw_sql = contents[raw_sql_start..];
+    const sql = std.mem.trim(u8, raw_sql, &std.ascii.whitespace);
     if (sql.len == 0) return error.EmptySql;
     const parsed_name = name orelse return error.MissingName;
     const parsed_backends = backends orelse return error.MissingBackends;
@@ -181,6 +186,17 @@ pub fn parse(allocator: std.mem.Allocator, path: []const u8, contents: []const u
     errdefer allocator.free(owned_name);
     const owned_sql = try allocator.dupe(u8, sql);
     errdefer allocator.free(owned_sql);
+    const sql_offset = raw_sql_start + @as(usize, @intCast(sql.ptr - raw_sql.ptr));
+    var sql_line: usize = 1;
+    var sql_column: usize = 1;
+    for (contents[0..sql_offset]) |byte| {
+        if (byte == '\n') {
+            sql_line += 1;
+            sql_column = 1;
+        } else {
+            sql_column += 1;
+        }
+    }
     return .{
         .allocator = allocator,
         .path = owned_path,
@@ -188,6 +204,9 @@ pub fn parse(allocator: std.mem.Allocator, path: []const u8, contents: []const u
         .backends = parsed_backends,
         .cardinality = parsed_cardinality,
         .sql = owned_sql,
+        .sql_offset = sql_offset,
+        .sql_line = sql_line,
+        .sql_column = sql_column,
         .param_codecs = try param_codecs.toOwnedSlice(allocator),
         .column_codecs = try column_codecs.toOwnedSlice(allocator),
     };

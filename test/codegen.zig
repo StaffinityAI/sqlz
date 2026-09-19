@@ -35,7 +35,15 @@ test "project checking accumulates query diagnostics in source order" {
     try std.testing.expectEqual(@as(usize, 2), list.slice().len);
     try std.testing.expectEqualStrings("a.sql", list.slice()[0].primary.?.path);
     try std.testing.expectEqualStrings("b.sql", list.slice()[1].primary.?.path);
-    try std.testing.expectEqualStrings("C001", list.slice()[0].code);
+    try std.testing.expectEqualStrings("Q021", list.slice()[0].code);
+    try std.testing.expectEqual(@as(usize, 5), list.slice()[0].primary.?.start.line);
+    try std.testing.expectEqual(@as(usize, 8), list.slice()[0].primary.?.start.column);
+    try std.testing.expectEqual(@as(usize, 1), list.slice()[0].labels.len);
+    try std.testing.expectEqualStrings(
+        "aaaaaaaaaaaa_create_users/common.up.sql",
+        list.slice()[0].labels[0].span.path,
+    );
+    try std.testing.expectEqualStrings("did you mean `id`?", list.slice()[0].help.?);
     try std.testing.expect(!list.truncated);
 }
 
@@ -95,6 +103,32 @@ test "PostgreSQL project syntax diagnostics preserve original source spans" {
     try std.testing.expectEqualStrings("invalid.sql", primary.path);
     try std.testing.expectEqual(@as(usize, 1), primary.start.line);
     try std.testing.expect(primary.start.column > 1);
+}
+
+test "catalog replay errors become source diagnostics with fixes" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try writeCatalogDiagnosticProject(&tmp);
+    var list: diagnostics.List = .init(std.testing.allocator, 100);
+    defer list.deinit();
+    try std.testing.expectError(error.ProjectCheckFailed, codegen.generateProjectWithCodecsAndDiagnostics(
+        std.testing.allocator,
+        std.testing.io,
+        tmp.dir,
+        "sqlz.ziggy",
+        &.{},
+        &list,
+    ));
+    try std.testing.expectEqual(@as(usize, 1), list.slice().len);
+    try std.testing.expectEqualStrings("C020", list.slice()[0].code);
+    try std.testing.expectEqualStrings(
+        "aaaaaaaaaaaa_bad_index/common.up.sql",
+        list.slice()[0].primary.?.path,
+    );
+    try std.testing.expectEqualStrings(
+        "create the referenced object earlier or correct its name",
+        list.slice()[0].help.?,
+    );
 }
 
 test "portable project queries require matching backend contracts" {
@@ -637,15 +671,58 @@ fn writeDiagnosticProject(tmp: *std.testing.TmpDir, limit: u32) !void {
         \\-- sqlz.backends: sqlite
         \\-- sqlz.cardinality: many
         \\
-        \\SELECT missing_a FROM users
+        \\SELECT iid FROM users
     ;
     const second =
         \\-- sqlz.name: second
         \\-- sqlz.backends: sqlite
         \\-- sqlz.cardinality: many
         \\
-        \\SELECT missing_b FROM users
+        \\SELECT idd FROM users
     ;
     try queries.writeFile(std.testing.io, .{ .sub_path = "a.sql", .data = first });
     try queries.writeFile(std.testing.io, .{ .sub_path = "b.sql", .data = second });
+}
+
+fn writeCatalogDiagnosticProject(tmp: *std.testing.TmpDir) !void {
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "sqlz.ziggy",
+        .data =
+        \\.format_version = 1,
+        \\.project_id = "550e8400-e29b-41d4-a716-446655440000",
+        \\.migrations = "migrations",
+        \\.sql_roots = .{ .app = "queries" },
+        \\.zig_roots = [],
+        \\.backends = .{ .sqlite = .{ .profile = "3.53" } },
+        ,
+    });
+    var queries = try tmp.dir.createDirPathOpen(std.testing.io, "queries", .{});
+    queries.close(std.testing.io);
+    var migration = try tmp.dir.createDirPathOpen(
+        std.testing.io,
+        "migrations/aaaaaaaaaaaa_bad_index",
+        .{},
+    );
+    defer migration.close(std.testing.io);
+    try migration.writeFile(std.testing.io, .{
+        .sub_path = "revision.ziggy",
+        .data =
+        \\.format_version = 1,
+        \\.revision = "aaaaaaaaaaaa",
+        \\.parents = [],
+        \\.description = "bad index",
+        \\.created_utc = "2026-09-18T12:00:00Z",
+        \\.backends = [.sqlite],
+        \\.reversible = true,
+        \\.transaction = .{ .sqlite = .always },
+        ,
+    });
+    try migration.writeFile(std.testing.io, .{
+        .sub_path = "common.up.sql",
+        .data = "CREATE INDEX missing_users ON users(id)",
+    });
+    try migration.writeFile(std.testing.io, .{
+        .sub_path = "common.down.sql",
+        .data = "DROP INDEX missing_users",
+    });
 }

@@ -2,4 +2,4 @@
 -- sqlz.backends: sqlite
 -- sqlz.cardinality: many
 
-SELECT missing_b FROM users;
+SELECT idd FROM users;

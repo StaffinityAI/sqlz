@@ -151,15 +151,27 @@ pub fn generateProjectWithCodecsAndDiagnostics(
     defer migration_discovery.deinit();
     if (diagnostic_list) |list| if (list.slice().len != 0) return error.ProjectCheckFailed;
     var sqlite_schema: ?catalog.Catalog = if (project.backends.sqlite != null)
-        try checker.replayDiscoveredSqliteWithDialect(allocator, &migration_discovery, sqlite_dialect)
+        checker.replayDiscoveredSqliteWithDialect(allocator, &migration_discovery, sqlite_dialect) catch |err| {
+            if (diagnostic_list) |list| {
+                if (try checker.appendCatalogDiagnostic(allocator, err, &migration_discovery, .sqlite, list))
+                    return error.ProjectCheckFailed;
+            }
+            return err;
+        }
     else
         null;
     defer if (sqlite_schema) |*schema| schema.deinit();
     var postgres_schema: ?catalog.Catalog = if (project.backends.postgres != null)
-        try checker.replayDiscoveredPostgresWithOptions(allocator, &migration_discovery, .{
+        checker.replayDiscoveredPostgresWithOptions(allocator, &migration_discovery, .{
             .dialect = postgres_dialect,
             .search_path = project.backends.postgres.?.search_path,
-        })
+        }) catch |err| {
+            if (diagnostic_list) |list| {
+                if (try checker.appendCatalogDiagnostic(allocator, err, &migration_discovery, .postgres, list))
+                    return error.ProjectCheckFailed;
+            }
+            return err;
+        }
     else
         null;
     defer if (postgres_schema) |*schema| schema.deinit();
@@ -189,7 +201,13 @@ pub fn generateProjectWithCodecsAndDiagnostics(
                 null,
             ) catch |err| {
                 if (diagnostic_list) |list| {
-                    try list.appendError(err, source.path);
+                    const handled = if (source.backends.sqlite and sqlite_schema != null)
+                        try checker.appendSemanticDiagnostic(allocator, err, &sqlite_schema.?, source, .sqlite, sqlite_dialect, postgres_dialect, list)
+                    else if (source.backends.postgres and postgres_schema != null)
+                        try checker.appendSemanticDiagnostic(allocator, err, &postgres_schema.?, source, .postgres, sqlite_dialect, postgres_dialect, list)
+                    else
+                        false;
+                    if (!handled) try list.appendError(err, source.path);
                     continue;
                 }
                 return err;
@@ -240,7 +258,13 @@ pub fn generateProjectWithCodecsAndDiagnostics(
                 &postgres_sql,
             ) catch |err| {
                 if (diagnostic_list) |list| {
-                    try list.appendError(err, source.path);
+                    const handled = if (source.backends.sqlite and sqlite_schema != null)
+                        try checker.appendSemanticDiagnostic(allocator, err, &sqlite_schema.?, source, .sqlite, sqlite_dialect, postgres_dialect, list)
+                    else if (source.backends.postgres and postgres_schema != null)
+                        try checker.appendSemanticDiagnostic(allocator, err, &postgres_schema.?, source, .postgres, sqlite_dialect, postgres_dialect, list)
+                    else
+                        false;
+                    if (!handled) try list.appendError(err, source.path);
                     continue;
                 }
                 return err;
