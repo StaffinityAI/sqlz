@@ -84,3 +84,32 @@ test "rejects multi-statement checked queries" {
         ir.adapt(std.testing.allocator, parsed.tree, parsed.rewritten.names),
     );
 }
+
+test "preserves set operand and parameter occurrence sources" {
+    const sql = "SELECT id AS value FROM values_a UNION ALL SELECT label FROM values_a " ++
+        "WHERE id=:value OR label=:value";
+    var parsed = try parser.parse(std.testing.allocator, sql);
+    defer parsed.deinit();
+    var query = try ir.adaptWithSource(
+        std.testing.allocator,
+        parsed.tree,
+        parsed.rewritten.names,
+        sql,
+        parsed.rewritten.original_offsets,
+    );
+    defer query.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), query.projections[0].set_operands.len);
+    const first = query.projections[0].set_operands[0].type_source.?;
+    const second = query.projections[0].set_operands[1].type_source.?;
+    try std.testing.expectEqualStrings("id", sql[first.offset .. first.offset + first.length]);
+    try std.testing.expectEqualStrings("label", sql[second.offset .. second.offset + second.length]);
+    try std.testing.expectEqual(@as(usize, 2), query.parameter_uses[0].constraints.len);
+    for (query.parameter_uses[0].constraints) |constraint| switch (constraint) {
+        .column => |value| {
+            const source = value.parameter_source.?;
+            try std.testing.expectEqualStrings(":value", sql[source.offset .. source.offset + source.length]);
+        },
+        .integer => return error.TestUnexpectedResult,
+    };
+}

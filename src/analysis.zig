@@ -88,6 +88,26 @@ pub const Analysis = struct {
     }
 };
 
+pub const TypeShape = struct {
+    scalar_type: ScalarType,
+    database_type: ?[]const u8 = null,
+    array_dimensions: u8 = 0,
+    element_nullable: bool = false,
+};
+
+pub const TypeEvidence = struct {
+    source: ?ir.SourceRange,
+    shape: TypeShape,
+    constrained_column: ?ir.ColumnReference = null,
+};
+
+pub const TypeConflict = struct {
+    kind: enum { result, parameter },
+    name: []const u8,
+    first: TypeEvidence,
+    second: TypeEvidence,
+};
+
 pub const Error = error{
     MissingRelation,
     MissingColumn,
@@ -114,6 +134,17 @@ pub fn analyze(
     schema: *const catalog.Catalog,
     query: *const ir.Query,
 ) Error!Analysis {
+    var ignored: ?TypeConflict = null;
+    return analyzeWithConflict(allocator, schema, query, &ignored);
+}
+
+pub fn analyzeWithConflict(
+    allocator: std.mem.Allocator,
+    schema: *const catalog.Catalog,
+    query: *const ir.Query,
+    conflict_out: *?TypeConflict,
+) Error!Analysis {
+    conflict_out.* = null;
     var arena: std.heap.ArenaAllocator = .init(allocator);
     errdefer arena.deinit();
     const storage = arena.allocator();
@@ -156,6 +187,7 @@ pub fn analyze(
         };
         if (projection.set_operands.len != 0) {
             var resolved: ?ResolvedColumn = null;
+            var evidence: ?TypeEvidence = null;
             for (projection.set_operands) |operand| {
                 const branch = try resolveExpression(
                     schema,
@@ -164,7 +196,16 @@ pub fn analyze(
                     operand.column,
                     operand.hint,
                 );
-                resolved = try mergeResolved(resolved, branch, error.ConflictingResultType);
+                resolved = mergeResolved(resolved, branch, error.ConflictingResultType) catch |err| {
+                    conflict_out.* = .{
+                        .kind = .result,
+                        .name = projection.name,
+                        .first = evidence.?,
+                        .second = .{ .source = operand.type_source, .shape = typeShape(branch) },
+                    };
+                    return err;
+                };
+                evidence = .{ .source = operand.type_source, .shape = typeShape(resolved.?) };
             }
             if (resolved) |value| {
                 result.scalar_type = value.scalar_type;
@@ -198,11 +239,43 @@ pub fn analyze(
             .scalar_type = if (use.integer_hint) .integer else .unknown,
             .nullable = !use.integer_hint,
         };
-        var inferred: ?ResolvedColumn = if (use.integer_hint)
+        var inferred: ?ResolvedColumn = if (use.integer_hint and use.constraints.len == 0)
             .{ .scalar_type = .integer, .nullable = false }
         else
             null;
-        for (use.columns) |reference| {
+        var evidence: ?TypeEvidence = if (inferred) |value| .{ .source = null, .shape = typeShape(value) } else null;
+        if (use.constraints.len != 0) {
+            for (use.constraints) |constraint| {
+                const resolved, const next_evidence: TypeEvidence = switch (constraint) {
+                    .column => |value| result: {
+                        const column = try resolveColumn(schema, ctes, query.relation_bindings, value.reference, true);
+                        break :result .{ column, .{
+                            .source = value.parameter_source,
+                            .shape = typeShape(column),
+                            .constrained_column = value.reference,
+                        } };
+                    },
+                    .integer => |value| result: {
+                        const integer: ResolvedColumn = .{ .scalar_type = .integer, .nullable = false };
+                        break :result .{ integer, .{ .source = value.parameter_source, .shape = typeShape(integer) } };
+                    },
+                };
+                inferred = mergeResolved(inferred, resolved, error.ConflictingParameterType) catch |err| {
+                    conflict_out.* = .{
+                        .kind = .parameter,
+                        .name = use.name,
+                        .first = evidence.?,
+                        .second = next_evidence,
+                    };
+                    return err;
+                };
+                evidence = .{
+                    .source = next_evidence.source,
+                    .shape = typeShape(inferred.?),
+                    .constrained_column = next_evidence.constrained_column,
+                };
+            }
+        } else for (use.columns) |reference| {
             const resolved = try resolveColumn(schema, ctes, query.relation_bindings, reference, true);
             inferred = try mergeResolved(inferred, resolved, error.ConflictingParameterType);
         }
@@ -218,6 +291,15 @@ pub fn analyze(
         }
     }
     return .{ .arena = arena, .columns = columns, .parameters = parameters };
+}
+
+fn typeShape(value: ResolvedColumn) TypeShape {
+    return .{
+        .scalar_type = value.scalar_type,
+        .database_type = value.database_type,
+        .array_dimensions = value.array_dimensions,
+        .element_nullable = value.element_nullable,
+    };
 }
 
 fn resolveExpression(

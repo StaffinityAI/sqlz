@@ -201,12 +201,16 @@ pub fn generateProjectWithCodecsAndDiagnostics(
                 null,
             ) catch |err| {
                 if (diagnostic_list) |list| {
-                    const handled = if (source.backends.sqlite and sqlite_schema != null)
-                        try checker.appendSemanticDiagnostic(allocator, err, &sqlite_schema.?, source, .sqlite, sqlite_dialect, postgres_dialect, list)
-                    else if (source.backends.postgres and postgres_schema != null)
-                        try checker.appendSemanticDiagnostic(allocator, err, &postgres_schema.?, source, .postgres, sqlite_dialect, postgres_dialect, list)
-                    else
-                        false;
+                    const handled = try appendSourceDiagnostic(
+                        allocator,
+                        err,
+                        if (sqlite_schema) |*schema| schema else null,
+                        if (postgres_schema) |*schema| schema else null,
+                        source,
+                        sqlite_dialect,
+                        postgres_dialect,
+                        list,
+                    );
                     if (!handled) try list.appendError(err, source.path);
                     continue;
                 }
@@ -258,12 +262,16 @@ pub fn generateProjectWithCodecsAndDiagnostics(
                 &postgres_sql,
             ) catch |err| {
                 if (diagnostic_list) |list| {
-                    const handled = if (source.backends.sqlite and sqlite_schema != null)
-                        try checker.appendSemanticDiagnostic(allocator, err, &sqlite_schema.?, source, .sqlite, sqlite_dialect, postgres_dialect, list)
-                    else if (source.backends.postgres and postgres_schema != null)
-                        try checker.appendSemanticDiagnostic(allocator, err, &postgres_schema.?, source, .postgres, sqlite_dialect, postgres_dialect, list)
-                    else
-                        false;
+                    const handled = try appendSourceDiagnostic(
+                        allocator,
+                        err,
+                        if (sqlite_schema) |*schema| schema else null,
+                        if (postgres_schema) |*schema| schema else null,
+                        source,
+                        sqlite_dialect,
+                        postgres_dialect,
+                        list,
+                    );
                     if (!handled) try list.appendError(err, source.path);
                     continue;
                 }
@@ -294,6 +302,43 @@ pub fn generateProjectWithCodecsAndDiagnostics(
     }
     if (diagnostic_list) |list| if (list.slice().len != 0) return error.ProjectCheckFailed;
     return generator.generateProjectModuleWithCodecs(allocator, roots, generator_codecs);
+}
+
+fn appendSourceDiagnostic(
+    allocator: std.mem.Allocator,
+    err: anyerror,
+    sqlite_schema: ?*const catalog.Catalog,
+    postgres_schema: ?*const catalog.Catalog,
+    source: *const query_files.Source,
+    sqlite_dialect: checker.SqliteDialect,
+    postgres_dialect: checker.PostgresDialect,
+    list: *diagnostics.List,
+) !bool {
+    if (source.backends.sqlite) if (sqlite_schema) |schema| {
+        if (try checker.appendSemanticDiagnostic(
+            allocator,
+            err,
+            schema,
+            source,
+            .sqlite,
+            sqlite_dialect,
+            postgres_dialect,
+            list,
+        )) return true;
+    };
+    if (source.backends.postgres) if (postgres_schema) |schema| {
+        if (try checker.appendSemanticDiagnostic(
+            allocator,
+            err,
+            schema,
+            source,
+            .postgres,
+            sqlite_dialect,
+            postgres_dialect,
+            list,
+        )) return true;
+    };
+    return false;
 }
 
 fn sameLogicalQuery(left: *const query_files.Source, right: *const query_files.Source) bool {

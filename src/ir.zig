@@ -2,6 +2,7 @@ const std = @import("std");
 const pg = @import("libpg_query");
 
 pub const StatementKind = enum { select, insert, update, delete };
+pub const SourceRange = struct { offset: usize, length: usize };
 pub const Relation = struct {
     name: []const u8,
     qualifier_name: []const u8,
@@ -13,6 +14,7 @@ pub const ColumnReference = struct {
     qualifier: ?[]const u8,
     name: []const u8,
     offset: usize = 0,
+    source: ?SourceRange = null,
 };
 pub const TypeHint = enum { integer, real, text, blob, boolean };
 pub const ExpressionHint = struct { scalar_type: TypeHint, nullable: bool };
@@ -20,6 +22,7 @@ pub const SetOperand = struct {
     column: ?ColumnReference,
     hint: ?ExpressionHint,
     bindings: []const Relation,
+    type_source: ?SourceRange = null,
 };
 pub const Projection = struct {
     name: []const u8,
@@ -31,6 +34,14 @@ pub const ParameterUse = struct {
     name: []const u8,
     columns: []const ColumnReference = &.{},
     integer_hint: bool = false,
+    constraints: []const ParameterConstraint = &.{},
+};
+pub const ParameterConstraint = union(enum) {
+    column: struct {
+        reference: ColumnReference,
+        parameter_source: ?SourceRange,
+    },
+    integer: struct { parameter_source: ?SourceRange },
 };
 pub const Cte = struct { name: []const u8, columns: []const Projection };
 
@@ -64,6 +75,7 @@ const Context = struct {
     allocator: std.mem.Allocator,
     uses: []ParameterUse,
     constraints: []std.ArrayList(ColumnReference),
+    parameter_constraints: []std.ArrayList(ParameterConstraint),
     relations: std.ArrayList([]const u8) = .empty,
     bindings: std.ArrayList(Relation) = .empty,
     top_bindings: std.ArrayList(Relation) = .empty,
@@ -71,6 +83,7 @@ const Context = struct {
     result_names: std.ArrayList([]const u8) = .empty,
     projections: std.ArrayList(Projection) = .empty,
     original_offsets: ?[]const usize = null,
+    original_source: ?[]const u8 = null,
 
     fn originalOffset(self: *const Context, rewritten: c_int) usize {
         if (rewritten < 0) return 0;
@@ -124,6 +137,26 @@ pub fn adaptWithOffsets(
     parameter_names: []const []const u8,
     original_offsets: ?[]const usize,
 ) Error!Query {
+    return adaptInternal(allocator, tree, parameter_names, null, original_offsets);
+}
+
+pub fn adaptWithSource(
+    allocator: std.mem.Allocator,
+    tree: *const pg.PgQuery__ParseResult,
+    parameter_names: []const []const u8,
+    original_source: []const u8,
+    original_offsets: ?[]const usize,
+) Error!Query {
+    return adaptInternal(allocator, tree, parameter_names, original_source, original_offsets);
+}
+
+fn adaptInternal(
+    allocator: std.mem.Allocator,
+    tree: *const pg.PgQuery__ParseResult,
+    parameter_names: []const []const u8,
+    original_source: ?[]const u8,
+    original_offsets: ?[]const usize,
+) Error!Query {
     if (tree.n_stmts != 1) return error.MultipleStatements;
     const raw = tree.stmts[0];
     if (raw == null or raw.*.stmt == null) return error.InvalidAst;
@@ -135,6 +168,8 @@ pub fn adaptWithOffsets(
     const uses = try storage.alloc(ParameterUse, parameter_names.len);
     const constraints = try storage.alloc(std.ArrayList(ColumnReference), parameter_names.len);
     @memset(constraints, .empty);
+    const parameter_constraints = try storage.alloc(std.ArrayList(ParameterConstraint), parameter_names.len);
+    @memset(parameter_constraints, .empty);
     var parameters: std.ArrayList([]const u8) = .empty;
     for (parameter_names, uses) |name, *use| {
         const owned = try storage.dupe(u8, name);
@@ -145,7 +180,9 @@ pub fn adaptWithOffsets(
         .allocator = storage,
         .uses = uses,
         .constraints = constraints,
+        .parameter_constraints = parameter_constraints,
         .original_offsets = original_offsets,
+        .original_source = original_source,
     };
 
     const kind, const mutation_target = switch (statement.*.node_case) {
@@ -170,8 +207,10 @@ pub fn adaptWithOffsets(
         },
         else => return error.UnsupportedStatement,
     };
-    for (uses, constraints) |*use, *constraint_list|
+    for (uses, constraints, parameter_constraints) |*use, *constraint_list, *parameter_constraint_list| {
         use.columns = try constraint_list.toOwnedSlice(storage);
+        use.constraints = try parameter_constraint_list.toOwnedSlice(storage);
+    }
     return .{
         .arena = arena,
         .kind = kind,
@@ -238,6 +277,7 @@ fn collectSetProjections(ctx: *Context, pointer: [*c]pg.PgQuery__SelectStmt) Err
                 .column = try columnReference(ctx, target.val),
                 .hint = try inferExpression(target.val),
                 .bindings = branch.bindings,
+                .type_source = expressionSource(ctx, target.val),
             };
         }
         try ctx.result_names.append(ctx.allocator, owned_name);
@@ -429,7 +469,13 @@ fn bindParameter(ctx: *Context, node: [*c]pg.PgQuery__Node, column: ColumnRefere
     const owned: ColumnReference = .{
         .qualifier = if (column.qualifier) |value| try ctx.allocator.dupe(u8, value) else null,
         .name = try ctx.allocator.dupe(u8, column.name),
+        .offset = column.offset,
+        .source = column.source,
     };
+    try ctx.parameter_constraints[ordinal - 1].append(ctx.allocator, .{ .column = .{
+        .reference = owned,
+        .parameter_source = parameterSource(ctx, node, ordinal),
+    } });
     for (ctx.constraints[ordinal - 1].items) |existing| {
         if (std.meta.eql(existing, owned)) return;
     }
@@ -440,6 +486,9 @@ fn markIntegerParameter(ctx: *Context, node: [*c]pg.PgQuery__Node) Error!void {
     if (parameterOrdinal(node)) |ordinal| {
         if (ordinal == 0 or ordinal > ctx.uses.len) return error.InvalidAst;
         ctx.uses[ordinal - 1].integer_hint = true;
+        try ctx.parameter_constraints[ordinal - 1].append(ctx.allocator, .{ .integer = .{
+            .parameter_source = parameterSource(ctx, node, ordinal),
+        } });
     }
     try walkExpression(ctx, node);
 }
@@ -462,7 +511,72 @@ fn columnReference(ctx: *Context, node: [*c]pg.PgQuery__Node) Error!?ColumnRefer
             null,
         .name = try ctx.allocator.dupe(u8, nodeString(fields[fields.len - 1]) orelse return error.InvalidAst),
         .offset = ctx.originalOffset(column.*.location),
+        .source = sourceRange(ctx, column.*.location, identifierLength(ctx, column.*.location)),
     };
+}
+
+fn expressionSource(ctx: *const Context, node: [*c]pg.PgQuery__Node) ?SourceRange {
+    if (node == null) return null;
+    return switch (node.*.node_case) {
+        pg.PG_QUERY__NODE__NODE_COLUMN_REF => blk: {
+            const column = node.*.unnamed_0.column_ref;
+            break :blk sourceRange(ctx, column.*.location, identifierLength(ctx, column.*.location));
+        },
+        pg.PG_QUERY__NODE__NODE_A_CONST => sourceRange(ctx, node.*.unnamed_0.a_const.*.location, tokenLength(ctx, node.*.unnamed_0.a_const.*.location)),
+        pg.PG_QUERY__NODE__NODE_FUNC_CALL => sourceRange(ctx, node.*.unnamed_0.func_call.*.location, identifierLength(ctx, node.*.unnamed_0.func_call.*.location)),
+        pg.PG_QUERY__NODE__NODE_TYPE_CAST => expressionSource(ctx, node.*.unnamed_0.type_cast.*.arg),
+        else => null,
+    };
+}
+
+fn parameterSource(ctx: *const Context, node: [*c]pg.PgQuery__Node, ordinal: usize) ?SourceRange {
+    if (node == null or node.*.node_case != pg.PG_QUERY__NODE__NODE_PARAM_REF) return null;
+    const source = ctx.original_source orelse return null;
+    const offset = ctx.originalOffset(node.*.unnamed_0.param_ref.*.location);
+    if (offset >= source.len) return null;
+    const name = ctx.uses[ordinal - 1].name;
+    const length = if (source[offset] == ':' and offset + 1 + name.len <= source.len and
+        std.mem.eql(u8, source[offset + 1 .. offset + 1 + name.len], name))
+        name.len + 1
+    else
+        tokenLength(ctx, node.*.unnamed_0.param_ref.*.location);
+    return .{ .offset = offset, .length = length };
+}
+
+fn sourceRange(ctx: *const Context, location: c_int, length: usize) ?SourceRange {
+    if (location < 0) return null;
+    return .{ .offset = ctx.originalOffset(location), .length = length };
+}
+
+fn identifierLength(ctx: *const Context, location: c_int) usize {
+    const source = ctx.original_source orelse return 1;
+    const offset = ctx.originalOffset(location);
+    if (offset >= source.len) return 1;
+    var end = offset;
+    while (end < source.len and (std.ascii.isAlphanumeric(source[end]) or source[end] == '_' or source[end] == '.' or source[end] == '"')) : (end += 1) {}
+    return @max(end - offset, 1);
+}
+
+fn tokenLength(ctx: *const Context, location: c_int) usize {
+    const source = ctx.original_source orelse return 1;
+    const offset = ctx.originalOffset(location);
+    if (offset >= source.len) return 1;
+    if (source[offset] == '\'') {
+        var end = offset + 1;
+        while (end < source.len) : (end += 1) {
+            if (source[end] != '\'') continue;
+            if (end + 1 < source.len and source[end + 1] == '\'') {
+                end += 1;
+                continue;
+            }
+            return end - offset + 1;
+        }
+    }
+    var end = offset;
+    while (end < source.len and !std.ascii.isWhitespace(source[end]) and
+        std.mem.indexOfScalar(u8, ",);", source[end]) == null) : (end += 1)
+    {}
+    return @max(end - offset, 1);
 }
 
 fn inferExpression(node: [*c]pg.PgQuery__Node) Error!?ExpressionHint {

@@ -216,20 +216,32 @@ pub fn appendSemanticDiagnostic(
     postgres_dialect: PostgresDialect,
     list: *diagnostics.List,
 ) !bool {
-    if (err != error.MissingRelation and err != error.MissingColumn and err != error.AmbiguousColumn)
+    if (err != error.MissingRelation and err != error.MissingColumn and err != error.AmbiguousColumn and
+        err != error.ConflictingResultType and err != error.ConflictingParameterType)
         return false;
     var parsed = switch (backend) {
         .sqlite => try parser.parseSqliteWithDialect(allocator, source.sql, sqlite_dialect),
         .postgres => try parser.parsePostgresWithDialect(allocator, source.sql, postgres_dialect),
     };
     defer parsed.deinit();
-    var query = try ir.adaptWithOffsets(
+    var query = try ir.adaptWithSource(
         allocator,
         parsed.tree,
         parsed.rewritten.names,
+        source.sql,
         parsed.rewritten.original_offsets,
     );
     defer query.deinit();
+
+    if (err == error.ConflictingResultType or err == error.ConflictingParameterType) {
+        var conflict: ?analysis.TypeConflict = null;
+        var analyzed = analysis.analyzeWithConflict(allocator, schema, &query, &conflict) catch |candidate| {
+            if (candidate != err or conflict == null) return false;
+            return appendTypeConflictDiagnostic(allocator, source, conflict.?, list);
+        };
+        analyzed.deinit();
+        return false;
+    }
 
     if (err == error.MissingRelation) {
         for (query.relation_bindings) |binding| {
@@ -294,6 +306,73 @@ pub fn appendSemanticDiagnostic(
         .help = help,
     });
     return true;
+}
+
+fn appendTypeConflictDiagnostic(
+    allocator: std.mem.Allocator,
+    source: *const query_files.Source,
+    conflict: analysis.TypeConflict,
+    list: *diagnostics.List,
+) !bool {
+    const first_source = conflict.first.source orelse return false;
+    const second_source = conflict.second.source orelse return false;
+    const first_type = try formatTypeShape(allocator, conflict.first.shape);
+    defer allocator.free(first_type);
+    const second_type = try formatTypeShape(allocator, conflict.second.shape);
+    defer allocator.free(second_type);
+    const message = switch (conflict.kind) {
+        .result => try std.fmt.allocPrint(
+            allocator,
+            "result column `{s}` has conflicting types `{s}` and `{s}`",
+            .{ conflict.name, first_type, second_type },
+        ),
+        .parameter => try std.fmt.allocPrint(
+            allocator,
+            "parameter `{s}` is constrained to conflicting types `{s}` and `{s}`",
+            .{ conflict.name, first_type, second_type },
+        ),
+    };
+    defer allocator.free(message);
+    const label_message = switch (conflict.kind) {
+        .result => try std.fmt.allocPrint(allocator, "first branch has type `{s}`", .{first_type}),
+        .parameter => try std.fmt.allocPrint(allocator, "first use requires type `{s}`", .{first_type}),
+    };
+    defer allocator.free(label_message);
+    const labels = [_]diagnostics.Label{.{
+        .span = querySpan(source, first_source.offset, first_source.length),
+        .message = label_message,
+    }};
+    try list.appendDiagnostic(.{
+        .severity = .err,
+        .code = switch (conflict.kind) {
+            .result => "Q023",
+            .parameter => "Q024",
+        },
+        .message = message,
+        .primary = querySpan(source, second_source.offset, second_source.length),
+        .labels = &labels,
+        .help = switch (conflict.kind) {
+            .result => "cast one set-operation branch so every branch returns the same type",
+            .parameter => "use separate parameter names or add an explicit cast so every use has one type",
+        },
+    });
+    return true;
+}
+
+fn formatTypeShape(allocator: std.mem.Allocator, shape: analysis.TypeShape) ![]const u8 {
+    const base = shape.database_type orelse switch (shape.scalar_type) {
+        .integer => "integer",
+        .real => "real",
+        .text => "text",
+        .blob => "blob",
+        .boolean => "boolean",
+        .unknown => "unknown",
+    };
+    var output: std.ArrayList(u8) = .empty;
+    errdefer output.deinit(allocator);
+    try output.appendSlice(allocator, base);
+    for (0..shape.array_dimensions) |_| try output.appendSlice(allocator, "[]");
+    return output.toOwnedSlice(allocator);
 }
 
 const ColumnCandidate = struct {
@@ -467,7 +546,7 @@ pub fn checkNamedSqliteWithCodecs(
     if (!source.backends.sqlite) return error.BackendNotSelected;
     var parsed = try parser.parseSqliteWithDialect(allocator, source.sql, dialect);
     errdefer parsed.deinit();
-    var query = try ir.adaptWithOffsets(allocator, parsed.tree, parsed.rewritten.names, parsed.rewritten.original_offsets);
+    var query = try ir.adaptWithSource(allocator, parsed.tree, parsed.rewritten.names, source.sql, parsed.rewritten.original_offsets);
     errdefer query.deinit();
     const produces_rows = query.projections.len != 0;
     if (source.cardinality == .exec and produces_rows) return error.UnexpectedResultColumns;
@@ -506,7 +585,7 @@ pub fn checkNamedPostgresWithCodecs(
     if (!source.backends.postgres) return error.BackendNotSelected;
     var parsed = try parser.parsePostgresWithDialect(allocator, source.sql, dialect);
     errdefer parsed.deinit();
-    var query = try ir.adaptWithOffsets(allocator, parsed.tree, parsed.rewritten.names, parsed.rewritten.original_offsets);
+    var query = try ir.adaptWithSource(allocator, parsed.tree, parsed.rewritten.names, source.sql, parsed.rewritten.original_offsets);
     errdefer query.deinit();
     const produces_rows = query.projections.len != 0;
     if (source.cardinality == .exec and produces_rows) return error.UnexpectedResultColumns;

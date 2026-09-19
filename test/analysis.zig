@@ -273,3 +273,53 @@ test "rejects incompatible set results and parameter constraints" {
         );
     }
 }
+
+test "reports source evidence for result and parameter type conflicts" {
+    var schema_sql = try parser.parse(
+        std.testing.allocator,
+        "CREATE TABLE values_a (id BIGINT NOT NULL, label TEXT NOT NULL)",
+    );
+    defer schema_sql.deinit();
+    var schema = catalog.Catalog.init(std.testing.allocator);
+    defer schema.deinit();
+    try schema.applyParserTree(schema_sql.tree);
+
+    const cases = [_]struct { sql: []const u8, expected: anyerror, kind: @TypeOf(@as(analysis.TypeConflict, undefined).kind) }{
+        .{
+            .sql = "SELECT id AS value FROM values_a UNION ALL SELECT label FROM values_a",
+            .expected = error.ConflictingResultType,
+            .kind = .result,
+        },
+        .{
+            .sql = "SELECT id FROM values_a WHERE id=:value OR label=:value",
+            .expected = error.ConflictingParameterType,
+            .kind = .parameter,
+        },
+    };
+    for (cases) |case| {
+        var parsed = try parser.parse(std.testing.allocator, case.sql);
+        defer parsed.deinit();
+        var query = try ir.adaptWithSource(
+            std.testing.allocator,
+            parsed.tree,
+            parsed.rewritten.names,
+            case.sql,
+            parsed.rewritten.original_offsets,
+        );
+        defer query.deinit();
+        var conflict: ?analysis.TypeConflict = null;
+        try std.testing.expectError(
+            case.expected,
+            analysis.analyzeWithConflict(std.testing.allocator, &schema, &query, &conflict),
+        );
+        try std.testing.expectEqual(case.kind, conflict.?.kind);
+        try std.testing.expect(conflict.?.first.source != null);
+        try std.testing.expect(conflict.?.second.source != null);
+        if (case.kind == .parameter) {
+            const first = conflict.?.first.source.?;
+            const second = conflict.?.second.source.?;
+            try std.testing.expectEqualStrings(":value", case.sql[first.offset .. first.offset + first.length]);
+            try std.testing.expectEqualStrings(":value", case.sql[second.offset .. second.offset + second.length]);
+        }
+    }
+}

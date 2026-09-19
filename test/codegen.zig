@@ -131,6 +131,29 @@ test "catalog replay errors become source diagnostics with fixes" {
     );
 }
 
+test "semantic type conflicts label both SQL uses" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try writeConflictDiagnosticProject(&tmp);
+    var list: diagnostics.List = .init(std.testing.allocator, 100);
+    defer list.deinit();
+    try std.testing.expectError(error.ProjectCheckFailed, codegen.generateProjectWithCodecsAndDiagnostics(
+        std.testing.allocator,
+        std.testing.io,
+        tmp.dir,
+        "sqlz.ziggy",
+        &.{},
+        &list,
+    ));
+    try std.testing.expectEqual(@as(usize, 2), list.slice().len);
+    try std.testing.expectEqualStrings("Q024", list.slice()[0].code);
+    try std.testing.expectEqual(@as(usize, 1), list.slice()[0].labels.len);
+    try std.testing.expect(list.slice()[0].primary.?.start.offset != list.slice()[0].labels[0].span.start.offset);
+    try std.testing.expectEqualStrings("Q023", list.slice()[1].code);
+    try std.testing.expectEqual(@as(usize, 1), list.slice()[1].labels.len);
+    try std.testing.expect(std.mem.indexOf(u8, list.slice()[1].help.?, "cast") != null);
+}
+
 test "portable project queries require matching backend contracts" {
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
@@ -724,5 +747,61 @@ fn writeCatalogDiagnosticProject(tmp: *std.testing.TmpDir) !void {
     try migration.writeFile(std.testing.io, .{
         .sub_path = "common.down.sql",
         .data = "DROP INDEX missing_users",
+    });
+}
+
+fn writeConflictDiagnosticProject(tmp: *std.testing.TmpDir) !void {
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "sqlz.ziggy",
+        .data =
+        \\.format_version = 1,
+        \\.project_id = "550e8400-e29b-41d4-a716-446655440000",
+        \\.migrations = "migrations",
+        \\.sql_roots = .{ .app = "queries" },
+        \\.zig_roots = [],
+        \\.backends = .{ .sqlite = .{ .profile = "3.53" } },
+        ,
+    });
+    var migration = try tmp.dir.createDirPathOpen(std.testing.io, "migrations/aaaaaaaaaaaa_values", .{});
+    defer migration.close(std.testing.io);
+    try migration.writeFile(std.testing.io, .{
+        .sub_path = "revision.ziggy",
+        .data =
+        \\.format_version = 1,
+        \\.revision = "aaaaaaaaaaaa",
+        \\.parents = [],
+        \\.description = "values",
+        \\.created_utc = "2026-09-18T12:00:00Z",
+        \\.backends = [.sqlite],
+        \\.reversible = true,
+        \\.transaction = .{ .sqlite = .always },
+        ,
+    });
+    try migration.writeFile(std.testing.io, .{
+        .sub_path = "common.up.sql",
+        .data = "CREATE TABLE values_a (id BIGINT NOT NULL, label TEXT NOT NULL)",
+    });
+    try migration.writeFile(std.testing.io, .{ .sub_path = "common.down.sql", .data = "DROP TABLE values_a" });
+    var queries = try tmp.dir.createDirPathOpen(std.testing.io, "queries", .{});
+    defer queries.close(std.testing.io);
+    try queries.writeFile(std.testing.io, .{
+        .sub_path = "a.sql",
+        .data =
+        \\-- sqlz.name: parameter_conflict
+        \\-- sqlz.backends: sqlite
+        \\-- sqlz.cardinality: many
+        \\
+        \\SELECT id FROM values_a WHERE id=:value OR label=:value
+        ,
+    });
+    try queries.writeFile(std.testing.io, .{
+        .sub_path = "b.sql",
+        .data =
+        \\-- sqlz.name: result_conflict
+        \\-- sqlz.backends: sqlite
+        \\-- sqlz.cardinality: many
+        \\
+        \\SELECT id AS value FROM values_a UNION ALL SELECT label FROM values_a
+        ,
     });
 }
