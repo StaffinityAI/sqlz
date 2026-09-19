@@ -41,6 +41,11 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
         .imports = &.{.{ .name = "ziggy", .module = ziggy_dep.module("ziggy") }},
     });
+    const diagnostics_mod = b.addModule("sqlz_diagnostics", .{
+        .root_source_file = b.path("src/diagnostics.zig"),
+        .target = host_target,
+        .optimize = optimize,
+    });
     const sqlite_mod = b.createModule(.{
         .root_source_file = b.path("src/sqlz.zig"),
         .target = target,
@@ -103,6 +108,7 @@ pub fn build(b: *std.Build) !void {
         .link_libc = true,
         .imports = &.{
             .{ .name = "libpg_query", .module = pg_query_bindings },
+            .{ .name = "sqlz_diagnostics", .module = diagnostics_mod },
         },
     });
     parser_mod.linkLibrary(libpg_query);
@@ -131,6 +137,7 @@ pub fn build(b: *std.Build) !void {
         .imports = &.{
             .{ .name = "sqlz_ir", .module = ir_mod },
             .{ .name = "sqlz_catalog", .module = catalog_mod },
+            .{ .name = "sqlz_diagnostics", .module = diagnostics_mod },
         },
     });
     const query_files_mod = b.addModule("sqlz_query_files", .{
@@ -190,6 +197,7 @@ pub fn build(b: *std.Build) !void {
             .{ .name = "sqlz_analysis", .module = analysis_mod },
             .{ .name = "sqlz_generator", .module = generator_mod },
             .{ .name = "sqlz_catalog", .module = catalog_mod },
+            .{ .name = "sqlz_diagnostics", .module = diagnostics_mod },
         },
     });
     const codegen_exe = b.addExecutable(.{
@@ -198,7 +206,10 @@ pub fn build(b: *std.Build) !void {
             .root_source_file = b.path("src/codegen_main.zig"),
             .target = host_target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "sqlz_codegen", .module = codegen_mod }},
+            .imports = &.{
+                .{ .name = "sqlz_codegen", .module = codegen_mod },
+                .{ .name = "sqlz_diagnostics", .module = diagnostics_mod },
+            },
         }),
     });
     b.installArtifact(codegen_exe);
@@ -263,6 +274,72 @@ pub fn build(b: *std.Build) !void {
     const test_step = b.step("test", "Run the complete sqlz test suite");
     const offline_step = b.step("test-offline", "Run quick tests that need no database or network service");
     const integration_step = b.step("test-integration", "Run SQLite and live PostgreSQL integration tests");
+    const postgres_test_host = b.option([]const u8, "postgres_test_host", "Live PostgreSQL test host") orelse "127.0.0.1";
+    const postgres_test_port = b.option(u16, "postgres_test_port", "Live PostgreSQL test port") orelse 55432;
+    const postgres_test_database = b.option([]const u8, "postgres_test_database", "Live PostgreSQL test database") orelse "sqlz_test";
+    const postgres_test_username = b.option([]const u8, "postgres_test_username", "Live PostgreSQL test username") orelse "sqlz_test";
+    const postgres_test_password = b.option([]const u8, "postgres_test_password", "Live PostgreSQL test password") orelse "sqlz_test";
+    const postgres_test_major = b.option(u16, "postgres_test_major", "Expected live PostgreSQL major") orelse 18;
+
+    const postgres_config_mod = b.createModule(.{
+        .root_source_file = b.path("test/support/postgres_config.zig"),
+        .target = host_target,
+        .optimize = optimize,
+    });
+    const postgres_config_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/postgres_config.zig"),
+            .target = host_target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "postgres_config", .module = postgres_config_mod }},
+        }),
+    });
+    const run_postgres_config = b.addRunArtifact(postgres_config_tests);
+    test_step.dependOn(&run_postgres_config.step);
+    offline_step.dependOn(&run_postgres_config.step);
+
+    const diagnostics_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/diagnostics.zig"),
+            .target = host_target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "sqlz_diagnostics", .module = diagnostics_mod }},
+        }),
+    });
+    const run_diagnostics = b.addRunArtifact(diagnostics_tests);
+    test_step.dependOn(&run_diagnostics.step);
+    offline_step.dependOn(&run_diagnostics.step);
+
+    const diagnostics_json = b.addRunArtifact(codegen_exe);
+    diagnostics_json.addFileArg(b.path("test/fixtures/diagnostics/invalid.ziggy"));
+    _ = diagnostics_json.addOutputFileArg("invalid_queries.zig");
+    diagnostics_json.addArgs(&.{ "--format", "json" });
+    diagnostics_json.expectExitCode(1);
+    diagnostics_json.expectStdOutMatch("\"format_version\":1");
+    diagnostics_json.expectStdOutMatch("\"kind\":\"diagnostic\"");
+    diagnostics_json.expectStdErrEqual("");
+    test_step.dependOn(&diagnostics_json.step);
+    offline_step.dependOn(&diagnostics_json.step);
+
+    const diagnostics_accumulated = b.addRunArtifact(codegen_exe);
+    diagnostics_accumulated.addFileArg(b.path("test/fixtures/diagnostics/project/sqlz.ziggy"));
+    _ = diagnostics_accumulated.addOutputFileArg("accumulated_queries.zig");
+    diagnostics_accumulated.addArgs(&.{ "--format", "json" });
+    diagnostics_accumulated.expectExitCode(1);
+    diagnostics_accumulated.expectStdOutMatch("\"code\":\"C001\"");
+    diagnostics_accumulated.expectStdOutMatch("\"path\":\"a.sql\"");
+    diagnostics_accumulated.expectStdOutMatch("\"code\":\"S099\"");
+    diagnostics_accumulated.expectStdErrEqual("");
+    test_step.dependOn(&diagnostics_accumulated.step);
+    offline_step.dependOn(&diagnostics_accumulated.step);
+
+    const diagnostics_human = b.addRunArtifact(codegen_exe);
+    diagnostics_human.expectExitCode(2);
+    diagnostics_human.expectStdOutEqual("");
+    diagnostics_human.expectStdErrMatch("error[S001]");
+    diagnostics_human.expectStdErrMatch("usage: sqlz-codegen");
+    test_step.dependOn(&diagnostics_human.step);
+    offline_step.dependOn(&diagnostics_human.step);
     const core_step = b.step("test-core", "Run backend-neutral tests");
     const examples_step = b.step("examples", "Build all examples");
 
@@ -318,6 +395,7 @@ pub fn build(b: *std.Build) !void {
             .imports = &.{.{ .name = "sqlz_parser", .module = parser_mod }},
         }),
     });
+    parser_tests.root_module.addImport("sqlz_diagnostics", diagnostics_mod);
     const run_parser = b.addRunArtifact(parser_tests);
     test_step.dependOn(&run_parser.step);
     offline_step.dependOn(&run_parser.step);
@@ -414,7 +492,10 @@ pub fn build(b: *std.Build) !void {
             .target = host_target,
             .optimize = optimize,
             .link_libc = true,
-            .imports = &.{.{ .name = "sqlz_codegen", .module = codegen_mod }},
+            .imports = &.{
+                .{ .name = "sqlz_codegen", .module = codegen_mod },
+                .{ .name = "sqlz_diagnostics", .module = diagnostics_mod },
+            },
         }),
     });
     const run_codegen_tests = b.addRunArtifact(codegen_tests);
@@ -750,9 +831,20 @@ pub fn build(b: *std.Build) !void {
                 .root_source_file = b.path("test/postgres_integration.zig"),
                 .target = target,
                 .optimize = optimize,
-                .imports = &.{.{ .name = "sqlz", .module = sqlz_mod }},
+                .imports = &.{
+                    .{ .name = "sqlz", .module = sqlz_mod },
+                    .{ .name = "postgres_config", .module = postgres_config_mod },
+                },
             }),
         });
+        const postgres_integration_options = b.addOptions();
+        postgres_integration_options.addOption([]const u8, "host", postgres_test_host);
+        postgres_integration_options.addOption(u16, "port", postgres_test_port);
+        postgres_integration_options.addOption([]const u8, "database", postgres_test_database);
+        postgres_integration_options.addOption([]const u8, "username", postgres_test_username);
+        postgres_integration_options.addOption([]const u8, "password", postgres_test_password);
+        postgres_integration_options.addOption(u16, "expected_major", postgres_test_major);
+        postgres_integration_tests.root_module.addOptions("postgres_test_options", postgres_integration_options);
         const run_postgres_integration = b.addRunArtifact(postgres_integration_tests);
         integration_step.dependOn(&run_postgres_integration.step);
         const postgres_integration_step = b.step("test-postgres-integration", "Run tests against PostgreSQL on localhost:55432");

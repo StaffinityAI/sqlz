@@ -1,5 +1,6 @@
 const std = @import("std");
 const parser = @import("sqlz_parser");
+const diagnostics = @import("sqlz_diagnostics");
 
 test "named parameters are rewritten once and retain first-use order" {
     var rewritten = try parser.rewriteSqlite(
@@ -87,8 +88,8 @@ test "PostgreSQL profiles parse supported versions" {
 }
 
 test "syntax diagnostics map libpg_query positions to the original SQL" {
-    const source = "SELECT :identity FROM";
-    const result = try parser.parseDetailed(std.testing.allocator, source);
+    const source = "SELECT 1;\nSELECT :identity FROM";
+    const result = try parser.parseDetailedSource(std.testing.allocator, "queries/get.sql", source);
     switch (result) {
         .ok => |value| {
             var parsed = value;
@@ -101,6 +102,15 @@ test "syntax diagnostics map libpg_query positions to the original SQL" {
             try std.testing.expect(diagnostic.message.len > 0);
             try std.testing.expect(diagnostic.original_offset <= source.len);
             try std.testing.expect(diagnostic.rewritten_offset <= source.len);
+            try std.testing.expectEqual(@as(usize, 2), diagnostic.line);
+            try std.testing.expect(diagnostic.column > 1);
+            const structured = diagnostic.structured();
+            try std.testing.expectEqualStrings("S010", structured.code);
+            try std.testing.expectEqualStrings("queries/get.sql", structured.primary.?.path);
+            var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+            defer output.deinit();
+            try diagnostics.render(&output.writer, structured, .json);
+            try std.testing.expect(std.mem.indexOf(u8, output.written(), "\"line\":2") != null);
         },
     }
 }

@@ -26,6 +26,10 @@ zig build sqlz -- journal show|prune
 The build installs/runs one host tool and registers all projects with it. `--project`
 is inferred only when exactly one registration is applicable.
 
+The internal build-cache generator accepts `--format human|json` under the same
+diagnostic transport. Build integration uses human mode by default; tooling that
+invokes it directly may request newline-delimited JSON diagnostics.
+
 ## Output contract
 
 Human output is concise and source-oriented. `--format json` writes only a

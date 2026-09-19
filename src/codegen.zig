@@ -8,11 +8,13 @@ const checker = @import("sqlz_checker");
 const analysis = @import("sqlz_analysis");
 const catalog = @import("sqlz_catalog");
 const generator = @import("sqlz_generator");
+const diagnostics = @import("sqlz_diagnostics");
 
 pub const Error = error{
     UnboundCodec,
     UnregisteredCodec,
     IncompatibleBackendContract,
+    ProjectCheckFailed,
 };
 
 /// A codec binding as the build supplies it: the configured ID, plus the Zig
@@ -26,10 +28,11 @@ pub const CodecBinding = struct {
 const RootState = struct {
     discovery: query_files.Discovery,
     checked: []checker.CheckedQuery,
+    checked_count: usize,
     inputs: []generator.CheckedInput,
 
     fn deinit(self: *RootState, allocator: std.mem.Allocator) void {
-        for (self.checked) |*item| item.deinit();
+        for (self.checked[0..self.checked_count]) |*item| item.deinit();
         allocator.free(self.checked);
         allocator.free(self.inputs);
         self.discovery.deinit();
@@ -53,6 +56,24 @@ pub fn generateProjectWithCodecs(
     config_name: []const u8,
     bindings: []const CodecBinding,
 ) ![]u8 {
+    return generateProjectWithCodecsAndDiagnostics(
+        allocator,
+        io,
+        project_dir,
+        config_name,
+        bindings,
+        null,
+    );
+}
+
+pub fn generateProjectWithCodecsAndDiagnostics(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    project_dir: std.Io.Dir,
+    config_name: []const u8,
+    bindings: []const CodecBinding,
+    diagnostic_list: ?*diagnostics.List,
+) ![]u8 {
     const raw_config = try project_dir.readFileAlloc(io, config_name, allocator, .limited(16 * 1024 * 1024));
     defer allocator.free(raw_config);
     const config_source = try allocator.dupeZ(u8, raw_config);
@@ -61,6 +82,8 @@ pub fn generateProjectWithCodecs(
     var loaded = try config.parse(allocator, config_source, &meta);
     defer loaded.deinit();
     const project = loaded.config();
+    if (diagnostic_list) |list|
+        list.setLimit(std.math.cast(usize, project.limits.diagnostics) orelse return error.InvalidLimit);
     const sqlite_dialect: checker.SqliteDialect = if (project.backends.sqlite) |sqlite| .{
         .profile = checker.SqliteProfile.fromString(sqlite.profile) orelse unreachable,
     } else .{};
@@ -146,7 +169,7 @@ pub fn generateProjectWithCodecs(
             // Embedded declarations produce no generated output; checking them
             // is the point — their `.params`/`.row` structs must agree with the
             // SQL they sit next to.
-            try checkSource(
+            checkSource(
                 allocator,
                 sqlite_schema,
                 postgres_schema,
@@ -157,7 +180,13 @@ pub fn generateProjectWithCodecs(
                 null,
                 null,
                 null,
-            );
+            ) catch |err| {
+                if (diagnostic_list) |list| {
+                    try list.appendError(err, source.path);
+                    continue;
+                }
+                return err;
+            };
         }
     }
 
@@ -188,7 +217,7 @@ pub fn generateProjectWithCodecs(
         for (discovery.sources) |*source| {
             var sqlite_sql: ?[]const u8 = null;
             var postgres_sql: ?[]const u8 = null;
-            try checkSource(
+            checkSource(
                 allocator,
                 sqlite_schema,
                 postgres_schema,
@@ -199,7 +228,13 @@ pub fn generateProjectWithCodecs(
                 &checked[checked_count],
                 &sqlite_sql,
                 &postgres_sql,
-            );
+            ) catch |err| {
+                if (diagnostic_list) |list| {
+                    try list.appendError(err, source.path);
+                    continue;
+                }
+                return err;
+            };
             inputs[checked_count] = .{
                 .source = source,
                 .checked = &checked[checked_count],
@@ -217,11 +252,13 @@ pub fn generateProjectWithCodecs(
         states[initialized] = .{
             .discovery = discovery,
             .checked = checked,
+            .checked_count = checked_count,
             .inputs = inputs,
         };
-        roots[initialized] = .{ .alias = entry.key_ptr.*, .inputs = inputs };
+        roots[initialized] = .{ .alias = entry.key_ptr.*, .inputs = inputs[0..checked_count] };
         initialized += 1;
     }
+    if (diagnostic_list) |list| if (list.slice().len != 0) return error.ProjectCheckFailed;
     return generator.generateProjectModuleWithCodecs(allocator, roots, generator_codecs);
 }
 

@@ -1,8 +1,9 @@
 # Implementation plan
 
 This is the live implementation checklist for the first checked-query release.
-SQLite and the initial PostgreSQL runtime are implemented. Migration execution,
-the full CLI, and release hardening remain.
+SQLite and PostgreSQL checked-query runtimes are implemented. Remaining
+PostgreSQL conformance edges, migration execution, the full migration CLI, and
+release hardening remain.
 
 The project-backed SQLite-to-PostgreSQL import is tracked separately in
 [sqlite-postgres-bootstrap-plan.md](sqlite-postgres-bootstrap-plan.md). Keep its
@@ -13,11 +14,12 @@ progress tracker synchronized as prerequisite or bootstrap-specific work lands.
 This is the source of truth for work ordering. Keep it current whenever a slice
 is completed, split, deferred, or newly discovered.
 
-1. Add opt-in PostgreSQL live-engine conformance tests covering connections,
-   scalar and array values, enums/domains, transactions, pools, draining,
-   SQLSTATE errors, version checks, and TLS.
-2. Introduce structured diagnostics with stable codes, source spans, labels,
-   human and JSON rendering, error accumulation, and defined exit behavior.
+1. Complete the remaining PostgreSQL conformance edges: cancellation/timeouts,
+   runtime version-policy overrides, zio-backed sockets, certificate-backed TLS,
+   and detailed SQLSTATE payloads after the pg.zig recovery limitation is fixed.
+2. Convert manifest, graph, catalog, and semantic query-analysis failures onto
+   richer component-specific source labels/fixes. Parser syntax spans and
+   deterministic query-file accumulation up to the configured limit are complete.
 3. Add PostgreSQL builtin catalogs for functions, aggregates, operators, casts,
    type aliases, and profile-specific behavior.
 4. Implement the pure migration planner: applied sets, target parsing, ancestor
@@ -95,6 +97,13 @@ is completed, split, deferred, or newly discovered.
 | Runtime | PostgreSQL one-dimensional array binding/decoding for built-ins and derived enums | Complete |
 | Build | Lazy SQLite/PostgreSQL runtime facade and TLS flag validation | Complete |
 | Build | Core, SQLite, PostgreSQL, both-backend, and PostgreSQL-TLS compile matrix | Complete |
+| Diagnostics | Stable diagnostic transport, human/JSON rendering, and codegen exit/output contract | Complete |
+| Diagnostics | Parser original-source spans and labels | Complete |
+| Diagnostics | Deterministic query-file error accumulation and configured cap | Complete |
+| Diagnostics | Manifest/graph/catalog/query semantic labels and suggested fixes | Not started |
+| Acceptance | Live PostgreSQL CRUD, rows, owned values, transactions, arrays, enums/domains, pools, and version checks | Complete |
+| Acceptance | Hosted live PostgreSQL 15–18 conformance matrix | Complete |
+| Acceptance | Certificate-backed PostgreSQL TLS and cancellation conformance | Not started |
 | Runtime | Native enums at the parameter and row boundary | Complete |
 | Runtime | Connection-scoped owned rows and streaming owned conversion | Complete |
 | Runtime | Typed connection options and the native pool wrapper | Complete |
@@ -103,9 +112,8 @@ is completed, split, deferred, or newly discovered.
 | Acceptance | Convert examples to generated checked bindings | Complete |
 | Acceptance | Example runs all four cardinalities through generated and embedded queries (M3 gate) | Complete |
 | Acceptance | Every example query checks offline against both SQLite and PostgreSQL catalogs | Complete |
-| Hardening | Complete diagnostics, resource limits, and dependency matrix | Not started |
-| Deferred | PostgreSQL runtime backend | Deferred |
-| Deferred | PostgreSQL builtin catalog signatures and live-engine conformance | Deferred |
+| Hardening | Complete remaining diagnostics, resource limits, and dependency matrix | Not started |
+| Deferred | PostgreSQL builtin catalog signatures and remaining live-engine conformance | Deferred |
 | Deferred | Migration execution and full CLI | Deferred |
 | Deferred | Checkpoint migrations and history compaction | Deferred |
 | Deferred | Checkpoint manifest v2 and compacted-history registry format | Deferred |
@@ -119,7 +127,7 @@ an undocumented rule, per [README.md](README.md).
 
 | Promise | Document | State |
 | --- | --- | --- |
-| Diagnostics with stable codes, source spans, labels, and JSON rendering | [sql-checker.md](sql-checker.md) | checker failures are Zig error values today |
+| Diagnostics with stable codes, source spans, labels, and JSON rendering | [sql-checker.md](sql-checker.md) | transport/rendering, process contracts, parser spans, and bounded query-file accumulation exist; manifest/graph/catalog/query semantic failures still need rich labels and fixes |
 | Named `Row` and `OwnedRow` types per row-returning query | [sql-checker.md](sql-checker.md) | generated bindings carry an anonymous `.row` struct; the runtime supplies `Single(Row)`/`Owned(Row)` |
 | General codec interface: `Binder`/`Decoder`, `borrows_result`, ownership hooks | [query-api.md](query-api.md) | only enum codecs are derived; `sqlz.assertCodec` rejects any other declaration |
 | `sqlz.Uuid` built-in mapping | [query-api.md](query-api.md) | not implemented |
@@ -129,3 +137,4 @@ an undocumented rule, per [README.md](README.md).
 | Resource limits beyond `source_bytes` | [configuration.md](configuration.md) | declared and validated, not yet enforced |
 | Automated build-input invalidation test | [testing.md](testing.md) | inputs are registered and verified by hand; no test yet |
 | Generated metadata for embedded declarations, and a versioned cache-metadata file | [sql-checker.md](sql-checker.md) | embedded declarations run their own SQL, which SQLite accepts with named parameters; PostgreSQL will need the metadata |
+| Detailed PostgreSQL SQLSTATE payloads on every query failure | [errors-and-observability.md](errors-and-observability.md) | the pinned pg.zig recovery path clears some server payloads before the wrapper can copy them; safe owned errors remain available |

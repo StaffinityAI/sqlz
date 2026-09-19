@@ -1,5 +1,6 @@
 const std = @import("std");
 const codegen = @import("sqlz_codegen");
+const diagnostics = @import("sqlz_diagnostics");
 
 test "generates a PostgreSQL-only project" {
     var tmp = std.testing.tmpDir(.{ .iterate = true });
@@ -15,6 +16,46 @@ test "generates a PostgreSQL-only project" {
     defer std.testing.allocator.free(generated);
     try std.testing.expect(std.mem.indexOf(u8, generated, ".postgres = true") != null);
     try std.testing.expect(std.mem.indexOf(u8, generated, ".sqlite = true") == null);
+}
+
+test "project checking accumulates query diagnostics in source order" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try writeDiagnosticProject(&tmp, 10);
+    var list: diagnostics.List = .init(std.testing.allocator, 100);
+    defer list.deinit();
+    try std.testing.expectError(error.ProjectCheckFailed, codegen.generateProjectWithCodecsAndDiagnostics(
+        std.testing.allocator,
+        std.testing.io,
+        tmp.dir,
+        "sqlz.ziggy",
+        &.{},
+        &list,
+    ));
+    try std.testing.expectEqual(@as(usize, 2), list.slice().len);
+    try std.testing.expectEqualStrings("a.sql", list.slice()[0].primary.?.path);
+    try std.testing.expectEqualStrings("b.sql", list.slice()[1].primary.?.path);
+    try std.testing.expectEqualStrings("C001", list.slice()[0].code);
+    try std.testing.expect(!list.truncated);
+}
+
+test "project diagnostic limit truncates deterministically" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try writeDiagnosticProject(&tmp, 1);
+    var list: diagnostics.List = .init(std.testing.allocator, 100);
+    defer list.deinit();
+    try std.testing.expectError(error.ProjectCheckFailed, codegen.generateProjectWithCodecsAndDiagnostics(
+        std.testing.allocator,
+        std.testing.io,
+        tmp.dir,
+        "sqlz.ziggy",
+        &.{},
+        &list,
+    ));
+    try std.testing.expectEqual(@as(usize, 1), list.slice().len);
+    try std.testing.expectEqualStrings("a.sql", list.slice()[0].primary.?.path);
+    try std.testing.expect(list.truncated);
 }
 
 test "portable project queries require matching backend contracts" {
@@ -462,4 +503,63 @@ fn writeArrayProject(tmp: *std.testing.TmpDir) !void {
         \\SELECT tags, ratings FROM posts
         ,
     });
+}
+
+fn writeDiagnosticProject(tmp: *std.testing.TmpDir, limit: u32) !void {
+    const config_source = try std.fmt.allocPrint(std.testing.allocator,
+        \\.format_version = 1,
+        \\.project_id = "550e8400-e29b-41d4-a716-446655440000",
+        \\.migrations = "migrations",
+        \\.sql_roots = .{{ .app = "queries" }},
+        \\.zig_roots = [],
+        \\.backends = .{{ .sqlite = .{{ .profile = "3.53" }} }},
+        \\.limits = .{{ .diagnostics = {d} }},
+    , .{limit});
+    defer std.testing.allocator.free(config_source);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "sqlz.ziggy", .data = config_source });
+    var migration = try tmp.dir.createDirPathOpen(
+        std.testing.io,
+        "migrations/aaaaaaaaaaaa_create_users",
+        .{},
+    );
+    defer migration.close(std.testing.io);
+    try migration.writeFile(std.testing.io, .{
+        .sub_path = "revision.ziggy",
+        .data =
+        \\.format_version = 1,
+        \\.revision = "aaaaaaaaaaaa",
+        \\.parents = [],
+        \\.description = "create users",
+        \\.created_utc = "2026-09-18T12:00:00Z",
+        \\.backends = [.sqlite],
+        \\.reversible = true,
+        \\.transaction = .{ .sqlite = .always },
+        ,
+    });
+    try migration.writeFile(std.testing.io, .{
+        .sub_path = "common.up.sql",
+        .data = "CREATE TABLE users (id BIGINT PRIMARY KEY)",
+    });
+    try migration.writeFile(std.testing.io, .{
+        .sub_path = "common.down.sql",
+        .data = "DROP TABLE users",
+    });
+    var queries = try tmp.dir.createDirPathOpen(std.testing.io, "queries", .{});
+    defer queries.close(std.testing.io);
+    const first =
+        \\-- sqlz.name: first
+        \\-- sqlz.backends: sqlite
+        \\-- sqlz.cardinality: many
+        \\
+        \\SELECT missing_a FROM users
+    ;
+    const second =
+        \\-- sqlz.name: second
+        \\-- sqlz.backends: sqlite
+        \\-- sqlz.cardinality: many
+        \\
+        \\SELECT missing_b FROM users
+    ;
+    try queries.writeFile(std.testing.io, .{ .sub_path = "a.sql", .data = first });
+    try queries.writeFile(std.testing.io, .{ .sub_path = "b.sql", .data = second });
 }
