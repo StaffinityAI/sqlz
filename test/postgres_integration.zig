@@ -5,7 +5,6 @@ const options = @import("postgres_test_options");
 
 const allocator = std.testing.allocator;
 const io = std.testing.io;
-const prefix = "sqlz_live_";
 
 const User = struct {
     id: i64,
@@ -18,6 +17,40 @@ const TextRole = enum {
     member,
     admin,
     pub const sqlz_storage: sqlz.Storage = .text;
+};
+
+const Fixture = struct {
+    conn: sqlz.postgres.Conn,
+    schema: [32]u8,
+    schema_len: usize,
+
+    fn init() !Fixture {
+        var fixture: Fixture = .{
+            .conn = try open(),
+            .schema = undefined,
+            .schema_len = 0,
+        };
+        errdefer fixture.conn.deinit();
+        var random: [8]u8 = undefined;
+        try io.randomSecure(&random);
+        const name = try std.fmt.bufPrint(&fixture.schema, "sqlz_live_{x}", .{std.mem.readInt(u64, &random, .little)});
+        fixture.schema_len = name.len;
+        var sql: [80]u8 = undefined;
+        try unwrap(fixture.conn.executeScript(try std.fmt.bufPrint(&sql, "CREATE SCHEMA {s}", .{name})));
+        errdefer {
+            const cleanup = std.fmt.bufPrint(&sql, "DROP SCHEMA IF EXISTS {s} CASCADE", .{name}) catch unreachable;
+            _ = fixture.conn.executeScript(cleanup);
+        }
+        try unwrap(fixture.conn.executeScript(try std.fmt.bufPrint(&sql, "SET search_path TO {s}", .{name})));
+        return fixture;
+    }
+
+    fn deinit(self: *Fixture) void {
+        var sql: [80]u8 = undefined;
+        const cleanup = std.fmt.bufPrint(&sql, "DROP SCHEMA IF EXISTS {s} CASCADE", .{self.schema[0..self.schema_len]}) catch unreachable;
+        _ = self.conn.executeScript(cleanup);
+        self.conn.deinit();
+    }
 };
 
 fn config() postgres_config.Config {
@@ -46,24 +79,24 @@ test "PostgreSQL server major matches the selected conformance target" {
 }
 
 test "PostgreSQL executes all cardinalities and owned conversion" {
-    var conn = try open();
-    defer conn.deinit();
-    try resetUsers(&conn);
-    defer _ = conn.executeScript("DROP TABLE IF EXISTS " ++ prefix ++ "users");
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    const conn = &fixture.conn;
+    try resetUsers(conn);
 
     const inserted = try unwrap(conn.execute(
-        "INSERT INTO " ++ prefix ++ "users(name, active, score) VALUES ($1, $2, $3)",
+        "INSERT INTO users(name, active, score) VALUES ($1, $2, $3)",
         .{ "Ada", true, @as(?f64, 9.5) },
     ));
     try std.testing.expectEqual(@as(?u64, 1), inserted.rows_affected);
     _ = try unwrap(conn.execute(
-        "INSERT INTO " ++ prefix ++ "users(name, active, score) VALUES ($1, $2, $3)",
+        "INSERT INTO users(name, active, score) VALUES ($1, $2, $3)",
         .{ "Lin", false, @as(?f64, null) },
     ));
 
     var single = try unwrap(conn.fetchOne(
         User,
-        "SELECT id, name, active, score FROM " ++ prefix ++ "users WHERE name=$1",
+        "SELECT id, name, active, score FROM users WHERE name=$1",
         .{"Ada"},
     ));
     var owned = try unwrap(single.toOwned(allocator));
@@ -74,14 +107,14 @@ test "PostgreSQL executes all cardinalities and owned conversion" {
 
     const missing = try unwrap(conn.fetchOptional(
         User,
-        "SELECT id, name, active, score FROM " ++ prefix ++ "users WHERE name=$1",
+        "SELECT id, name, active, score FROM users WHERE name=$1",
         .{"missing"},
     ));
     try std.testing.expect(missing == null);
 
     var rows = try unwrap(conn.fetch(
         User,
-        "SELECT id, name, active, score FROM " ++ prefix ++ "users ORDER BY id",
+        "SELECT id, name, active, score FROM users ORDER BY id",
         .{},
     ));
     defer rows.deinit();
@@ -93,35 +126,32 @@ test "PostgreSQL executes all cardinalities and owned conversion" {
 }
 
 test "PostgreSQL transactions commit and roll back" {
-    var conn = try open();
-    defer conn.deinit();
-    try unwrap(conn.executeScript(
-        "DROP TABLE IF EXISTS " ++ prefix ++ "transactions;" ++
-            "CREATE TABLE " ++ prefix ++ "transactions(value BIGINT NOT NULL);",
-    ));
-    defer _ = conn.executeScript("DROP TABLE IF EXISTS " ++ prefix ++ "transactions");
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    const conn = &fixture.conn;
+    try unwrap(conn.executeScript("CREATE TABLE transactions(value BIGINT NOT NULL)"));
 
     {
         var tx = try unwrap(conn.begin(.{}));
         defer tx.deinit();
-        _ = try unwrap(tx.execute("INSERT INTO " ++ prefix ++ "transactions(value) VALUES ($1)", .{@as(i64, 10)}));
+        _ = try unwrap(tx.execute("INSERT INTO transactions(value) VALUES ($1)", .{@as(i64, 10)}));
         try unwrap(tx.commit());
     }
     {
         var tx = try unwrap(conn.begin(.{}));
         defer tx.deinit();
-        _ = try unwrap(tx.execute("INSERT INTO " ++ prefix ++ "transactions(value) VALUES ($1)", .{@as(i64, 20)}));
+        _ = try unwrap(tx.execute("INSERT INTO transactions(value) VALUES ($1)", .{@as(i64, 20)}));
         try unwrap(tx.rollback());
     }
     {
         var tx = try unwrap(conn.begin(.{}));
         defer tx.deinit();
-        _ = try unwrap(tx.execute("INSERT INTO " ++ prefix ++ "transactions(value) VALUES ($1)", .{@as(i64, 30)}));
+        _ = try unwrap(tx.execute("INSERT INTO transactions(value) VALUES ($1)", .{@as(i64, 30)}));
     }
 
     var count = try unwrap(conn.fetchOne(
         struct { count: i64 },
-        "SELECT count(*)::bigint AS count FROM " ++ prefix ++ "transactions",
+        "SELECT count(*)::bigint AS count FROM transactions",
         .{},
     ));
     defer count.deinit();
@@ -129,14 +159,14 @@ test "PostgreSQL transactions commit and roll back" {
 }
 
 test "PostgreSQL arrays preserve null arrays and nullable elements" {
-    var conn = try open();
-    defer conn.deinit();
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
     const Row = struct {
         ids: []const ?i32,
         flags: ?[]const ?bool,
         labels: []const ?[]const u8,
     };
-    var row = try unwrap(conn.fetchOne(
+    var row = try unwrap(fixture.conn.fetchOne(
         Row,
         "SELECT $1::integer[] AS ids, $2::boolean[] AS flags, $3::text[] AS labels",
         .{
@@ -153,47 +183,32 @@ test "PostgreSQL arrays preserve null arrays and nullable elements" {
 }
 
 test "PostgreSQL enums domains and SQLSTATE errors cross the live adapter" {
-    var conn = try open();
-    defer conn.deinit();
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    const conn = &fixture.conn;
     try unwrap(conn.executeScript(
-        "DROP TABLE IF EXISTS " ++ prefix ++ "typed;" ++
-            "DROP TYPE IF EXISTS " ++ prefix ++ "role;" ++
-            "DROP DOMAIN IF EXISTS " ++ prefix ++ "user_id;" ++
-            "CREATE TYPE " ++ prefix ++ "role AS ENUM ('member', 'admin');" ++
-            "CREATE DOMAIN " ++ prefix ++ "user_id AS BIGINT CHECK (VALUE > 0);" ++
-            "CREATE TABLE " ++ prefix ++ "typed(" ++
-            "id " ++ prefix ++ "user_id PRIMARY KEY," ++
-            "role " ++ prefix ++ "role NOT NULL UNIQUE);",
+        "CREATE TYPE role AS ENUM ('member', 'admin');" ++
+            "CREATE DOMAIN user_id AS BIGINT CHECK (VALUE > 0);" ++
+            "CREATE TABLE typed(" ++
+            "id user_id PRIMARY KEY," ++
+            "role role NOT NULL UNIQUE);",
     ));
-    defer _ = conn.executeScript(
-        "DROP TABLE IF EXISTS " ++ prefix ++ "typed;" ++
-            "DROP TYPE IF EXISTS " ++ prefix ++ "role;" ++
-            "DROP DOMAIN IF EXISTS " ++ prefix ++ "user_id;",
-    );
 
-    try unwrap(conn.executeScript(
-        "INSERT INTO " ++ prefix ++ "typed(id, role) VALUES (1, 'member')",
-    ));
+    try unwrap(conn.executeScript("INSERT INTO typed(id, role) VALUES (1, 'member')"));
     var typed = try unwrap(conn.fetchOne(
         struct { id: i64, role: TextRole },
-        "SELECT id, role FROM " ++ prefix ++ "typed WHERE id=$1",
+        "SELECT id, role FROM typed WHERE id=$1",
         .{@as(i64, 1)},
     ));
-    defer typed.deinit();
     try std.testing.expectEqual(@as(i64, 1), typed.row().id);
     try std.testing.expectEqual(TextRole.member, typed.row().role);
+    typed.deinit();
 
-    switch (conn.fetchOne(
-        struct { id: i64 },
-        "INSERT INTO " ++ prefix ++ "typed(id, role) VALUES ($1::bigint::" ++ prefix ++ "user_id, 'member') RETURNING id",
-        .{@as(i64, 2)},
-    )) {
+    switch (conn.executeScript("INSERT INTO typed(id, role) VALUES (2, 'member')")) {
         .ok => return error.ExpectedConstraintError,
         .err => |*err| {
             defer err.deinit();
-            // pg.zig currently clears some server payloads while recovering the
-            // connection, so the wrapper can only promise a safe owned error here.
-            try std.testing.expect(err.class == .constraint or err.class == .other);
+            try std.testing.expectEqual(sqlz.ErrorClass.constraint, err.class);
             try std.testing.expect(err.message.len != 0);
         },
     }
@@ -246,8 +261,7 @@ fn open() !sqlz.postgres.Conn {
 
 fn resetUsers(conn: *sqlz.postgres.Conn) !void {
     try unwrap(conn.executeScript(
-        "DROP TABLE IF EXISTS " ++ prefix ++ "users;" ++
-            "CREATE TABLE " ++ prefix ++ "users(" ++
+        "CREATE TABLE users(" ++
             "id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY," ++
             "name TEXT NOT NULL UNIQUE," ++
             "active BOOLEAN NOT NULL," ++

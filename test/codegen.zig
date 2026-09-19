@@ -39,6 +39,24 @@ test "project checking accumulates query diagnostics in source order" {
     try std.testing.expect(!list.truncated);
 }
 
+test "project diagnostic limit above the default preserves all diagnostics" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try writeDiagnosticProject(&tmp, 1000);
+    var list: diagnostics.List = .init(std.testing.allocator, 100);
+    defer list.deinit();
+    try std.testing.expectError(error.ProjectCheckFailed, codegen.generateProjectWithCodecsAndDiagnostics(
+        std.testing.allocator,
+        std.testing.io,
+        tmp.dir,
+        "sqlz.ziggy",
+        &.{},
+        &list,
+    ));
+    try std.testing.expectEqual(@as(usize, 2), list.slice().len);
+    try std.testing.expect(!list.truncated);
+}
+
 test "project diagnostic limit truncates deterministically" {
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
@@ -56,6 +74,27 @@ test "project diagnostic limit truncates deterministically" {
     try std.testing.expectEqual(@as(usize, 1), list.slice().len);
     try std.testing.expectEqualStrings("a.sql", list.slice()[0].primary.?.path);
     try std.testing.expect(list.truncated);
+}
+
+test "PostgreSQL project syntax diagnostics preserve original source spans" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try writePostgresSyntaxDiagnosticProject(&tmp);
+    var list: diagnostics.List = .init(std.testing.allocator, 100);
+    defer list.deinit();
+    try std.testing.expectError(error.ProjectCheckFailed, codegen.generateProjectWithCodecsAndDiagnostics(
+        std.testing.allocator,
+        std.testing.io,
+        tmp.dir,
+        "sqlz.ziggy",
+        &.{},
+        &list,
+    ));
+    try std.testing.expectEqual(@as(usize, 1), list.slice().len);
+    const primary = list.slice()[0].primary.?;
+    try std.testing.expectEqualStrings("invalid.sql", primary.path);
+    try std.testing.expectEqual(@as(usize, 1), primary.start.line);
+    try std.testing.expect(primary.start.column > 1);
 }
 
 test "portable project queries require matching backend contracts" {
@@ -501,6 +540,53 @@ fn writeArrayProject(tmp: *std.testing.TmpDir) !void {
         \\-- sqlz.cardinality: many
         \\
         \\SELECT tags, ratings FROM posts
+        ,
+    });
+}
+
+fn writePostgresSyntaxDiagnosticProject(tmp: *std.testing.TmpDir) !void {
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "sqlz.ziggy",
+        .data =
+        \\.format_version = 1,
+        \\.project_id = "550e8400-e29b-41d4-a716-446655440000",
+        \\.migrations = "migrations",
+        \\.sql_roots = .{ .app = "queries" },
+        \\.zig_roots = [],
+        \\.backends = .{ .postgres = .{ .profile = "15" } },
+        ,
+    });
+    var migration = try tmp.dir.createDirPathOpen(
+        std.testing.io,
+        "migrations/aaaaaaaaaaaa_create_users",
+        .{},
+    );
+    defer migration.close(std.testing.io);
+    try migration.writeFile(std.testing.io, .{
+        .sub_path = "revision.ziggy",
+        .data =
+        \\.format_version = 1,
+        \\.revision = "aaaaaaaaaaaa",
+        \\.parents = [],
+        \\.description = "create users",
+        \\.created_utc = "2026-09-18T12:00:00Z",
+        \\.backends = [.postgres],
+        \\.reversible = true,
+        \\.transaction = .{ .postgres = .always },
+        ,
+    });
+    try migration.writeFile(std.testing.io, .{ .sub_path = "postgres.up.sql", .data = "CREATE TABLE users (id BIGINT PRIMARY KEY)" });
+    try migration.writeFile(std.testing.io, .{ .sub_path = "postgres.down.sql", .data = "DROP TABLE users" });
+    var queries = try tmp.dir.createDirPathOpen(std.testing.io, "queries", .{});
+    defer queries.close(std.testing.io);
+    try queries.writeFile(std.testing.io, .{
+        .sub_path = "invalid.sql",
+        .data =
+        \\-- sqlz.name: invalid
+        \\-- sqlz.backends: postgres
+        \\-- sqlz.cardinality: many
+        \\
+        \\SELECT :id FROM
         ,
     });
 }

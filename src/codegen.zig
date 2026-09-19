@@ -169,6 +169,9 @@ pub fn generateProjectWithCodecsAndDiagnostics(
             // Embedded declarations produce no generated output; checking them
             // is the point — their `.params`/`.row` structs must agree with the
             // SQL they sit next to.
+            if (diagnostic_list) |list| {
+                if (try appendPostgresSyntaxDiagnostic(allocator, source, list)) continue;
+            }
             checkSource(
                 allocator,
                 sqlite_schema,
@@ -215,6 +218,9 @@ pub fn generateProjectWithCodecsAndDiagnostics(
         const inputs = try allocator.alloc(generator.CheckedInput, discovery.sources.len);
         errdefer allocator.free(inputs);
         for (discovery.sources) |*source| {
+            if (diagnostic_list) |list| {
+                if (try appendPostgresSyntaxDiagnostic(allocator, source, list)) continue;
+            }
             var sqlite_sql: ?[]const u8 = null;
             var postgres_sql: ?[]const u8 = null;
             checkSource(
@@ -267,6 +273,28 @@ fn sameLogicalQuery(left: *const query_files.Source, right: *const query_files.S
     const left_parent = std.fs.path.dirname(left.path) orelse "";
     const right_parent = std.fs.path.dirname(right.path) orelse "";
     return std.mem.eql(u8, left_parent, right_parent);
+}
+
+fn appendPostgresSyntaxDiagnostic(
+    allocator: std.mem.Allocator,
+    source: *const query_files.Source,
+    list: *diagnostics.List,
+) !bool {
+    if (!source.backends.postgres) return false;
+    const result = try checker.parser.parseDetailedSource(allocator, source.path, source.sql);
+    switch (result) {
+        .ok => |value| {
+            var parsed = value;
+            parsed.deinit();
+            return false;
+        },
+        .syntax_error => |value| {
+            var diagnostic = value;
+            defer diagnostic.deinit();
+            try list.appendDiagnostic(diagnostic.structured());
+            return true;
+        },
+    }
 }
 
 fn checkSource(

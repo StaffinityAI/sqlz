@@ -90,8 +90,9 @@ separate certificate-backed service job and is not implied by the plain matrix.
 Every defect gains the narrowest regression test and, when it crosses a component
 boundary, an integration fixture. Tests must not require a production database or
 network access after dependencies and engine images are provisioned. The
-PostgreSQL integration suite uses only the disposable Compose service; SQLite
-integration tests use an in-process or temporary database.
+PostgreSQL integration suite requires a disposable target: every test creates a
+random schema, sets its connection-local `search_path`, and removes that schema with
+`CASCADE`. SQLite integration tests use an in-process or temporary database.
 
 Checkpoint tests use both schema-only and DML-bearing histories. They prove only
 empty-database schema equivalence and verify that the tool never claims historical

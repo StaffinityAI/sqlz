@@ -19,7 +19,8 @@ is completed, split, deferred, or newly discovered.
    and detailed SQLSTATE payloads after the pg.zig recovery limitation is fixed.
 2. Convert manifest, graph, catalog, and semantic query-analysis failures onto
    richer component-specific source labels/fixes. Parser syntax spans and
-   deterministic query-file accumulation up to the configured limit are complete.
+   deterministic query-file accumulation up to the configured limit are complete;
+   embedded-declaration failures have stable checked-source classification.
 3. Add PostgreSQL builtin catalogs for functions, aggregates, operators, casts,
    type aliases, and profile-specific behavior.
 4. Implement the pure migration planner: applied sets, target parsing, ancestor
@@ -98,8 +99,8 @@ is completed, split, deferred, or newly discovered.
 | Build | Lazy SQLite/PostgreSQL runtime facade and TLS flag validation | Complete |
 | Build | Core, SQLite, PostgreSQL, both-backend, and PostgreSQL-TLS compile matrix | Complete |
 | Diagnostics | Stable diagnostic transport, human/JSON rendering, and codegen exit/output contract | Complete |
-| Diagnostics | Parser original-source spans and labels | Complete |
-| Diagnostics | Deterministic query-file error accumulation and configured cap | Complete |
+| Diagnostics | Parser original-source spans and labels in code generation | Complete |
+| Diagnostics | Deterministic query-file error accumulation and configured cap, including values above the CLI default | Complete |
 | Diagnostics | Manifest/graph/catalog/query semantic labels and suggested fixes | Not started |
 | Acceptance | Live PostgreSQL CRUD, rows, owned values, transactions, arrays, enums/domains, pools, and version checks | Complete |
 | Acceptance | Hosted live PostgreSQL 15–18 conformance matrix | Complete |
@@ -127,7 +128,7 @@ an undocumented rule, per [README.md](README.md).
 
 | Promise | Document | State |
 | --- | --- | --- |
-| Diagnostics with stable codes, source spans, labels, and JSON rendering | [sql-checker.md](sql-checker.md) | transport/rendering, process contracts, parser spans, and bounded query-file accumulation exist; manifest/graph/catalog/query semantic failures still need rich labels and fixes |
+| Diagnostics with stable codes, source spans, labels, and JSON rendering | [sql-checker.md](sql-checker.md) | transport/rendering, process contracts, PostgreSQL parser spans in code generation, checked-source declaration classification, and bounded query-file accumulation exist; manifest/graph/catalog/query semantic failures still need rich labels and fixes |
 | Named `Row` and `OwnedRow` types per row-returning query | [sql-checker.md](sql-checker.md) | generated bindings carry an anonymous `.row` struct; the runtime supplies `Single(Row)`/`Owned(Row)` |
 | General codec interface: `Binder`/`Decoder`, `borrows_result`, ownership hooks | [query-api.md](query-api.md) | only enum codecs are derived; `sqlz.assertCodec` rejects any other declaration |
 | `sqlz.Uuid` built-in mapping | [query-api.md](query-api.md) | not implemented |

@@ -1,5 +1,5 @@
 const std = @import("std");
-const parser = @import("sqlz_parser");
+pub const parser = @import("sqlz_parser");
 const catalog = @import("sqlz_catalog");
 const migrations = @import("sqlz_migrations");
 const ir = @import("sqlz_ir");

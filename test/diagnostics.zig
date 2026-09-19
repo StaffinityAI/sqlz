@@ -53,4 +53,7 @@ test "error codes and exit classes are stable" {
     try std.testing.expectEqual(@as(u8, 1), diagnostics.exitCode(error.MissingParent));
     try std.testing.expectEqualStrings("S001", diagnostics.codeForError(error.InvalidArguments));
     try std.testing.expectEqual(@as(u8, 2), diagnostics.exitCode(error.InvalidArguments));
+    try std.testing.expectEqualStrings("Q001", diagnostics.codeForError(error.MissingDeclaredField));
+    try std.testing.expectEqual(@as(u8, 1), diagnostics.exitCode(error.MissingDeclaredField));
+    try std.testing.expectEqual(@as(u8, 1), diagnostics.exitCode(error.DeclaredTypeMismatch));
 }

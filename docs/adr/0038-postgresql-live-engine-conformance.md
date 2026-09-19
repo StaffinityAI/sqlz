@@ -20,9 +20,11 @@ generated test options; it never discovers credentials from repository files.
 
 Hosted CI runs the live suite against PostgreSQL 15, 16, 17, and 18 using isolated
 service containers. The ordinary Compose-backed local gate remains pinned to 18 for
-speed and reproducibility. Each live run creates uniquely named disposable objects,
-validates the server major before testing, and removes its objects on success or
-failure where possible.
+speed and reproducibility. Each live test creates a cryptographically random,
+identifier-safe schema, sets its connection-local `search_path` to that schema, and
+drops the schema with `CASCADE` during cleanup. The configured test target must be
+disposable because the suite creates and removes only objects in its generated
+schema.
 
 The required live suite covers:
 

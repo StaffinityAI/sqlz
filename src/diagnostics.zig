@@ -49,6 +49,32 @@ pub const List = struct {
         self.* = undefined;
     }
 
+    pub fn appendDiagnostic(self: *List, diagnostic: Diagnostic) std.mem.Allocator.Error!void {
+        if (self.items.items.len >= self.limit) {
+            self.truncated = true;
+            return;
+        }
+        const allocator = self.arena.allocator();
+        const primary = if (diagnostic.primary) |span| try duplicateSpan(allocator, span) else null;
+        const labels = try allocator.alloc(Label, diagnostic.labels.len);
+        for (diagnostic.labels, labels) |label, *copy| copy.* = .{
+            .span = try duplicateSpan(allocator, label.span),
+            .message = try allocator.dupe(u8, label.message),
+            .primary = label.primary,
+        };
+        const notes = try allocator.alloc([]const u8, diagnostic.notes.len);
+        for (diagnostic.notes, notes) |note, *copy| copy.* = try allocator.dupe(u8, note);
+        try self.items.append(self.arena.child_allocator, .{
+            .severity = diagnostic.severity,
+            .code = try allocator.dupe(u8, diagnostic.code),
+            .message = try allocator.dupe(u8, diagnostic.message),
+            .primary = primary,
+            .labels = labels,
+            .notes = notes,
+            .help = if (diagnostic.help) |help| try allocator.dupe(u8, help) else null,
+        });
+    }
+
     pub fn appendError(
         self: *List,
         err: anyerror,
@@ -77,7 +103,7 @@ pub const List = struct {
     }
 
     pub fn setLimit(self: *List, limit: usize) void {
-        self.limit = @min(self.limit, limit);
+        self.limit = limit;
         if (self.items.items.len > self.limit) {
             self.items.shrinkRetainingCapacity(self.limit);
             self.truncated = true;
@@ -88,6 +114,14 @@ pub const List = struct {
         return self.items.items;
     }
 };
+
+fn duplicateSpan(allocator: std.mem.Allocator, span: Span) std.mem.Allocator.Error!Span {
+    return .{
+        .path = try allocator.dupe(u8, span.path),
+        .start = span.start,
+        .end = span.end,
+    };
+}
 
 pub fn render(writer: *std.Io.Writer, diagnostic: Diagnostic, format: Format) !void {
     switch (format) {
@@ -200,7 +234,7 @@ pub fn codeForError(err: anyerror) []const u8 {
         error.InvalidRevisionId, error.InvalidParentId, error.MissingParent, error.Cycle, error.MultipleHeads, error.DivergentMerge => "M001",
         error.MissingUpgradeSql, error.MissingDowngradeSql, error.UnexpectedBackendSql => "M002",
         error.MissingRelation, error.MissingColumn, error.AmbiguousColumn, error.UnsupportedStatement, error.DuplicateTable, error.DuplicateColumn => "C001",
-        error.BackendNotSelected, error.UnexpectedResultColumns, error.MissingResultColumns, error.ConflictingResultType, error.ConflictingParameterType => "Q001",
+        error.BackendNotSelected, error.UnexpectedResultColumns, error.MissingResultColumns, error.ConflictingResultType, error.ConflictingParameterType, error.MissingDeclaredField, error.UnexpectedDeclaredField, error.DeclaredFieldOrder, error.DeclaredTypeMismatch, error.DeclaredNullabilityMismatch, error.UninferredDeclaredType, error.MissingDeclaredRow, error.UnexpectedDeclaredRow => "Q001",
         error.UnknownCodec, error.UnknownCodecTarget, error.IncompatibleCodec, error.MissingCodecForDeclaredType => "T001",
         error.InvalidNamespace, error.NamespaceCollision, error.UnsupportedType, error.IncompatibleBackendContract => "G001",
         error.ProjectCheckFailed => "G002",
