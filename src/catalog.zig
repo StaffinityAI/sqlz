@@ -38,12 +38,14 @@ pub const Index = struct {
     table_name: []const u8,
     columns: [][]const u8,
     unique: bool,
+    origin: ?Origin = null,
 
     pub fn deinit(self: *Index) void {
         self.allocator.free(self.name);
         self.allocator.free(self.table_name);
         for (self.columns) |column| self.allocator.free(column);
         self.allocator.free(self.columns);
+        if (self.origin) |*origin| origin.deinit(self.allocator);
         self.* = undefined;
     }
 };
@@ -77,12 +79,14 @@ pub const DatabaseType = struct {
     kind: TypeKind,
     base_type: ?[]const u8 = null,
     enum_values: [][]const u8 = &.{},
+    origin: ?Origin = null,
 
     pub fn deinit(self: *DatabaseType) void {
         self.allocator.free(self.name);
         if (self.base_type) |base| self.allocator.free(base);
         for (self.enum_values) |value| self.allocator.free(value);
         self.allocator.free(self.enum_values);
+        if (self.origin) |*origin| origin.deinit(self.allocator);
         self.* = undefined;
     }
 };
@@ -239,6 +243,7 @@ pub const Catalog = struct {
                 .table_name = table_name,
                 .columns = columns,
                 .unique = source.unique,
+                .origin = try cloneOrigin(allocator, source.origin),
             });
         }
         var types = self.types.iterator();
@@ -264,6 +269,7 @@ pub const Catalog = struct {
                 .kind = source.kind,
                 .base_type = base_type,
                 .enum_values = values,
+                .origin = try cloneOrigin(allocator, source.origin),
             });
         }
         return copy;
@@ -400,6 +406,7 @@ pub const Catalog = struct {
             .name = name,
             .kind = .enumeration,
             .enum_values = values,
+            .origin = try self.originAt(0),
         });
     }
 
@@ -449,6 +456,7 @@ pub const Catalog = struct {
             .name = name,
             .kind = .domain,
             .base_type = base_type,
+            .origin = try self.originAt(0),
         });
     }
 
@@ -487,6 +495,7 @@ pub const Catalog = struct {
             .table_name = table_name,
             .columns = owned_columns,
             .unique = node.unique != 0,
+            .origin = try self.originAt(node.relation.*.location),
         });
     }
 

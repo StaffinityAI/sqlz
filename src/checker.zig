@@ -73,20 +73,32 @@ pub fn appendCatalogDiagnostic(
                 .revision = manifest.revision,
             }) catch |candidate| {
                 if (candidate != err) continue;
-                const message = catalogMessage(err);
+                const subject = catalogFailureSubject(&scratch, err, source.sql);
+                const message = if (subject.name) |name|
+                    try catalogNamedMessage(allocator, err, name)
+                else
+                    try allocator.dupe(u8, catalogMessage(err));
+                defer allocator.free(message);
                 var labels: [1]diagnostics.Label = undefined;
-                const conflict_origin = catalogConflictOrigin(&scratch, err, source.sql);
+                const conflict_origin = subject.origin;
                 if (conflict_origin) |origin| {
-                    labels[0] = .{ .span = originSpan(origin, 1), .message = "previous declaration" };
+                    labels[0] = .{ .span = originSpan(origin, if (subject.name) |name| name.len else 1), .message = "previous declaration" };
                 }
+                const help = try catalogSuggestedHelp(allocator, &scratch, err, subject.name);
+                defer if (help.owned) |value| allocator.free(value);
                 try list.appendDiagnostic(.{
                     .severity = .err,
                     .code = catalogCode(err),
                     .message = message,
-                    .primary = diagnostics.spanAt(path, source.sql, 0, @min(source.sql.len, @as(usize, 1))),
+                    .primary = diagnostics.spanAt(
+                        path,
+                        source.sql,
+                        subject.offset,
+                        subject.offset + if (subject.name) |name| name.len else 1,
+                    ),
                     .labels = if (conflict_origin != null) labels[0..1] else labels[0..0],
                     .notes = &.{manifest.revision},
-                    .help = catalogHelp(err),
+                    .help = help.value,
                 });
                 return true;
             };
@@ -95,34 +107,150 @@ pub fn appendCatalogDiagnostic(
     return false;
 }
 
-fn catalogConflictOrigin(schema: *const catalog.Catalog, err: anyerror, sql: []const u8) ?catalog.Origin {
+const CatalogFailureSubject = struct {
+    name: ?[]const u8 = null,
+    offset: usize = 0,
+    origin: ?catalog.Origin = null,
+};
+
+fn catalogFailureSubject(schema: *const catalog.Catalog, err: anyerror, sql: []const u8) CatalogFailureSubject {
     if (err == error.DuplicateTable) {
         var tables = schema.tables.iterator();
         while (tables.next()) |entry| {
-            if (containsIdentifier(sql, entry.key_ptr.*)) return entry.value_ptr.origin;
+            if (identifierOffset(sql, entry.key_ptr.*)) |offset| return .{
+                .name = entry.key_ptr.*,
+                .offset = offset,
+                .origin = entry.value_ptr.origin,
+            };
         }
     } else if (err == error.DuplicateColumn) {
         var tables = schema.tables.iterator();
         while (tables.next()) |entry| {
             var columns = entry.value_ptr.columns.iterator();
             while (columns.next()) |column| {
-                if (containsIdentifier(sql, column.key_ptr.*)) return column.value_ptr.origin;
+                if (identifierOffset(sql, column.key_ptr.*)) |offset| return .{
+                    .name = column.key_ptr.*,
+                    .offset = offset,
+                    .origin = column.value_ptr.origin,
+                };
             }
         }
+    } else if (err == error.DuplicateIndex) {
+        var indexes = schema.indexes.iterator();
+        while (indexes.next()) |entry| {
+            if (identifierOffset(sql, entry.key_ptr.*)) |offset| return .{
+                .name = entry.key_ptr.*,
+                .offset = offset,
+                .origin = entry.value_ptr.origin,
+            };
+        }
+    } else if (err == error.DuplicateType) {
+        var types = schema.types.iterator();
+        while (types.next()) |entry| {
+            if (identifierOffset(sql, entry.key_ptr.*)) |offset| return .{
+                .name = entry.key_ptr.*,
+                .offset = offset,
+                .origin = entry.value_ptr.origin,
+            };
+        }
+    }
+    return missingCatalogSubject(schema, err, sql);
+}
+
+fn missingCatalogSubject(schema: *const catalog.Catalog, err: anyerror, sql: []const u8) CatalogFailureSubject {
+    if (err == error.MissingTable) {
+        if (identifierAfterKeyword(sql, "ON") orelse identifierAfterKeyword(sql, "TABLE") orelse identifierAfterKeyword(sql, "FROM")) |token|
+            return .{ .name = token.text, .offset = token.offset };
+    }
+    if (err == error.MissingIndex) {
+        if (identifierAfterKeyword(sql, "INDEX")) |token| return .{ .name = token.text, .offset = token.offset };
+    }
+    if (err == error.MissingType) {
+        if (identifierAfterKeyword(sql, "TYPE")) |token| return .{ .name = token.text, .offset = token.offset };
+    }
+    if (err == error.MissingColumn) {
+        var best: ?CatalogFailureSubject = null;
+        var best_distance: usize = std.math.maxInt(usize);
+        var column_tokens = identifierTokens(sql);
+        while (column_tokens.next()) |token| {
+            if (isSqlKeyword(token.text) or schema.table(token.text) != null) continue;
+            const candidate = nearestCatalogColumn(schema, token.text) orelse continue;
+            const distance = editDistance(token.text, candidate);
+            if (distance < best_distance) {
+                best = .{ .name = token.text, .offset = token.offset };
+                best_distance = distance;
+            }
+        }
+        if (best) |subject| return subject;
+    }
+    var tokens = identifierTokens(sql);
+    while (tokens.next()) |token| {
+        const exists = switch (err) {
+            error.MissingTable => schema.table(token.text) != null,
+            error.MissingColumn => hasCatalogColumn(schema, token.text),
+            error.MissingIndex => schema.indexes.contains(token.text),
+            error.MissingType => schema.databaseType(token.text) != null,
+            else => true,
+        };
+        if (!exists and !isSqlKeyword(token.text)) return .{ .name = token.text, .offset = token.offset };
+    }
+    return .{};
+}
+
+fn identifierAfterKeyword(sql: []const u8, keyword: []const u8) ?IdentifierToken {
+    var tokens = identifierTokens(sql);
+    var matched = false;
+    while (tokens.next()) |token| {
+        if (matched) return token;
+        matched = std.ascii.eqlIgnoreCase(token.text, keyword);
     }
     return null;
 }
 
-fn containsIdentifier(sql: []const u8, name: []const u8) bool {
+fn identifierOffset(sql: []const u8, name: []const u8) ?usize {
     var start: usize = 0;
     while (std.mem.indexOfPos(u8, sql, start, name)) |index| {
         const before_ok = index == 0 or (!std.ascii.isAlphanumeric(sql[index - 1]) and sql[index - 1] != '_');
         const end = index + name.len;
         const after_ok = end == sql.len or (!std.ascii.isAlphanumeric(sql[end]) and sql[end] != '_');
-        if (before_ok and after_ok) return true;
+        if (before_ok and after_ok) return index;
         start = end;
     }
+    return null;
+}
+
+const IdentifierToken = struct { text: []const u8, offset: usize };
+
+fn identifierTokens(sql: []const u8) struct {
+    source: []const u8,
+    offset: usize = 0,
+
+    fn next(self: *@This()) ?IdentifierToken {
+        while (self.offset < self.source.len and !std.ascii.isAlphabetic(self.source[self.offset]) and self.source[self.offset] != '_') self.offset += 1;
+        if (self.offset == self.source.len) return null;
+        const start = self.offset;
+        self.offset += 1;
+        while (self.offset < self.source.len and (std.ascii.isAlphanumeric(self.source[self.offset]) or self.source[self.offset] == '_')) self.offset += 1;
+        return .{ .text = self.source[start..self.offset], .offset = start };
+    }
+} {
+    return .{ .source = sql };
+}
+
+fn hasCatalogColumn(schema: *const catalog.Catalog, name: []const u8) bool {
+    var tables = schema.tables.iterator();
+    while (tables.next()) |entry| if (entry.value_ptr.columns.contains(name)) return true;
     return false;
+}
+
+fn isSqlKeyword(value: []const u8) bool {
+    const keywords = [_][]const u8{
+        "create", "table",  "index", "unique", "on",   "alter",  "add", "drop",    "column",
+        "type",   "domain", "as",    "enum",   "view", "rename", "to",  "primary", "key",
+        "not",    "null",
+    };
+    for (keywords) |keyword| if (std.ascii.eqlIgnoreCase(value, keyword)) return true;
+    return analysis.scalarType(value) != .unknown;
 }
 
 fn catalogCode(err: anyerror) []const u8 {
@@ -153,6 +281,78 @@ fn catalogMessage(err: anyerror) []const u8 {
         error.UnsupportedArrayDimensions => "only one-dimensional PostgreSQL arrays are supported",
         else => "migration contains unsupported catalog SQL",
     };
+}
+
+fn catalogNamedMessage(allocator: std.mem.Allocator, err: anyerror, name: []const u8) ![]const u8 {
+    return switch (err) {
+        error.DuplicateTable => std.fmt.allocPrint(allocator, "table `{s}` already exists", .{name}),
+        error.DuplicateColumn => std.fmt.allocPrint(allocator, "column `{s}` already exists", .{name}),
+        error.MissingTable => std.fmt.allocPrint(allocator, "table `{s}` does not exist", .{name}),
+        error.MissingColumn => std.fmt.allocPrint(allocator, "column `{s}` does not exist", .{name}),
+        error.DuplicateIndex => std.fmt.allocPrint(allocator, "index `{s}` already exists", .{name}),
+        error.MissingIndex => std.fmt.allocPrint(allocator, "index `{s}` does not exist", .{name}),
+        error.DuplicateType => std.fmt.allocPrint(allocator, "type `{s}` already exists", .{name}),
+        error.MissingType => std.fmt.allocPrint(allocator, "type `{s}` does not exist", .{name}),
+        else => std.fmt.allocPrint(allocator, "catalog object `{s}` is invalid", .{name}),
+    };
+}
+
+const CatalogHelp = struct { value: ?[]const u8, owned: ?[]const u8 = null };
+
+fn catalogSuggestedHelp(
+    allocator: std.mem.Allocator,
+    schema: *const catalog.Catalog,
+    err: anyerror,
+    name: ?[]const u8,
+) !CatalogHelp {
+    if (name) |missing| {
+        const suggestion = switch (err) {
+            error.MissingTable => nearestCatalogTable(schema, missing),
+            error.MissingColumn => nearestCatalogColumn(schema, missing),
+            error.MissingIndex => nearestMapName(catalog.Index, &schema.indexes, missing),
+            error.MissingType => nearestMapName(catalog.DatabaseType, &schema.types, missing),
+            else => null,
+        };
+        if (suggestion) |candidate| {
+            const owned = try std.fmt.allocPrint(allocator, "did you mean `{s}`?", .{candidate});
+            return .{ .value = owned, .owned = owned };
+        }
+    }
+    return .{ .value = catalogHelp(err) };
+}
+
+fn nearestCatalogTable(schema: *const catalog.Catalog, name: []const u8) ?[]const u8 {
+    return nearestMapName(catalog.Table, &schema.tables, name);
+}
+
+fn nearestCatalogColumn(schema: *const catalog.Catalog, name: []const u8) ?[]const u8 {
+    var best: ?[]const u8 = null;
+    var best_distance: usize = std.math.maxInt(usize);
+    var tables = schema.tables.iterator();
+    while (tables.next()) |table| {
+        var columns = table.value_ptr.columns.iterator();
+        while (columns.next()) |column| updateNearest(name, column.key_ptr.*, &best, &best_distance);
+    }
+    return best;
+}
+
+fn nearestMapName(comptime Value: type, map: *const std.StringArrayHashMapUnmanaged(Value), name: []const u8) ?[]const u8 {
+    var best: ?[]const u8 = null;
+    var best_distance: usize = std.math.maxInt(usize);
+    var iterator = map.iterator();
+    while (iterator.next()) |entry| updateNearest(name, entry.key_ptr.*, &best, &best_distance);
+    return best;
+}
+
+fn updateNearest(name: []const u8, candidate: []const u8, best: *?[]const u8, best_distance: *usize) void {
+    const distance = editDistance(name, candidate);
+    if (!plausibleSuggestion(name.len, distance)) return;
+    if (distance < best_distance.* or (distance == best_distance.* and
+        (best.* == null or std.mem.lessThan(u8, candidate, best.*.?))))
+    {
+        best.* = candidate;
+        best_distance.* = distance;
+    }
 }
 
 fn catalogHelp(err: anyerror) ?[]const u8 {

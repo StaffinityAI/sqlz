@@ -125,9 +125,35 @@ test "catalog replay errors become source diagnostics with fixes" {
         "aaaaaaaaaaaa_bad_index/common.up.sql",
         list.slice()[0].primary.?.path,
     );
+    try std.testing.expectEqual(@as(usize, 30), list.slice()[0].primary.?.start.offset);
+    try std.testing.expectEqualStrings("table `users` does not exist", list.slice()[0].message);
     try std.testing.expectEqualStrings(
         "create the referenced object earlier or correct its name",
         list.slice()[0].help.?,
+    );
+}
+
+test "duplicate catalog objects label their first declaration" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try writeDuplicateCatalogDiagnosticProject(&tmp);
+    var list: diagnostics.List = .init(std.testing.allocator, 100);
+    defer list.deinit();
+    try std.testing.expectError(error.ProjectCheckFailed, codegen.generateProjectWithCodecsAndDiagnostics(
+        std.testing.allocator,
+        std.testing.io,
+        tmp.dir,
+        "sqlz.ziggy",
+        &.{},
+        &list,
+    ));
+    try std.testing.expectEqual(@as(usize, 1), list.slice().len);
+    try std.testing.expectEqualStrings("C010", list.slice()[0].code);
+    try std.testing.expectEqualStrings("table `users` already exists", list.slice()[0].message);
+    try std.testing.expectEqual(@as(usize, 1), list.slice()[0].labels.len);
+    try std.testing.expectEqualStrings(
+        "aaaaaaaaaaaa_users/common.up.sql",
+        list.slice()[0].labels[0].span.path,
     );
 }
 
@@ -804,4 +830,42 @@ fn writeConflictDiagnosticProject(tmp: *std.testing.TmpDir) !void {
         \\SELECT id AS value FROM values_a UNION ALL SELECT label FROM values_a
         ,
     });
+}
+
+fn writeDuplicateCatalogDiagnosticProject(tmp: *std.testing.TmpDir) !void {
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "sqlz.ziggy",
+        .data =
+        \\.format_version = 1,
+        \\.project_id = "550e8400-e29b-41d4-a716-446655440000",
+        \\.migrations = "migrations",
+        \\.sql_roots = .{ .app = "queries" },
+        \\.zig_roots = [],
+        \\.backends = .{ .sqlite = .{ .profile = "3.53" } },
+        ,
+    });
+    var queries = try tmp.dir.createDirPathOpen(std.testing.io, "queries", .{});
+    queries.close(std.testing.io);
+    const revisions = [_]struct { directory: []const u8, revision: []const u8, parents: []const u8 }{
+        .{ .directory = "migrations/aaaaaaaaaaaa_users", .revision = "aaaaaaaaaaaa", .parents = "[]" },
+        .{ .directory = "migrations/bbbbbbbbbbbb_duplicate", .revision = "bbbbbbbbbbbb", .parents = "[\"aaaaaaaaaaaa\"]" },
+    };
+    for (revisions) |revision| {
+        var migration = try tmp.dir.createDirPathOpen(std.testing.io, revision.directory, .{});
+        defer migration.close(std.testing.io);
+        const manifest = try std.fmt.allocPrint(std.testing.allocator,
+            \\.format_version = 1,
+            \\.revision = "{s}",
+            \\.parents = {s},
+            \\.description = "users",
+            \\.created_utc = "2026-09-18T12:00:00Z",
+            \\.backends = [.sqlite],
+            \\.reversible = true,
+            \\.transaction = .{{ .sqlite = .always }},
+        , .{ revision.revision, revision.parents });
+        defer std.testing.allocator.free(manifest);
+        try migration.writeFile(std.testing.io, .{ .sub_path = "revision.ziggy", .data = manifest });
+        try migration.writeFile(std.testing.io, .{ .sub_path = "common.up.sql", .data = "CREATE TABLE users (id BIGINT)" });
+        try migration.writeFile(std.testing.io, .{ .sub_path = "common.down.sql", .data = "DROP TABLE users" });
+    }
 }
