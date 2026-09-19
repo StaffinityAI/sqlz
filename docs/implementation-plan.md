@@ -1,8 +1,9 @@
 # Implementation plan
 
 This is the live implementation checklist for the first checked-query release.
-SQLite and the initial PostgreSQL runtime are implemented. Migration execution,
-the full CLI, and release hardening remain.
+SQLite and PostgreSQL checked-query runtimes are implemented. Remaining
+PostgreSQL conformance edges, migration execution, the full migration CLI, and
+release hardening remain.
 
 The project-backed SQLite-to-PostgreSQL import is tracked separately in
 [sqlite-postgres-bootstrap-plan.md](sqlite-postgres-bootstrap-plan.md). Keep its
@@ -126,7 +127,7 @@ an undocumented rule, per [README.md](README.md).
 
 | Promise | Document | State |
 | --- | --- | --- |
-| Diagnostics with stable codes, source spans, labels, and JSON rendering | [sql-checker.md](sql-checker.md) | transport/rendering and process contracts exist; most checker components still return Zig errors without real spans or accumulation |
+| Diagnostics with stable codes, source spans, labels, and JSON rendering | [sql-checker.md](sql-checker.md) | transport/rendering, process contracts, parser spans, and bounded query-file accumulation exist; manifest/graph/catalog/query semantic failures still need rich labels and fixes |
 | Named `Row` and `OwnedRow` types per row-returning query | [sql-checker.md](sql-checker.md) | generated bindings carry an anonymous `.row` struct; the runtime supplies `Single(Row)`/`Owned(Row)` |
 | General codec interface: `Binder`/`Decoder`, `borrows_result`, ownership hooks | [query-api.md](query-api.md) | only enum codecs are derived; `sqlz.assertCodec` rejects any other declaration |
 | `sqlz.Uuid` built-in mapping | [query-api.md](query-api.md) | not implemented |
