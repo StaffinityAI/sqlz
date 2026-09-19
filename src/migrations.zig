@@ -1,5 +1,6 @@
 const std = @import("std");
 const ziggy = @import("ziggy");
+const diagnostics = @import("sqlz_diagnostics");
 
 pub const Backend = enum { sqlite, postgres };
 pub const Direction = enum { up, down };
@@ -40,6 +41,7 @@ pub const ManifestError = ziggy.Deserializer.Error || ManifestValidationError;
 
 pub const LoadedManifest = struct {
     value: Manifest,
+    source: []const u8,
     arena: std.heap.ArenaAllocator,
 
     pub fn manifest(self: *const LoadedManifest) *const Manifest {
@@ -55,6 +57,7 @@ pub const LoadedManifest = struct {
 pub const DiscoveredRevision = struct {
     allocator: std.mem.Allocator,
     directory: []const u8,
+    manifest_path: []const u8,
     manifest: LoadedManifest,
     common_up: []const u8,
     common_down: []const u8,
@@ -90,6 +93,7 @@ pub const DiscoveredRevision = struct {
     pub fn deinit(self: *DiscoveredRevision) void {
         self.manifest.deinit();
         self.allocator.free(self.directory);
+        self.allocator.free(self.manifest_path);
         self.allocator.free(self.common_up);
         self.allocator.free(self.common_down);
         self.allocator.free(self.sqlite_up);
@@ -129,7 +133,11 @@ pub fn parseManifest(
         .copy_strings = .always,
     });
     try validateManifest(&value);
-    return .{ .value = value, .arena = arena };
+    return .{
+        .value = value,
+        .source = try arena.allocator().dupe(u8, source),
+        .arena = arena,
+    };
 }
 
 pub fn validateManifest(manifest: *const Manifest) ManifestValidationError!void {
@@ -179,6 +187,27 @@ pub fn discover(
     root: std.Io.Dir,
     max_source_bytes: usize,
 ) anyerror!Discovery {
+    return discoverImpl(allocator, io, root, max_source_bytes, null);
+}
+
+pub fn discoverWithDiagnostics(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    root: std.Io.Dir,
+    max_source_bytes: usize,
+    diagnostic_list: *diagnostics.List,
+) anyerror!Discovery {
+    return discoverImpl(allocator, io, root, max_source_bytes, diagnostic_list);
+}
+
+fn discoverImpl(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    root: std.Io.Dir,
+    max_source_bytes: usize,
+    diagnostic_list: ?*diagnostics.List,
+) anyerror!Discovery {
+    const diagnostics_before = if (diagnostic_list) |list| list.slice().len else 0;
     var directory_names: std.ArrayList([]const u8) = .empty;
     defer {
         for (directory_names.items) |name| allocator.free(name);
@@ -213,11 +242,32 @@ pub fn discover(
         const manifest_source = try allocator.dupeZ(u8, raw_manifest);
         defer allocator.free(manifest_source);
         var meta: ziggy.Deserializer.Meta = .init;
-        var loaded = try parseManifest(allocator, manifest_source, &meta);
+        var loaded = parseManifest(allocator, manifest_source, &meta) catch |err| {
+            if (diagnostic_list) |list| {
+                try appendManifestDiagnostic(list, directory_name, manifest_source, &meta, err);
+                continue;
+            }
+            return err;
+        };
         errdefer loaded.deinit();
         if (directory_name.len < 13 or directory_name[12] != '_' or
             !std.mem.eql(u8, directory_name[0..12], loaded.manifest().revision))
+        {
+            if (diagnostic_list) |list| {
+                try appendFieldDiagnostic(
+                    list,
+                    directory_name,
+                    manifest_source,
+                    "revision",
+                    "M010",
+                    "revision ID does not match its directory prefix",
+                    "rename the directory or correct `.revision` so their 12-character IDs match",
+                );
+                loaded.deinit();
+                continue;
+            }
             return error.DirectoryRevisionMismatch;
+        }
 
         const common_up = try readOptionalSql(
             allocator,
@@ -269,7 +319,7 @@ pub fn discover(
         errdefer allocator.free(postgres_down);
 
         const manifest = loaded.manifest();
-        try validateSqlFiles(
+        validateSqlFiles(
             manifest,
             common_up,
             common_down,
@@ -277,11 +327,25 @@ pub fn discover(
             sqlite_down,
             postgres_up,
             postgres_down,
-        );
+        ) catch |err| {
+            if (diagnostic_list) |list| {
+                try appendSqlFilesDiagnostic(list, directory_name, manifest_source, err);
+                loaded.deinit();
+                allocator.free(common_up);
+                allocator.free(common_down);
+                allocator.free(sqlite_up);
+                allocator.free(sqlite_down);
+                allocator.free(postgres_up);
+                allocator.free(postgres_down);
+                continue;
+            }
+            return err;
+        };
 
         try revisions.append(allocator, .{
             .allocator = allocator,
             .directory = try allocator.dupe(u8, directory_name),
+            .manifest_path = try std.fmt.allocPrint(allocator, "{s}/revision.ziggy", .{directory_name}),
             .manifest = loaded,
             .common_up = common_up,
             .common_down = common_down,
@@ -300,11 +364,356 @@ pub fn discover(
             .parents = revision.manifest.manifest().parents,
         };
     }
-    var order = try validateAndOrder(allocator, graph);
-    order.deinit();
+    if (diagnostic_list) |list| {
+        if (revisions.items.len != 0 or list.slice().len == diagnostics_before)
+            try appendGraphDiagnostics(allocator, revisions.items, graph, list);
+    } else {
+        var order = try validateAndOrder(allocator, graph);
+        order.deinit();
+    }
     return .{
         .allocator = allocator,
         .revisions = try revisions.toOwnedSlice(allocator),
+    };
+}
+
+fn appendManifestDiagnostic(
+    list: *diagnostics.List,
+    directory: []const u8,
+    source: [:0]const u8,
+    meta: *const ziggy.Deserializer.Meta,
+    err: anyerror,
+) !void {
+    const path = try manifestPath(list.arena.allocator(), directory);
+    const field = manifestErrorField(err);
+    const span = if (field) |name|
+        fieldSpan(path, source, name)
+    else if (isZiggyError(err)) blk: {
+        const loc = meta.error_loc;
+        const selection = loc.getSelection(source);
+        break :blk diagnostics.Span{
+            .path = path,
+            .start = .{
+                .offset = loc.start,
+                .line = selection.start.line,
+                .column = selection.start.col,
+            },
+            .end = .{
+                .offset = loc.end,
+                .line = selection.end.line,
+                .column = selection.end.col,
+            },
+        };
+    } else fieldSpan(path, source, "format_version");
+    try list.appendDiagnostic(.{
+        .severity = .err,
+        .code = manifestErrorCode(err),
+        .message = manifestErrorMessage(err),
+        .primary = span,
+        .notes = &.{@errorName(err)},
+        .help = manifestErrorHelp(err),
+    });
+}
+
+fn appendFieldDiagnostic(
+    list: *diagnostics.List,
+    directory: []const u8,
+    source: []const u8,
+    field: []const u8,
+    code: []const u8,
+    message: []const u8,
+    help: ?[]const u8,
+) !void {
+    const path = try manifestPath(list.arena.allocator(), directory);
+    try list.appendDiagnostic(.{
+        .severity = .err,
+        .code = code,
+        .message = message,
+        .primary = fieldSpan(path, source, field),
+        .help = help,
+    });
+}
+
+fn appendSqlFilesDiagnostic(
+    list: *diagnostics.List,
+    directory: []const u8,
+    source: []const u8,
+    err: DiscoveryError,
+) !void {
+    const field = switch (err) {
+        error.MissingUpgradeSql, error.UnexpectedBackendSql => "backends",
+        error.MissingDowngradeSql => "reversible",
+        error.DirectoryRevisionMismatch => "revision",
+    };
+    const code: []const u8 = switch (err) {
+        error.MissingUpgradeSql => "M020",
+        error.MissingDowngradeSql => "M021",
+        error.UnexpectedBackendSql => "M022",
+        error.DirectoryRevisionMismatch => "M010",
+    };
+    const message: []const u8 = switch (err) {
+        error.MissingUpgradeSql => "revision has no effective upgrade SQL",
+        error.MissingDowngradeSql => "reversible revision has no effective downgrade SQL",
+        error.UnexpectedBackendSql => "revision contains SQL for a backend it does not target",
+        error.DirectoryRevisionMismatch => "revision ID does not match its directory prefix",
+    };
+    const help: ?[]const u8 = switch (err) {
+        error.MissingUpgradeSql => "add common or backend-specific `.up.sql`, or make this a SQL-free merge revision",
+        error.MissingDowngradeSql => "add common or backend-specific `.down.sql`, or mark the revision irreversible",
+        error.UnexpectedBackendSql => "remove the backend SQL file or add that backend to `.backends` with a transaction policy",
+        error.DirectoryRevisionMismatch => "rename the directory or correct `.revision`",
+    };
+    try appendFieldDiagnostic(list, directory, source, field, code, message, help);
+}
+
+fn appendGraphDiagnostics(
+    allocator: std.mem.Allocator,
+    discovered: []const DiscoveredRevision,
+    graph: []const Revision,
+    list: *diagnostics.List,
+) !void {
+    if (graph.len == 0) {
+        try list.appendDiagnostic(.{
+            .severity = .err,
+            .code = "M030",
+            .message = "migration graph has no revisions",
+            .help = "create an initial revision",
+        });
+        return;
+    }
+
+    var by_id: std.StringHashMapUnmanaged(usize) = .empty;
+    defer by_id.deinit(allocator);
+    var duplicate = try allocator.alloc(bool, graph.len);
+    defer allocator.free(duplicate);
+    @memset(duplicate, false);
+    for (graph, 0..) |revision, index| {
+        const entry = try by_id.getOrPut(allocator, revision.id);
+        if (!entry.found_existing) {
+            entry.value_ptr.* = index;
+            continue;
+        }
+        duplicate[index] = true;
+        duplicate[entry.value_ptr.*] = true;
+        const labels = [_]diagnostics.Label{
+            .{
+                .span = revisionFieldSpan(&discovered[entry.value_ptr.*], "revision"),
+                .message = "first definition",
+            },
+            .{
+                .span = revisionFieldSpan(&discovered[index], "revision"),
+                .message = "duplicate definition",
+                .primary = true,
+            },
+        };
+        try list.appendDiagnostic(.{
+            .severity = .err,
+            .code = "M031",
+            .message = "migration revision ID is defined more than once",
+            .primary = labels[1].span,
+            .labels = &labels,
+            .help = "assign a new unique 12-character revision ID",
+        });
+    }
+
+    var has_missing_parent = false;
+    for (graph, 0..) |revision, index| {
+        for (revision.parents) |parent| {
+            if (by_id.contains(parent)) continue;
+            has_missing_parent = true;
+            const note = try std.fmt.allocPrint(
+                list.arena.allocator(),
+                "unknown parent `{s}`",
+                .{parent},
+            );
+            try list.appendDiagnostic(.{
+                .severity = .err,
+                .code = "M032",
+                .message = "migration references a missing parent",
+                .primary = revisionFieldSpan(&discovered[index], "parents"),
+                .notes = &.{note},
+                .help = "add the parent revision or correct `.parents`",
+            });
+        }
+    }
+    if (has_missing_parent or std.mem.indexOfScalar(bool, duplicate, true) != null) return;
+
+    const indegree = try allocator.alloc(usize, graph.len);
+    defer allocator.free(indegree);
+    const is_head = try allocator.alloc(bool, graph.len);
+    defer allocator.free(is_head);
+    @memset(is_head, true);
+    for (graph, 0..) |revision, index| {
+        indegree[index] = revision.parents.len;
+        for (revision.parents) |parent| is_head[by_id.get(parent).?] = false;
+    }
+    const processed = try allocator.alloc(bool, graph.len);
+    defer allocator.free(processed);
+    @memset(processed, false);
+    for (0..graph.len) |_| {
+        var selected: ?usize = null;
+        for (graph, 0..) |revision, index| {
+            if (processed[index] or indegree[index] != 0) continue;
+            if (selected == null or std.mem.lessThan(u8, revision.id, graph[selected.?].id))
+                selected = index;
+        }
+        const current = selected orelse break;
+        processed[current] = true;
+        for (graph, 0..) |revision, child_index| {
+            if (processed[child_index]) continue;
+            for (revision.parents) |parent| if (std.mem.eql(u8, parent, graph[current].id)) {
+                indegree[child_index] -= 1;
+                break;
+            };
+        }
+    }
+    if (std.mem.indexOfScalar(bool, processed, false) != null) {
+        var labels: std.ArrayList(diagnostics.Label) = .empty;
+        defer labels.deinit(allocator);
+        for (processed, 0..) |done, index| if (!done) try labels.append(allocator, .{
+            .span = revisionFieldSpan(&discovered[index], "parents"),
+            .message = "participates in or depends on this cycle",
+            .primary = labels.items.len == 0,
+        });
+        try list.appendDiagnostic(.{
+            .severity = .err,
+            .code = "M033",
+            .message = "migration graph contains a cycle",
+            .primary = labels.items[0].span,
+            .labels = labels.items,
+            .help = "remove a parent edge so the graph is acyclic",
+        });
+        return;
+    }
+
+    var head_count: usize = 0;
+    for (is_head) |head| head_count += @intFromBool(head);
+    if (head_count != 1) {
+        const labels = try allocator.alloc(diagnostics.Label, head_count);
+        defer allocator.free(labels);
+        var label_index: usize = 0;
+        for (is_head, 0..) |head, index| if (head) {
+            labels[label_index] = .{
+                .span = revisionFieldSpan(&discovered[index], "revision"),
+                .message = "graph head",
+                .primary = label_index == 0,
+            };
+            label_index += 1;
+        };
+        try list.appendDiagnostic(.{
+            .severity = .err,
+            .code = "M034",
+            .message = "migration graph has multiple heads",
+            .primary = labels[0].span,
+            .labels = labels,
+            .help = "add a merge revision whose parents are all current heads",
+        });
+    }
+}
+
+fn revisionFieldSpan(revision: *const DiscoveredRevision, field: []const u8) diagnostics.Span {
+    return fieldSpan(revision.manifest_path, revision.manifest.source, field);
+}
+
+fn manifestPath(allocator: std.mem.Allocator, directory: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(allocator, "{s}/revision.ziggy", .{directory});
+}
+
+fn fieldSpan(path: []const u8, source: []const u8, field: []const u8) diagnostics.Span {
+    var pattern_buffer: [64]u8 = undefined;
+    const pattern = std.fmt.bufPrint(&pattern_buffer, ".{s}", .{field}) catch field;
+    const start = std.mem.indexOf(u8, source, pattern) orelse 0;
+    const equals = std.mem.indexOfScalarPos(u8, source, start, '=') orelse start;
+    var value_start = @min(equals + 1, source.len);
+    while (value_start < source.len and std.ascii.isWhitespace(source[value_start])) : (value_start += 1) {}
+    var end = value_start;
+    while (end < source.len and source[end] != '\n' and source[end] != ',') : (end += 1) {}
+    if (end == value_start) end = @min(value_start + 1, source.len);
+    return .{
+        .path = path,
+        .start = positionAt(source, value_start),
+        .end = positionAt(source, end),
+    };
+}
+
+fn positionAt(source: []const u8, offset: usize) diagnostics.Position {
+    var line: usize = 1;
+    var column: usize = 1;
+    for (source[0..@min(offset, source.len)]) |byte| {
+        if (byte == '\n') {
+            line += 1;
+            column = 1;
+        } else column += 1;
+    }
+    return .{ .offset = offset, .line = line, .column = column };
+}
+
+fn manifestErrorField(err: anyerror) ?[]const u8 {
+    return switch (err) {
+        error.UnsupportedFormatVersion => "format_version",
+        error.InvalidRevisionId => "revision",
+        error.InvalidParentId, error.SelfParent, error.DuplicateParent => "parents",
+        error.EmptyDescription => "description",
+        error.InvalidCreatedUtc => "created_utc",
+        error.MissingBackend, error.DuplicateBackend => "backends",
+        error.MissingTransactionPolicy, error.UnexpectedTransactionPolicy, error.UnsupportedSqliteTransaction => "transaction",
+        else => null,
+    };
+}
+
+fn manifestErrorCode(err: anyerror) []const u8 {
+    return switch (err) {
+        error.UnsupportedFormatVersion => "M001",
+        error.InvalidRevisionId => "M002",
+        error.InvalidParentId => "M003",
+        error.SelfParent => "M004",
+        error.DuplicateParent => "M005",
+        error.EmptyDescription => "M006",
+        error.InvalidCreatedUtc => "M007",
+        error.MissingBackend, error.DuplicateBackend => "M008",
+        error.MissingTransactionPolicy, error.UnexpectedTransactionPolicy, error.UnsupportedSqliteTransaction => "M009",
+        else => "M000",
+    };
+}
+
+fn manifestErrorMessage(err: anyerror) []const u8 {
+    return switch (err) {
+        error.UnsupportedFormatVersion => "unsupported migration manifest format",
+        error.InvalidRevisionId => "revision ID must be 12 lowercase hexadecimal characters",
+        error.InvalidParentId => "parent revision ID is invalid",
+        error.SelfParent => "revision cannot name itself as a parent",
+        error.DuplicateParent => "revision names the same parent more than once",
+        error.EmptyDescription => "revision description cannot be empty",
+        error.InvalidCreatedUtc => "revision timestamp must use canonical UTC form",
+        error.MissingBackend => "revision must target at least one backend",
+        error.DuplicateBackend => "revision backend is listed more than once",
+        error.MissingTransactionPolicy => "targeted backend is missing a transaction policy",
+        error.UnexpectedTransactionPolicy => "untargeted backend has a transaction policy",
+        error.UnsupportedSqliteTransaction => "SQLite revisions must use transaction policy `always`",
+        error.UnknownField => "migration manifest contains an unknown field",
+        error.DuplicateField => "migration manifest contains a duplicate field",
+        error.MissingField => "migration manifest is missing a required field",
+        error.Unexpected => "migration manifest contains an unexpected token",
+        error.Overflow => "migration manifest integer is out of range",
+        else => "migration manifest is invalid",
+    };
+}
+
+fn manifestErrorHelp(err: anyerror) ?[]const u8 {
+    return switch (err) {
+        error.UnsupportedFormatVersion => "use a supported manifest format version",
+        error.InvalidRevisionId, error.InvalidParentId => "generate a new 12-character lowercase hexadecimal revision ID",
+        error.SelfParent, error.DuplicateParent => "correct the `.parents` list",
+        error.MissingBackend, error.DuplicateBackend => "list each targeted backend exactly once",
+        error.MissingTransactionPolicy, error.UnexpectedTransactionPolicy, error.UnsupportedSqliteTransaction => "make `.transaction` match `.backends`",
+        else => null,
+    };
+}
+
+fn isZiggyError(err: anyerror) bool {
+    return switch (err) {
+        error.Unexpected, error.Overflow, error.DuplicateField, error.UnknownField, error.MissingField => true,
+        else => false,
     };
 }
 

@@ -1,0 +1,8 @@
+.format_version = 1,
+.revision = "bbbbbbbbbbbb",
+.parents = ["cccccccccccc"],
+.description = "missing parent",
+.created_utc = "2026-09-18T12:00:00Z",
+.backends = [.sqlite],
+.reversible = true,
+.transaction = .{ .sqlite = .always },

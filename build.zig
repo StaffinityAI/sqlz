@@ -122,7 +122,10 @@ pub fn build(b: *std.Build) !void {
         .root_source_file = b.path("src/migrations.zig"),
         .target = host_target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "ziggy", .module = ziggy_dep.module("ziggy") }},
+        .imports = &.{
+            .{ .name = "ziggy", .module = ziggy_dep.module("ziggy") },
+            .{ .name = "sqlz_diagnostics", .module = diagnostics_mod },
+        },
     });
     const ir_mod = b.addModule("sqlz_ir", .{
         .root_source_file = b.path("src/ir.zig"),
@@ -333,6 +336,19 @@ pub fn build(b: *std.Build) !void {
     test_step.dependOn(&diagnostics_accumulated.step);
     offline_step.dependOn(&diagnostics_accumulated.step);
 
+    const diagnostics_migrations = b.addRunArtifact(codegen_exe);
+    diagnostics_migrations.addFileArg(b.path("test/fixtures/diagnostics/migrations/sqlz.ziggy"));
+    _ = diagnostics_migrations.addOutputFileArg("migration_diagnostics_queries.zig");
+    diagnostics_migrations.addArgs(&.{ "--format", "json" });
+    diagnostics_migrations.expectExitCode(1);
+    diagnostics_migrations.expectStdOutMatch("\"code\":\"M002\"");
+    diagnostics_migrations.expectStdOutMatch("aaaaaaaaaaaa_invalid/revision.ziggy");
+    diagnostics_migrations.expectStdOutMatch("\"code\":\"M032\"");
+    diagnostics_migrations.expectStdOutMatch("bbbbbbbbbbbb_missing_parent/revision.ziggy");
+    diagnostics_migrations.expectStdErrEqual("");
+    test_step.dependOn(&diagnostics_migrations.step);
+    offline_step.dependOn(&diagnostics_migrations.step);
+
     const diagnostics_human = b.addRunArtifact(codegen_exe);
     diagnostics_human.expectExitCode(2);
     diagnostics_human.expectStdOutEqual("");
@@ -455,6 +471,7 @@ pub fn build(b: *std.Build) !void {
             .imports = &.{
                 .{ .name = "sqlz_migrations", .module = migrations_mod },
                 .{ .name = "ziggy", .module = ziggy_dep.module("ziggy") },
+                .{ .name = "sqlz_diagnostics", .module = diagnostics_mod },
             },
         }),
     });

@@ -144,8 +144,12 @@ pub fn generateProjectWithCodecsAndDiagnostics(
 
     var migration_dir = try project_dir.openDir(io, project.migrations, .{ .iterate = true });
     defer migration_dir.close(io);
-    var migration_discovery = try migrations.discover(allocator, io, migration_dir, source_limit);
+    var migration_discovery = if (diagnostic_list) |list|
+        try migrations.discoverWithDiagnostics(allocator, io, migration_dir, source_limit, list)
+    else
+        try migrations.discover(allocator, io, migration_dir, source_limit);
     defer migration_discovery.deinit();
+    if (diagnostic_list) |list| if (list.slice().len != 0) return error.ProjectCheckFailed;
     var sqlite_schema: ?catalog.Catalog = if (project.backends.sqlite != null)
         try checker.replayDiscoveredSqliteWithDialect(allocator, &migration_discovery, sqlite_dialect)
     else

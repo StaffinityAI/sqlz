@@ -77,6 +77,9 @@ stable error-code/exit classification, and subprocess/build-step assertions that
 JSON failures write only stdout while human invocation failures write only stderr.
 Project fixtures also assert deterministic multi-file accumulation, configured
 diagnostic truncation, and the stable suppression record.
+Migration fixtures cover semantic manifest fields, Ziggy parse locations, missing
+parents, duplicate IDs, cycles, and multiple heads with deterministic multi-file
+labels; CLI fixtures verify JSON-only output and exit 1 before catalog replay.
 
 ## Engine matrix
 

@@ -1,5 +1,6 @@
 const std = @import("std");
 const migrations = @import("sqlz_migrations");
+const diagnostics = @import("sqlz_diagnostics");
 const ziggy = @import("ziggy");
 
 const valid_manifest =
@@ -378,4 +379,95 @@ test "allows SQL-free reversible merge revisions" {
     );
     defer discovery.deinit();
     try std.testing.expectEqual(@as(usize, 4), discovery.revisions.len);
+}
+
+test "migration diagnostics accumulate invalid manifests in path order" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var first = try tmp.dir.createDirPathOpen(std.testing.io, "aaaaaaaaaaaa_first", .{});
+    defer first.close(std.testing.io);
+    try first.writeFile(std.testing.io, .{
+        .sub_path = "revision.ziggy",
+        .data =
+        \\.format_version = 1,
+        \\.revision = "bad",
+        \\.parents = [],
+        \\.description = "first",
+        \\.created_utc = "2026-09-03T12:00:00Z",
+        \\.backends = [.sqlite],
+        \\.reversible = true,
+        \\.transaction = .{ .sqlite = .always },
+        ,
+    });
+    var second = try tmp.dir.createDirPathOpen(std.testing.io, "bbbbbbbbbbbb_second", .{});
+    defer second.close(std.testing.io);
+    try second.writeFile(std.testing.io, .{
+        .sub_path = "revision.ziggy",
+        .data =
+        \\.format_version = 1,
+        \\.revision = "bbbbbbbbbbbb",
+        \\.parents = [],
+        \\.description = "second",
+        \\.created_utc = "2026-09-03T12:00:00Z",
+        \\.backends = [.sqlite, .sqlite],
+        \\.reversible = true,
+        \\.transaction = .{ .sqlite = .always },
+        ,
+    });
+
+    var list: diagnostics.List = .init(std.testing.allocator, 10);
+    defer list.deinit();
+    var discovery = try migrations.discoverWithDiagnostics(
+        std.testing.allocator,
+        std.testing.io,
+        tmp.dir,
+        1024 * 1024,
+        &list,
+    );
+    defer discovery.deinit();
+    try std.testing.expectEqual(@as(usize, 2), list.slice().len);
+    try std.testing.expectEqualStrings("M002", list.slice()[0].code);
+    try std.testing.expectEqualStrings("aaaaaaaaaaaa_first/revision.ziggy", list.slice()[0].primary.?.path);
+    try std.testing.expectEqual(@as(usize, 2), list.slice()[0].primary.?.start.line);
+    try std.testing.expectEqualStrings("M008", list.slice()[1].code);
+}
+
+test "migration graph diagnostics label missing parents and multiple heads" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const fixtures = [_]struct { directory: []const u8, revision: []const u8, parents: []const u8 }{
+        .{ .directory = "aaaaaaaaaaaa_first", .revision = "aaaaaaaaaaaa", .parents = "[\"cccccccccccc\"]" },
+        .{ .directory = "bbbbbbbbbbbb_second", .revision = "bbbbbbbbbbbb", .parents = "[]" },
+    };
+    for (fixtures) |fixture| {
+        var directory = try tmp.dir.createDirPathOpen(std.testing.io, fixture.directory, .{});
+        defer directory.close(std.testing.io);
+        const source = try std.fmt.allocPrint(std.testing.allocator,
+            \\.format_version = 1,
+            \\.revision = "{s}",
+            \\.parents = {s},
+            \\.description = "fixture",
+            \\.created_utc = "2026-09-03T12:00:00Z",
+            \\.backends = [.sqlite],
+            \\.reversible = true,
+            \\.transaction = .{{ .sqlite = .always }},
+        , .{ fixture.revision, fixture.parents });
+        defer std.testing.allocator.free(source);
+        try directory.writeFile(std.testing.io, .{ .sub_path = "revision.ziggy", .data = source });
+        try directory.writeFile(std.testing.io, .{ .sub_path = "common.up.sql", .data = "CREATE TABLE x (id BIGINT)" });
+        try directory.writeFile(std.testing.io, .{ .sub_path = "common.down.sql", .data = "DROP TABLE x" });
+    }
+    var list: diagnostics.List = .init(std.testing.allocator, 10);
+    defer list.deinit();
+    var discovery = try migrations.discoverWithDiagnostics(
+        std.testing.allocator,
+        std.testing.io,
+        tmp.dir,
+        1024 * 1024,
+        &list,
+    );
+    defer discovery.deinit();
+    try std.testing.expectEqual(@as(usize, 1), list.slice().len);
+    try std.testing.expectEqualStrings("M032", list.slice()[0].code);
+    try std.testing.expectEqualStrings("aaaaaaaaaaaa_first/revision.ziggy", list.slice()[0].primary.?.path);
 }
