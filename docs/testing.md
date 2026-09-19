@@ -73,6 +73,8 @@ possible so they can fail before integration infrastructure is involved.
 Diagnostic transport tests include allocation-free human and JSON golden records,
 stable error-code/exit classification, and subprocess/build-step assertions that
 JSON failures write only stdout while human invocation failures write only stderr.
+Project fixtures also assert deterministic multi-file accumulation, configured
+diagnostic truncation, and the stable suppression record.
 
 ## Engine matrix
 

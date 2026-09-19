@@ -137,6 +137,7 @@ pub fn build(b: *std.Build) !void {
         .imports = &.{
             .{ .name = "sqlz_ir", .module = ir_mod },
             .{ .name = "sqlz_catalog", .module = catalog_mod },
+            .{ .name = "sqlz_diagnostics", .module = diagnostics_mod },
         },
     });
     const query_files_mod = b.addModule("sqlz_query_files", .{
@@ -196,6 +197,7 @@ pub fn build(b: *std.Build) !void {
             .{ .name = "sqlz_analysis", .module = analysis_mod },
             .{ .name = "sqlz_generator", .module = generator_mod },
             .{ .name = "sqlz_catalog", .module = catalog_mod },
+            .{ .name = "sqlz_diagnostics", .module = diagnostics_mod },
         },
     });
     const codegen_exe = b.addExecutable(.{
@@ -318,6 +320,18 @@ pub fn build(b: *std.Build) !void {
     diagnostics_json.expectStdErrEqual("");
     test_step.dependOn(&diagnostics_json.step);
     offline_step.dependOn(&diagnostics_json.step);
+
+    const diagnostics_accumulated = b.addRunArtifact(codegen_exe);
+    diagnostics_accumulated.addFileArg(b.path("test/fixtures/diagnostics/project/sqlz.ziggy"));
+    _ = diagnostics_accumulated.addOutputFileArg("accumulated_queries.zig");
+    diagnostics_accumulated.addArgs(&.{ "--format", "json" });
+    diagnostics_accumulated.expectExitCode(1);
+    diagnostics_accumulated.expectStdOutMatch("\"code\":\"C001\"");
+    diagnostics_accumulated.expectStdOutMatch("\"path\":\"a.sql\"");
+    diagnostics_accumulated.expectStdOutMatch("\"code\":\"S099\"");
+    diagnostics_accumulated.expectStdErrEqual("");
+    test_step.dependOn(&diagnostics_accumulated.step);
+    offline_step.dependOn(&diagnostics_accumulated.step);
 
     const diagnostics_human = b.addRunArtifact(codegen_exe);
     diagnostics_human.expectExitCode(2);
@@ -478,7 +492,10 @@ pub fn build(b: *std.Build) !void {
             .target = host_target,
             .optimize = optimize,
             .link_libc = true,
-            .imports = &.{.{ .name = "sqlz_codegen", .module = codegen_mod }},
+            .imports = &.{
+                .{ .name = "sqlz_codegen", .module = codegen_mod },
+                .{ .name = "sqlz_diagnostics", .module = diagnostics_mod },
+            },
         }),
     });
     const run_codegen_tests = b.addRunArtifact(codegen_tests);

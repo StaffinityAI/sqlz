@@ -16,9 +16,9 @@ is completed, split, deferred, or newly discovered.
 1. Complete the remaining PostgreSQL conformance edges: cancellation/timeouts,
    runtime version-policy overrides, zio-backed sockets, certificate-backed TLS,
    and detailed SQLSTATE payloads after the pg.zig recovery limitation is fixed.
-2. Convert parser, manifest, graph, catalog, and query-analysis failures onto the
-   structured diagnostic transport, add real source labels/fixes, and accumulate
-   independent errors up to the configured limit.
+2. Convert manifest, graph, catalog, and semantic query-analysis failures onto
+   richer component-specific source labels/fixes. Parser syntax spans and
+   deterministic query-file accumulation up to the configured limit are complete.
 3. Add PostgreSQL builtin catalogs for functions, aggregates, operators, casts,
    type aliases, and profile-specific behavior.
 4. Implement the pure migration planner: applied sets, target parsing, ancestor
@@ -97,7 +97,9 @@ is completed, split, deferred, or newly discovered.
 | Build | Lazy SQLite/PostgreSQL runtime facade and TLS flag validation | Complete |
 | Build | Core, SQLite, PostgreSQL, both-backend, and PostgreSQL-TLS compile matrix | Complete |
 | Diagnostics | Stable diagnostic transport, human/JSON rendering, and codegen exit/output contract | Complete |
-| Diagnostics | Component source spans, labels/fixes, and independent error accumulation | Not started |
+| Diagnostics | Parser original-source spans and labels | Complete |
+| Diagnostics | Deterministic query-file error accumulation and configured cap | Complete |
+| Diagnostics | Manifest/graph/catalog/query semantic labels and suggested fixes | Not started |
 | Acceptance | Live PostgreSQL CRUD, rows, owned values, transactions, arrays, enums/domains, pools, and version checks | Complete |
 | Acceptance | Hosted live PostgreSQL 15–18 conformance matrix | Complete |
 | Acceptance | Certificate-backed PostgreSQL TLS and cancellation conformance | Not started |

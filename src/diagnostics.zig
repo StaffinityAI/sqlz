@@ -33,6 +33,62 @@ pub const Diagnostic = struct {
     help: ?[]const u8 = null,
 };
 
+pub const List = struct {
+    arena: std.heap.ArenaAllocator,
+    items: std.ArrayList(Diagnostic) = .empty,
+    limit: usize,
+    truncated: bool = false,
+
+    pub fn init(allocator: std.mem.Allocator, limit: usize) List {
+        return .{ .arena = .init(allocator), .limit = limit };
+    }
+
+    pub fn deinit(self: *List) void {
+        self.items.deinit(self.arena.child_allocator);
+        self.arena.deinit();
+        self.* = undefined;
+    }
+
+    pub fn appendError(
+        self: *List,
+        err: anyerror,
+        path: ?[]const u8,
+    ) std.mem.Allocator.Error!void {
+        if (self.items.items.len >= self.limit) {
+            self.truncated = true;
+            return;
+        }
+        const allocator = self.arena.allocator();
+        const note = try allocator.dupe(u8, @errorName(err));
+        const notes = try allocator.alloc([]const u8, 1);
+        notes[0] = note;
+        const primary: ?Span = if (path) |value| .{
+            .path = try allocator.dupe(u8, value),
+            .start = .{ .offset = 0, .line = 1, .column = 1 },
+            .end = .{ .offset = 0, .line = 1, .column = 1 },
+        } else null;
+        try self.items.append(self.arena.child_allocator, .{
+            .severity = .err,
+            .code = codeForError(err),
+            .message = messageForError(err),
+            .primary = primary,
+            .notes = notes,
+        });
+    }
+
+    pub fn setLimit(self: *List, limit: usize) void {
+        self.limit = @min(self.limit, limit);
+        if (self.items.items.len > self.limit) {
+            self.items.shrinkRetainingCapacity(self.limit);
+            self.truncated = true;
+        }
+    }
+
+    pub fn slice(self: *const List) []const Diagnostic {
+        return self.items.items;
+    }
+};
+
 pub fn render(writer: *std.Io.Writer, diagnostic: Diagnostic, format: Format) !void {
     switch (format) {
         .human => try renderHuman(writer, diagnostic),
@@ -147,6 +203,8 @@ pub fn codeForError(err: anyerror) []const u8 {
         error.BackendNotSelected, error.UnexpectedResultColumns, error.MissingResultColumns, error.ConflictingResultType, error.ConflictingParameterType => "Q001",
         error.UnknownCodec, error.UnknownCodecTarget, error.IncompatibleCodec, error.MissingCodecForDeclaredType => "T001",
         error.InvalidNamespace, error.NamespaceCollision, error.UnsupportedType, error.IncompatibleBackendContract => "G001",
+        error.ProjectCheckFailed => "G002",
+        error.DiagnosticLimitReached => "S099",
         error.UnsupportedFormatVersion, error.InvalidProjectId, error.InvalidPath, error.InvalidLimit => "S020",
         error.OutOfMemory => "I001",
         else => "I999",
@@ -169,6 +227,8 @@ pub fn messageForError(err: anyerror) []const u8 {
         error.UnknownCodec => "query references an unknown codec",
         error.IncompatibleCodec => "codec does not match the inferred database type",
         error.IncompatibleBackendContract => "backend query contracts are incompatible",
+        error.ProjectCheckFailed => "project checking produced one or more diagnostics",
+        error.DiagnosticLimitReached => "additional diagnostics were suppressed",
         error.OutOfMemory => "sqlz ran out of memory",
         else => "sqlz could not complete the project check",
     };
