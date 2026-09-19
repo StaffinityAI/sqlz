@@ -1,5 +1,6 @@
 const std = @import("std");
 const libpg_query = @import("libpg_query");
+const diagnostics = @import("sqlz_diagnostics");
 
 pub const ast = libpg_query;
 
@@ -185,8 +186,35 @@ pub const ParseResult = struct {
 pub const Diagnostic = struct {
     allocator: std.mem.Allocator,
     message: []const u8,
+    path: []const u8,
     original_offset: usize,
     rewritten_offset: usize,
+    line: usize,
+    column: usize,
+
+    pub fn structured(self: *const Diagnostic) diagnostics.Diagnostic {
+        const position: diagnostics.Position = .{
+            .offset = self.original_offset,
+            .line = self.line,
+            .column = self.column,
+        };
+        return .{
+            .severity = .err,
+            .code = "S010",
+            .message = self.message,
+            .primary = .{
+                .path = self.path,
+                .start = position,
+                .end = .{
+                    .offset = self.original_offset + 1,
+                    .line = self.line,
+                    .column = self.column + 1,
+                },
+            },
+            .labels = &.{},
+            .notes = &.{"reported by the PostgreSQL grammar after portable parameter rewriting"},
+        };
+    }
 
     pub fn deinit(self: *Diagnostic) void {
         self.allocator.free(self.message);
@@ -201,6 +229,14 @@ pub const DetailedResult = union(enum) {
 
 pub fn parseDetailed(
     allocator: std.mem.Allocator,
+    source: []const u8,
+) (error{EmptyInput} || std.mem.Allocator.Error)!DetailedResult {
+    return parseDetailedSource(allocator, "<sql>", source);
+}
+
+pub fn parseDetailedSource(
+    allocator: std.mem.Allocator,
+    path: []const u8,
     source: []const u8,
 ) (error{EmptyInput} || std.mem.Allocator.Error)!DetailedResult {
     if (source.len == 0) return error.EmptyInput;
@@ -219,12 +255,16 @@ pub fn parseDetailed(
             @min(@as(usize, @intCast(native_error.*.cursorpos - 1)), rewritten.sql.len);
         const message = try allocator.dupe(u8, std.mem.span(native_error.*.message));
         const original_offset = rewritten.original_offsets[cursor];
+        const position = sourcePosition(source, original_offset);
         rewritten.deinit(allocator);
         return .{ .syntax_error = .{
             .allocator = allocator,
             .message = message,
+            .path = path,
             .original_offset = original_offset,
             .rewritten_offset = cursor,
+            .line = position.line,
+            .column = position.column,
         } };
     }
     const tree = libpg_query.pg_query__parse_result__unpack(
@@ -238,6 +278,20 @@ pub fn parseDetailed(
         .tree = tree,
         .allocator = allocator,
     } };
+}
+
+fn sourcePosition(source: []const u8, offset: usize) struct { line: usize, column: usize } {
+    var line: usize = 1;
+    var column: usize = 1;
+    for (source[0..@min(offset, source.len)]) |byte| {
+        if (byte == '\n') {
+            line += 1;
+            column = 1;
+        } else {
+            column += 1;
+        }
+    }
+    return .{ .line = line, .column = column };
 }
 
 pub fn parse(allocator: std.mem.Allocator, source: []const u8) ParseError!ParseResult {

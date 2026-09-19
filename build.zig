@@ -41,6 +41,11 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
         .imports = &.{.{ .name = "ziggy", .module = ziggy_dep.module("ziggy") }},
     });
+    const diagnostics_mod = b.addModule("sqlz_diagnostics", .{
+        .root_source_file = b.path("src/diagnostics.zig"),
+        .target = host_target,
+        .optimize = optimize,
+    });
     const sqlite_mod = b.createModule(.{
         .root_source_file = b.path("src/sqlz.zig"),
         .target = target,
@@ -103,6 +108,7 @@ pub fn build(b: *std.Build) !void {
         .link_libc = true,
         .imports = &.{
             .{ .name = "libpg_query", .module = pg_query_bindings },
+            .{ .name = "sqlz_diagnostics", .module = diagnostics_mod },
         },
     });
     parser_mod.linkLibrary(libpg_query);
@@ -175,11 +181,6 @@ pub fn build(b: *std.Build) !void {
             .{ .name = "sqlz_analysis", .module = analysis_mod },
             .{ .name = "sqlz_query_files", .module = query_files_mod },
         },
-    });
-    const diagnostics_mod = b.addModule("sqlz_diagnostics", .{
-        .root_source_file = b.path("src/diagnostics.zig"),
-        .target = host_target,
-        .optimize = optimize,
     });
     const codegen_mod = b.addModule("sqlz_codegen", .{
         .root_source_file = b.path("src/codegen.zig"),
@@ -380,6 +381,7 @@ pub fn build(b: *std.Build) !void {
             .imports = &.{.{ .name = "sqlz_parser", .module = parser_mod }},
         }),
     });
+    parser_tests.root_module.addImport("sqlz_diagnostics", diagnostics_mod);
     const run_parser = b.addRunArtifact(parser_tests);
     test_step.dependOn(&run_parser.step);
     offline_step.dependOn(&run_parser.step);
