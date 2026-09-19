@@ -54,7 +54,7 @@ hardening gaps.
 
 ### 1. Reconcile current-status documentation
 
-**Status:** Partial
+**Status:** Complete
 
 **Depends on:** Nothing
 
@@ -334,8 +334,8 @@ and version overrides; any upstream limitation is linked and narrowly documented
 - Prove disabled drivers are not fetched, imported, linked, or embedded.
 - Use atomic output replacement; failure/interruption must leave the previous valid
   cache entry intact and stale output must not compile as a successful check.
-- Remove `sqlite_system` from the 0.1 contract, or design runtime version/compile-
-  option verification that proves compatibility with a reviewed capability profile.
+- Keep `sqlite_system` outside the 0.1 contract unless runtime version/compile-
+  option verification proves compatibility with a reviewed capability profile.
 
 **Acceptance gate:** Build fixtures cover every invalidation transition, warm cache
 hit, generation failure point, project/backend combination, and host/target split.
@@ -829,7 +829,6 @@ a private planner, state store, journal, or migration runner.
 
 | Promise or contract | Current state | Closing slice |
 | --- | --- | --- |
-| Current status is consistent across public docs | Root and docs index understate implemented PostgreSQL/checker work | 1 |
 | All configuration limits and path boundaries are enforced | Only part of the limits and lexical path checks are active | 2-3 |
 | Source manager follows BOM/UTF-8/column/line-ending rules | Position mapping exists; the full contract lacks coverage | 3 |
 | Full documented query/DDL subset, opaque directives, and downgrade checks | A practical subset exists; unsupported and round-trip gaps remain | 4 |

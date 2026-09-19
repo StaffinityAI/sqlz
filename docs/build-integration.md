@@ -10,7 +10,6 @@ build.
 | --- | --- | --- |
 | `sqlite` | `false` | fetch/build the zqlite runtime adapter |
 | `postgres` | `false` | fetch/build the pg.zig runtime adapter |
-| `sqlite_system` | `false` | use system SQLite; requires `sqlite` |
 | `postgres_tls` | `false` | enable driver TLS; requires `postgres` |
 
 The package manifest marks both drivers lazy. `build.zig` calls
@@ -18,6 +17,8 @@ The package manifest marks both drivers lazy. `build.zig` calls
 imported, compiled, translated, or linked. Core/checker-only, SQLite-only,
 PostgreSQL-only, and both-backend builds are mandatory test configurations. There
 is no implicit default backend or runtime `AnyDatabase`.
+Only the reviewed bundled zqlite capability profile is in the 0.1 contract;
+there is no `sqlite_system` build option.
 
 ## Build API
 

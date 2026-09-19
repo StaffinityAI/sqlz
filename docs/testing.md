@@ -85,8 +85,8 @@ labels; CLI fixtures verify JSON-only output and exit 1 before catalog replay.
 
 Differential parser/conformance CI runs against SQLite profiles 3.45–3.53 and every
 PostgreSQL major 15–18. Full runtime tests run on x86_64 Linux and arm64 macOS;
-Windows receives a compile check. Bundled SQLite uses a known capability manifest;
-system/custom builds have runtime option verification tests.
+Windows receives a compile check. Bundled SQLite is the only 0.1 capability
+profile; system/custom SQLite builds are not currently claimed.
 
 The PostgreSQL 15–18 matrix covers live plain-TCP runtime behavior. TLS-enabled
 driver compilation is part of the build matrix; live TLS conformance requires a

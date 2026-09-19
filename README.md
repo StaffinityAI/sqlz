@@ -5,9 +5,11 @@ applications close to handwritten SQL while providing offline query checking,
 generated type-safe bindings, and revision-based migrations.
 
 > [!IMPORTANT]
-> The first SQLite query/runtime slice is implemented. The offline semantic
-> checker, generated bindings, migrations, PostgreSQL runtime, and stable public
-> API are still under development.
+> Offline checking, generated bindings, and checked-query runtimes for SQLite
+> and PostgreSQL are implemented for the current SQL/catalog subset. Migration
+> discovery and offline catalog replay exist, but stateful database migration
+> planning and execution are the largest missing subsystem. The public API is
+> still under development.
 
 ## Planned features
 
@@ -59,14 +61,14 @@ The evolving specification lives in [`docs/`](docs/README.md):
 These documents define the intended 0.1 behavior and implementation milestones;
 the current slice implements only the subset described below.
 
-## Current slice
+## Current status
 
-`zig build test` exercises typed SQLite queries across exec, one, optional, and
-many cardinalities; borrowed and owned rows; nullable joins; recursive CTEs;
-upserts with RETURNING; transaction commit/rollback; portable named-parameter
-rewriting; and `libpg_query` parsing. `zig build test-zio` and
-`zig build test-zio-host` repeat the runtime and host coverage on a zio-backed
-`std.Io`.
+`zig build test` exercises typed SQLite and PostgreSQL queries across exec, one,
+optional, and many cardinalities; borrowed and owned rows; transactions; native
+pools; enum codecs; PostgreSQL arrays and version policy; portable
+named-parameter rewriting; and `libpg_query` parsing. `zig build test-zio` and
+`zig build test-zio-host` repeat the SQLite runtime and host coverage on a
+zio-backed `std.Io`; PostgreSQL zio socket coverage remains pending.
 
 `zig build test-consumer` builds an application layer whose only import is
 `sqlz` — schema scripts, PRAGMAs, typed connection options, enum columns, blobs,
@@ -91,9 +93,22 @@ Queries authored as Zig declarations are checked the same way, and their
 order, nullability, and type, so a declaration cannot drift from the query it
 sits beside.
 
-The immediate next milestone is diagnostics and resource-limit hardening. See the
-[implementation roadmap](docs/README.md#implementation-roadmap) for the complete
-sequence and acceptance gates.
+Migration discovery currently means loading revision manifests, validating and
+ordering the DAG, and replaying supported DDL into offline SQLite and PostgreSQL
+catalogs. It does not migrate a database: persistent migration state, target
+planning, locking, checksums, journals, upgrade/downgrade runners, and runtime
+migration bundles remain to be implemented.
+
+`zig build sqlz -- bootstrap postgres` is an initial partial operational command,
+not the full CLI. It can route a registered project, replay a transactional
+PostgreSQL head into a dedicated schema, transfer compatible SQLite rows with
+bound parameters, restore sequences, and validate row counts. It still uses a
+bootstrap-private replay path and lacks normal migration state/checksums,
+journaling, advisory locking, interactive confirmation, and JSON output.
+
+See the checked [current-status table](docs/README.md#current-implementation-status)
+and [implementation plan](docs/implementation-plan.md) for the complete sequence
+and acceptance gates.
 
 ## Development
 
