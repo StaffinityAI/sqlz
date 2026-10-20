@@ -18,6 +18,30 @@ test "generates a PostgreSQL-only project" {
     try std.testing.expect(std.mem.indexOf(u8, generated, ".sqlite = true") == null);
 }
 
+test "a runtime backend needs a checking profile" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try writeProject(&tmp, false);
+
+    const generated = try codegen.generateProjectWithOptions(
+        std.testing.allocator,
+        std.testing.io,
+        tmp.dir,
+        "sqlz.ziggy",
+        .{ .runtime = .{ .postgres = true } },
+        null,
+    );
+    std.testing.allocator.free(generated);
+    try std.testing.expectError(error.RuntimeBackendWithoutProfile, codegen.generateProjectWithOptions(
+        std.testing.allocator,
+        std.testing.io,
+        tmp.dir,
+        "sqlz.ziggy",
+        .{ .runtime = .{ .sqlite = true } },
+        null,
+    ));
+}
+
 test "project checking accumulates query diagnostics in source order" {
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();

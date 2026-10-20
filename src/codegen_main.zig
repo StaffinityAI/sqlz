@@ -2,7 +2,7 @@ const std = @import("std");
 const codegen = @import("sqlz_codegen");
 const diagnostics = @import("sqlz_diagnostics");
 
-/// `sqlz-codegen <config> <output> [--codec <id> <import-name> <declaration>]...`
+/// `sqlz-codegen <config> <output> [--runtime sqlite|postgres]... [--codec <id> <import-name> <declaration>]...`
 pub fn main(init: std.process.Init) void {
     const format = detectFormat(init) catch .human;
     var diagnostic_list: diagnostics.List = .init(init.gpa, 100);
@@ -26,11 +26,23 @@ fn run(init: std.process.Init, diagnostic_list: *diagnostics.List) !void {
     const output_path = args[2];
 
     var bindings: std.ArrayList(codegen.CodecBinding) = .empty;
+    var runtime: codegen.RuntimeBackends = .{};
     var index: usize = 3;
     while (index < args.len) {
         if (std.mem.eql(u8, args[index], "--format")) {
             if (index + 1 >= args.len or parseFormat(args[index + 1]) == null)
                 return error.InvalidArguments;
+            index += 2;
+            continue;
+        }
+        if (std.mem.eql(u8, args[index], "--runtime")) {
+            if (index + 1 >= args.len) return error.InvalidArguments;
+            const backend = args[index + 1];
+            if (std.mem.eql(u8, backend, "sqlite")) {
+                runtime.sqlite = true;
+            } else if (std.mem.eql(u8, backend, "postgres")) {
+                runtime.postgres = true;
+            } else return error.InvalidArguments;
             index += 2;
             continue;
         }
@@ -48,12 +60,12 @@ fn run(init: std.process.Init, diagnostic_list: *diagnostics.List) !void {
     const config_name = std.fs.path.basename(config_path);
     var project_dir = try std.Io.Dir.cwd().openDir(init.io, project_path, .{ .iterate = true });
     defer project_dir.close(init.io);
-    const generated = try codegen.generateProjectWithCodecsAndDiagnostics(
+    const generated = try codegen.generateProjectWithOptions(
         allocator,
         init.io,
         project_dir,
         config_name,
-        bindings.items,
+        .{ .codecs = bindings.items, .runtime = runtime },
         diagnostic_list,
     );
     defer allocator.free(generated);
@@ -105,7 +117,7 @@ fn renderFailure(init: std.process.Init, format: diagnostics.Format, err: anyerr
         .message = diagnostics.messageForError(err),
         .notes = &.{note},
         .help = if (err == error.InvalidArguments)
-            "usage: sqlz-codegen <config> <output> [--format human|json] [--codec ID IMPORT DECL]..."
+            "usage: sqlz-codegen <config> <output> [--format human|json] [--runtime sqlite|postgres]... [--codec ID IMPORT DECL]..."
         else
             null,
     };

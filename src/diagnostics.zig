@@ -266,7 +266,7 @@ pub fn codeForError(err: anyerror) []const u8 {
         error.InvalidNamespace, error.NamespaceCollision, error.UnsupportedType, error.IncompatibleBackendContract => "G001",
         error.ProjectCheckFailed => "G002",
         error.DiagnosticLimitReached => "S099",
-        error.UnsupportedFormatVersion, error.InvalidProjectId, error.InvalidPath, error.InvalidLimit => "S020",
+        error.UnsupportedFormatVersion, error.InvalidProjectId, error.InvalidPath, error.InvalidLimit, error.RuntimeBackendWithoutProfile => "S020",
         error.OutOfMemory => "I001",
         else => "I999",
     };
@@ -288,6 +288,7 @@ pub fn messageForError(err: anyerror) []const u8 {
         error.ConflictingResultType => "set-operation result branches have conflicting types",
         error.ConflictingParameterType => "named parameter uses have conflicting types",
         error.UnknownCodec => "query references an unknown codec",
+        error.RuntimeBackendWithoutProfile => "runtime backend has no checking profile in sqlz.ziggy",
         error.IncompatibleCodec => "codec does not match the inferred database type",
         error.IncompatibleBackendContract => "backend query contracts are incompatible",
         error.ProjectCheckFailed => "project checking produced one or more diagnostics",

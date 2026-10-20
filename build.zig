@@ -6,6 +6,7 @@ pub const Tool = sqlz_build.Tool;
 pub const ToolOptions = sqlz_build.ToolOptions;
 pub const Project = sqlz_build.Project;
 pub const ProjectOptions = sqlz_build.ProjectOptions;
+pub const Backends = sqlz_build.Backends;
 
 pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
@@ -46,12 +47,22 @@ pub fn build(b: *std.Build) !void {
         .target = host_target,
         .optimize = optimize,
     });
+    // An adapter module is published exactly when its option is enabled, even
+    // before its lazy driver is fetched, so `addProject` can tell a disabled
+    // backend from one still being fetched.
     const sqlite_mod = b.createModule(.{
         .root_source_file = b.path("src/sqlz.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{.{ .name = "sqlz_core", .module = core_mod }},
     });
+    if (sqlite_enabled) b.modules.put(b.graph.arena, "sqlz_sqlite", sqlite_mod) catch @panic("OOM");
+    const postgres_module: ?*std.Build.Module = if (postgres_enabled) b.addModule("sqlz_postgres", .{
+        .root_source_file = b.path("src/postgres.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "sqlz_core", .module = core_mod }},
+    }) else null;
     const runtime_options = b.addOptions();
     runtime_options.addOption(bool, "sqlite", sqlite_enabled);
     runtime_options.addOption(bool, "postgres", postgres_enabled);
@@ -821,15 +832,8 @@ pub fn build(b: *std.Build) !void {
     }
 
     if (pg_dep) |dep| {
-        const postgres_mod = b.addModule("sqlz_postgres", .{
-            .root_source_file = b.path("src/postgres.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "sqlz_core", .module = core_mod },
-                .{ .name = "pg", .module = dep.module("pg") },
-            },
-        });
+        const postgres_mod = postgres_module.?;
+        postgres_mod.addImport("pg", dep.module("pg"));
         sqlz_mod.addImport("sqlz_postgres", postgres_mod);
         const postgres_tests = b.addTest(.{
             .root_module = b.createModule(.{

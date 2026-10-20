@@ -26,9 +26,36 @@ pub const CodecBinding = struct {
     declaration: []const u8,
 };
 
+/// A set of runtime backends. Nothing is enabled by default: there is no
+/// implicit backend.
+pub const Backends = struct {
+    sqlite: bool = false,
+    postgres: bool = false,
+};
+
+pub const ProjectRuntimeError = error{
+    SqliteRuntimeUnavailable,
+    PostgresRuntimeUnavailable,
+};
+
+/// A project may enable only the adapters its sqlz dependency was configured
+/// with: the dependency decides what is fetched and linked, the project picks a
+/// subset. The other bound, a checking profile in `sqlz.ziggy` for every
+/// enabled backend, is enforced by the check step, which reads the file.
+pub fn validateProjectRuntime(requested: Backends, available: Backends) ProjectRuntimeError!void {
+    if (requested.sqlite and !available.sqlite) return error.SqliteRuntimeUnavailable;
+    if (requested.postgres and !available.postgres) return error.PostgresRuntimeUnavailable;
+}
+
 pub const ProjectOptions = struct {
     name: []const u8,
     config: std.Build.LazyPath,
+    /// Runtime backends this project executes and migrates against. Each needs
+    /// the matching dependency option and a checking profile in `sqlz.ziggy`.
+    /// The runtime facade stays one module per dependency, since Zig admits a
+    /// source file to only one module per compilation and several projects may
+    /// share an executable.
+    runtime: Backends = .{},
     codecs: []const CodecBinding = &.{},
 };
 
@@ -53,10 +80,21 @@ pub const Tool = struct {
         self.cli_run.addArg(name);
         self.cli_run.addFileArg(options.config);
 
+        const available: Backends = .{
+            .sqlite = self.dependency.builder.modules.get("sqlz_sqlite") != null,
+            .postgres = self.dependency.builder.modules.get("sqlz_postgres") != null,
+        };
+        validateProjectRuntime(options.runtime, available) catch |err| std.debug.panic(
+            "sqlz project '{s}' enables the {s} runtime, but the sqlz dependency was configured without .{s} = true",
+            .{ name, runtimeName(err), runtimeName(err) },
+        );
+
         const run = self.b.addRunArtifact(self.dependency.artifact("sqlz-codegen"));
         run.setName(self.b.fmt("check sqlz project {s}", .{name}));
         run.addFileArg(options.config);
         const generated = run.addOutputFileArg(self.b.fmt("{s}_queries.zig", .{name}));
+        if (options.runtime.sqlite) run.addArgs(&.{ "--runtime", "sqlite" });
+        if (options.runtime.postgres) run.addArgs(&.{ "--runtime", "postgres" });
         _ = run.step.addDirectoryWatchInput(options.config.dirname()) catch @panic("out of memory");
         // The tool discovers its own inputs — migrations, `.sql` files, and the
         // Zig roots — so the config file alone is not what the result depends
@@ -96,6 +134,13 @@ pub const Tool = struct {
         };
     }
 };
+
+fn runtimeName(err: ProjectRuntimeError) []const u8 {
+    return switch (err) {
+        error.SqliteRuntimeUnavailable => "sqlite",
+        error.PostgresRuntimeUnavailable => "postgres",
+    };
+}
 
 /// Registers every file under a project directory that the checker may read as
 /// an input of `run`, so adding, editing, or removing one re-runs the check.

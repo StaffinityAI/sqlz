@@ -56,7 +56,7 @@ participate in the semantic configuration fingerprint.
 | `migrations` | path string | one revision root |
 | `sql_roots` | map of identifier to path | aliases required and unique |
 | `zig_roots` | list of paths | roots scanned for embedded queries |
-| `backends` | map | at least one checking profile; runtime enablement remains in the build |
+| `backends` | map | at least one checking profile; every backend in a project's build runtime set needs one |
 | `catalog_supplements` | list of paths | versioned Ziggy supplement files |
 | `codecs` | map of ID to database patterns | each ID needs one build binding |
 | `limits` | map | omitted members use documented safe defaults |
@@ -124,6 +124,8 @@ toward total registered source bytes.
 ## Multiple projects
 
 Each build registration has a unique name, configuration path, dependency,
-runtime backend set, and codec bindings. `--project NAME` is optional when exactly
+runtime backend set (`ProjectOptions.runtime`), and codec bindings. The runtime
+set must be a subset of the dependency's enabled adapters and of the configured
+checking profiles. `--project NAME` is optional when exactly
 one project is registered and required when a command would otherwise be
 ambiguous.

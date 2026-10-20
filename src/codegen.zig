@@ -14,7 +14,21 @@ pub const Error = error{
     UnboundCodec,
     UnregisteredCodec,
     IncompatibleBackendContract,
+    RuntimeBackendWithoutProfile,
     ProjectCheckFailed,
+};
+
+/// The runtime adapters a build registration enables for one project. Each one
+/// needs a checking profile in `sqlz.ziggy`; a backend may be checked without
+/// being enabled, never the reverse.
+pub const RuntimeBackends = struct {
+    sqlite: bool = false,
+    postgres: bool = false,
+};
+
+pub const GenerateOptions = struct {
+    codecs: []const CodecBinding = &.{},
+    runtime: RuntimeBackends = .{},
 };
 
 /// A codec binding as the build supplies it: the configured ID, plus the Zig
@@ -74,6 +88,25 @@ pub fn generateProjectWithCodecsAndDiagnostics(
     bindings: []const CodecBinding,
     diagnostic_list: ?*diagnostics.List,
 ) ![]u8 {
+    return generateProjectWithOptions(
+        allocator,
+        io,
+        project_dir,
+        config_name,
+        .{ .codecs = bindings },
+        diagnostic_list,
+    );
+}
+
+pub fn generateProjectWithOptions(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    project_dir: std.Io.Dir,
+    config_name: []const u8,
+    options: GenerateOptions,
+    diagnostic_list: ?*diagnostics.List,
+) ![]u8 {
+    const bindings = options.codecs;
     const raw_config = try project_dir.readFileAlloc(io, config_name, allocator, .limited(16 * 1024 * 1024));
     defer allocator.free(raw_config);
     const config_source = try allocator.dupeZ(u8, raw_config);
@@ -82,6 +115,10 @@ pub fn generateProjectWithCodecsAndDiagnostics(
     var loaded = try config.parse(allocator, config_source, &meta);
     defer loaded.deinit();
     const project = loaded.config();
+    if (options.runtime.sqlite and project.backends.sqlite == null)
+        return error.RuntimeBackendWithoutProfile;
+    if (options.runtime.postgres and project.backends.postgres == null)
+        return error.RuntimeBackendWithoutProfile;
     if (diagnostic_list) |list|
         list.setLimit(std.math.cast(usize, project.limits.diagnostics) orelse return error.InvalidLimit);
     const sqlite_dialect: checker.SqliteDialect = if (project.backends.sqlite) |sqlite| .{
