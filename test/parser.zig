@@ -544,12 +544,17 @@ fn checkSqlProperties(source: []const u8) !void {
         }
         for (source[previous_end..]) |byte| try std.testing.expect(std.ascii.isWhitespace(byte));
 
-        if (count > 0) {
-            // Exactly `count` tokens fit; any failure at that limit is nesting.
-            if (lexer.checkLimits(source, dialect, .{ .tokens = count, .nesting = lexer.max_nesting_depth })) |violation|
+        // SQLite text is also held to the limits as PostgreSQL lexes it.
+        const limit_count = switch (dialect) {
+            .postgres => count,
+            .sqlite => @max(count, tokenCount(source, .postgres)),
+        };
+        if (limit_count > 0) {
+            // Exactly that many tokens fit; any failure at that limit is nesting.
+            if (lexer.checkLimits(source, dialect, .{ .tokens = limit_count, .nesting = lexer.max_nesting_depth })) |violation|
                 try std.testing.expectEqual(.nesting, violation.limit);
-            if (count > 1) {
-                const violation = lexer.checkLimits(source, dialect, .{ .tokens = count - 1, .nesting = lexer.max_nesting_depth });
+            if (limit_count > 1) {
+                const violation = lexer.checkLimits(source, dialect, .{ .tokens = limit_count - 1, .nesting = lexer.max_nesting_depth });
                 try std.testing.expect(violation != null);
             }
         }
@@ -665,4 +670,13 @@ fn fuzzSql(_: void, smith: *std.testing.Smith) anyerror!void {
 
 test "fuzz SQL bytes through the lexer, rewrite, and parser" {
     try std.testing.fuzz({}, fuzzSql, .{ .corpus = &sql_corpus });
+}
+
+test "SQLite quoting the PostgreSQL lexer ignores cannot hide nesting" {
+    for ([_][]const u8{ "SELECT ` 1", "SELECT [ 1" }) |prefix| {
+        const source = try repeated(prefix, "+1", 300_000, "", "");
+        defer std.testing.allocator.free(source);
+        try std.testing.expect(lexer.checkLimits(source, .sqlite, .{}) != null);
+        try std.testing.expectError(error.NestingLimitExceeded, parser.parseSqlite(std.testing.allocator, source));
+    }
 }

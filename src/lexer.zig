@@ -329,7 +329,19 @@ pub const Violation = struct {
 /// next operand one level deeper, so `1+1+1` is three levels deep, while
 /// `AND`/`OR` chains, which the parser flattens, cost one. Set operations and
 /// joins nest the whole statement and accumulate until the next `;`.
+///
+/// SQLite text is checked twice: as SQLite lexes it, and as PostgreSQL does,
+/// because the shared grammar parses it with PostgreSQL's lexer. A backtick or
+/// bracket that SQLite reads as one quoted identifier could otherwise hide an
+/// arbitrarily deep expression from the check.
 pub fn checkLimits(source: []const u8, dialect: Dialect, limits: Limits) ?Violation {
+    return switch (dialect) {
+        .postgres => checkLexed(source, .postgres, limits),
+        .sqlite => checkLexed(source, .sqlite, limits) orelse checkLexed(source, .postgres, limits),
+    };
+}
+
+fn checkLexed(source: []const u8, dialect: Dialect, limits: Limits) ?Violation {
     std.debug.assert(limits.tokens > 0 and limits.nesting > 0);
     std.debug.assert(limits.nesting <= max_nesting_depth);
     var lexer: Lexer = .init(source, dialect);

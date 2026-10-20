@@ -200,8 +200,12 @@ fails with S021, naming the file or root that crossed it.
   runs. In SQL, each bracket and `CASE` is a level, and so is each operator or
   operator keyword within one list element, since `1+1+1` parses as nested
   expressions; flattened `AND`/`OR` chains cost one level, and set operations
-  and joins accumulate per statement. In Zig, brackets, runs of prefix
-  operators, and `else if` chains count. The limit may not exceed 1024.
+  and joins accumulate per statement. SQLite SQL is checked both as SQLite and
+  as PostgreSQL lexes it, since the shared grammar sees the latter. In Zig,
+  each bracket is a level, and within a level each prefix or type operator, an
+  error union's `!`, a `fn` type, a closed `[...]`, operand-taking control flow,
+  an `if`/loop/`switch` directly in another's body, and each `else if` add
+  one. The limit may not exceed 1024.
 - Both report S021 at the token that crossed the limit.
 Checkpoint manifests count toward the revision limit. Entries in
 `migrations/history.ziggy` have a separate count bounded by the same default

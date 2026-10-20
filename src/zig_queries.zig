@@ -471,23 +471,29 @@ fn hiddenPath(path: []const u8) bool {
 /// The largest `nesting` limit sqlz accepts, matching the SQL lexer.
 pub const max_nesting_depth: u32 = 1024;
 
-/// Returns the first token that crosses the token or nesting limit. Nesting
-/// counts open brackets, plus what the Zig parser also descends into one level
-/// at a time: a run of prefix operators (`!`, `-`, `~`, `&`, `*`, `?`, `try`,
-/// `comptime`) nests each operand under the previous one, and each `else if`
-/// nests the rest of its chain.
+/// Returns the first token that crosses the token or nesting limit.
+///
+/// Nesting estimates how deeply the Zig parser will recurse. Each open bracket
+/// is a level. Within a level, every token that can start a nested operand or
+/// type adds one until the next `,`, `;`, `=`, or `=>`: prefix operators (`!`,
+/// `-`, `~`, `&`, `*`, `?`, `try`, `comptime`), an error union's `!`, a `fn`
+/// type, each closed `[...]` as in `[4]*const ?T`, control flow that takes an
+/// operand (`return`, `break`, `defer`, ...), `anyframe->`, and an `if`,
+/// loop, or `switch` that is directly the body of another. Binary operators
+/// that share those tokens are counted too, which only overestimates. Each
+/// `else if` nests the rest of its chain.
 pub fn checkLimits(contents: [:0]const u8, limits: Limits) ?Violation {
     std.debug.assert(limits.tokens > 0 and limits.nesting > 0);
     std.debug.assert(limits.nesting <= max_nesting_depth);
+    const Level = struct { operands: u32, chain: u32 };
     var tokenizer: std.zig.Tokenizer = .init(contents);
     var tokens: u64 = 0;
-    // `else if` links per open bracket level. A level past the limit fails
-    // the check before it is stored, so the stack never overflows.
-    var chains: [max_nesting_depth + 1]u32 = undefined;
+    // The enclosing levels' counts. A level past the limit fails the check
+    // before it is stored, so the stack never overflows.
+    var levels: [max_nesting_depth + 1]Level = undefined;
     var depth: u32 = 0;
-    chains[0] = 0;
-    var chain_total: u64 = 0;
-    var prefix: u64 = 0;
+    var outer: u64 = 0;
+    var current: Level = .{ .operands = 0, .chain = 0 };
     var previous: std.zig.Token.Tag = .invalid;
     while (true) {
         const token = tokenizer.next();
@@ -496,36 +502,51 @@ pub fn checkLimits(contents: [:0]const u8, limits: Limits) ?Violation {
         if (tokens > limits.tokens)
             return .{ .err = error.TokenLimitExceeded, .start = token.loc.start, .end = token.loc.end };
         switch (token.tag) {
+            .bang, .minus, .minus_percent, .tilde, .ampersand, .asterisk, .asterisk_asterisk, .question_mark, .keyword_try, .keyword_comptime, .keyword_nosuspend => current.operands += 1,
+            .comma, .equal, .equal_angle_bracket_right => current.operands = 0,
+            .semicolon => current = .{ .operands = 0, .chain = 0 },
+            .keyword_if => if (previous == .keyword_else) {
+                current.chain += 1;
+            } else {
+                current.chain = 0;
+                if (startsNestedBody(previous)) current.operands += 1;
+            },
+            // A loop or switch directly in another's body, as in
+            // `if (a) while (b) ...` or `x: for (c) ...`, nests inside it.
+            .keyword_while, .keyword_for, .keyword_switch, .keyword_inline => if (startsNestedBody(previous)) {
+                current.operands += 1;
+            },
+            // Control flow and `anyframe->` take a nested operand.
+            .keyword_return, .keyword_break, .keyword_continue, .keyword_resume, .keyword_suspend, .keyword_defer, .keyword_errdefer, .arrow => current.operands += 1,
             .l_paren, .l_bracket, .l_brace => {
-                if (depth + prefix + chain_total + 1 > limits.nesting)
+                // `fn (` is a function type, whose return type nests.
+                if (token.tag == .l_paren and previous == .keyword_fn) current.operands += 1;
+                if (depth + 1 + outer + current.operands + current.chain > limits.nesting)
                     return .{ .err = error.NestingLimitExceeded, .start = token.loc.start, .end = token.loc.end };
+                levels[depth] = current;
+                outer += current.operands + current.chain;
                 depth += 1;
-                chains[depth] = 0;
+                current = .{ .operands = 0, .chain = 0 };
             },
             .r_paren, .r_bracket, .r_brace => if (depth > 0) {
-                chain_total -= chains[depth];
                 depth -= 1;
-            },
-            .keyword_if => if (previous == .keyword_else) {
-                chains[depth] += 1;
-                chain_total += 1;
-            } else {
-                chain_total -= chains[depth];
-                chains[depth] = 0;
-            },
-            .semicolon => {
-                chain_total -= chains[depth];
-                chains[depth] = 0;
+                current = levels[depth];
+                outer -= current.operands + current.chain;
+                if (token.tag == .r_bracket) current.operands += 1;
             },
             else => {},
         }
-        switch (token.tag) {
-            .bang, .minus, .minus_percent, .tilde, .ampersand, .asterisk, .question_mark, .keyword_try, .keyword_comptime => prefix += 1,
-            .l_paren, .l_bracket => {},
-            else => prefix = 0,
-        }
         previous = token.tag;
-        if (depth + prefix + chain_total > limits.nesting)
+        if (depth + outer + current.operands + current.chain > limits.nesting)
             return .{ .err = error.NestingLimitExceeded, .start = token.loc.start, .end = token.loc.end };
     }
+}
+
+/// Whether a token after `previous` is the body of an enclosing `if`, loop, or
+/// label rather than a statement of its own.
+fn startsNestedBody(previous: std.zig.Token.Tag) bool {
+    return switch (previous) {
+        .r_paren, .colon, .keyword_else, .pipe => true,
+        else => false,
+    };
 }

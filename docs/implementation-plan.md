@@ -271,8 +271,11 @@ documented deferral exists for every format-1 configuration field.
   parser runs: by the lexer for named, embedded, and migration SQL (S021 at the
   crossing token) and inside `parser`, and by a Zig token pass before
   `std.zig.Ast.parse`. Nesting estimates tree depth (brackets, `CASE`, operator
-  chains, set operations, joins; prefix-operator runs and `else if` chains in
-  Zig). The limit is capped at 1024, and a whole-pipeline test checks the cap.
+  chains, set operations, joins; in Zig, prefix and type operators, `fn` types,
+  nested control flow, and `else if` chains per bracket level). SQLite text is
+  also checked as PostgreSQL lexes it, so SQLite-only quoting cannot hide depth
+  from `libpg_query`. The limit is capped at 1024, and a whole-pipeline test
+  checks the cap.
 - `libpg_query` is always built optimized: unoptimized, its tree serializer
   overflowed an 8 MiB stack at roughly 450 chained operators.
 - Fixed on the way: syntax-error positions were relative to the SQL rather than

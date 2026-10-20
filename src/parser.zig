@@ -387,10 +387,10 @@ pub fn parseSqlite(allocator: std.mem.Allocator, source: []const u8) ParseError!
     return parseSqliteWithDialect(allocator, source, .{});
 }
 
-/// Checks limits against the SQLite text itself, then hands the normalized
-/// text to the shared grammar. Normalization rejects every form the two
-/// dialects would lex differently, so the SQLite lexer's view of the source
-/// is the one the grammar parses.
+/// Checks limits against the SQLite text, as both lexers see it, then hands
+/// the normalized text to the shared grammar. Normalization rejects the forms
+/// whose meaning the two lexers disagree on, so rewriting with the SQLite lexer
+/// finds the parameters the grammar will see.
 pub fn parseSqliteWithDialect(
     allocator: std.mem.Allocator,
     source: []const u8,

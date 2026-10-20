@@ -65,7 +65,8 @@ after a failed statement; semantic analysis does not run for that statement.
 ## Limits and conformance
 
 The parser wrapper enforces the token and nesting limits in
-[configuration.md](configuration.md) before `libpg_query` runs. Its grammar and
+[configuration.md](configuration.md) before `libpg_query` runs, checking SQLite
+text as both lexers see it. Its grammar and
 tree serializer recurse once per nesting level, so the library is always built
 optimized: unoptimized frames overflow an 8 MiB stack within a few hundred
 levels. Tests use real-world acceptance queries, golden adapted ASTs and

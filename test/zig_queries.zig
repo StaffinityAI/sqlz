@@ -231,6 +231,9 @@ test "nesting_depth bounds a Zig source at its boundary" {
         .{ "const a = !!!b;", 3, "!" },
         .{ "const a = if (x) 1 else if (y) 2 else if (z) 3 else 4;", 3, "(" },
         .{ "fn f() void { { {} } }", 3, "{" },
+        .{ "const T = [2][2]*const u8;", 3, "*" },
+        .{ "const T = E!E!u8;", 2, "!" },
+        .{ "fn f() void { if (a) while (b) {} }", 3, "(" },
     };
     for (cases) |case| {
         const source, const depth, const crossing = case;
@@ -245,7 +248,7 @@ test "nesting_depth bounds a Zig source at its boundary" {
     // Separate statements, and an `if` nested inside a branch, do not extend
     // an `else if` chain; the chain itself still counts.
     try std.testing.expectEqual(@as(?zig_queries.Violation, null), zig_queries.checkLimits(
-        "fn f() void { if (a) {} else if (b) {} if (c) {} else if (d) {} }",
+        "fn f() void { if (a) {} else if (b) {} if (c) {} else if (d) {} while (e) {} for (f) |_| {} }",
         .{ .nesting = 3 },
     ));
     try std.testing.expect(zig_queries.checkLimits(
@@ -263,6 +266,14 @@ test "deep Zig nesting fails closed before the Zig parser runs" {
         .{ "&", "a", "" },
         .{ "try ", "a", "" },
         .{ "if (a) 1 else ", "2", "" },
+        // Type prefixes interleave keywords, numbers, and identifiers.
+        .{ "*const ", "u8", "" },
+        .{ "[1]", "u8", "" },
+        .{ "[]const ", "u8", "" },
+        .{ "E!", "u8", "" },
+        .{ "fn () ", "u8", "" },
+        .{ "?*align(4) ", "u8", "" },
+        .{ "anyframe->", "u8", "" },
     };
     for (units) |unit| {
         const open, const middle, const close = unit;
@@ -273,6 +284,22 @@ test "deep Zig nesting fails closed before the Zig parser runs" {
         try source.appendSlice(allocator, middle);
         for (0..100_000) |_| try source.appendSlice(allocator, close);
         try source.appendSlice(allocator, ";");
+        const terminated = try allocator.dupeZ(u8, source.items);
+        defer allocator.free(terminated);
+        try std.testing.expectError(error.NestingLimitExceeded, zig_queries.parse(allocator, "deep.zig", terminated));
+    }
+}
+
+test "deep Zig statement nesting fails closed before the Zig parser runs" {
+    const allocator = std.testing.allocator;
+    // Each repeated unit nests the next without a bracket of its own.
+    const units = [_][]const u8{ "if (a) ", "while (a) ", "x: for (a) |_| ", "return ", "defer ", "if (a) inline for (b) |_| " };
+    for (units) |unit| {
+        var source: std.ArrayList(u8) = .empty;
+        defer source.deinit(allocator);
+        try source.appendSlice(allocator, "fn f() void { ");
+        for (0..100_000) |_| try source.appendSlice(allocator, unit);
+        try source.appendSlice(allocator, "{} }");
         const terminated = try allocator.dupeZ(u8, source.items);
         defer allocator.free(terminated);
         try std.testing.expectError(error.NestingLimitExceeded, zig_queries.parse(allocator, "deep.zig", terminated));
