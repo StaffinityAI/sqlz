@@ -137,9 +137,9 @@ production code exists but the relevant 0.1 acceptance gates are not complete.
 | SQLite checked-query runtime | Partial | all four cardinalities, borrowed/owned rows, transactions, native pools, typed options, and enum codecs | non-STRICT storage validation, engine version enforcement, custom codecs, and poisoned-cleanup handling |
 | PostgreSQL checked-query runtime | Partial | all four cardinalities, borrowed/owned rows, transactions, native pools, enum codecs, one-dimensional arrays, and server-version enforcement | zio socket proof, live TLS, finalized server errors, cancellation/timeouts, and dirty-connection recovery |
 | Build integration and examples | Partial | lazy core/SQLite/PostgreSQL/both/TLS builds, host/target separation, offline checking, and runnable checked examples | complete invalidation matrix, atomic outputs, semantic cache keys, cross compilation, and release hardening |
-| Stateful database migrations | Not started | no database planner, state store, journal, lock, runner, or generated runtime migration bundle; discovery/replay above is offline only | ordinary planner through SQLite/PostgreSQL runners, status/history/plan operations, then checkpoint extensions |
+| Stateful database migrations | Not started | no database planner, state store, journal, lock, runner, or generated runtime migration bundle; discovery/replay above is offline only | ordinary planner through SQLite/PostgreSQL runners, status/history/plan operations, and the runtime bundle; checkpoint extensions are deferred to 0.2 |
 | Build-integrated CLI | Partial | registered-project routing for `bootstrap postgres` only | unified command shell, read-only and migration commands, confirmation, versioned JSON, and shared output/errors |
-| SQLite-to-PostgreSQL bootstrap | Partial | dedicated-schema reset, transactional private head replay, bound row transfer, sequence restoration, and one CI success path | shared migration primitives/state/journal/lock, stronger inspection and mapping, confirmation/JSON, and safety matrix |
+| SQLite-to-PostgreSQL bootstrap | Partial (experimental in 0.1; deferred to 0.2) | dedicated-schema reset, transactional private head replay, bound row transfer, sequence restoration, and one CI success path | shared migration primitives/state/journal/lock, stronger inspection and mapping, confirmation/JSON, and safety matrix |
 | Security, compatibility, CI, and release gates | Partial | core offline/service-backed gates, PostgreSQL 15-18 runtime matrix, and initial security design | traceability, full platform/engine/fuzz/recovery matrix, performance baselines, frozen formats/APIs, and release gate |
 
 The current dependency pins are Ziggy
@@ -151,8 +151,11 @@ implemented or claimed for 0.1.
 
 ## Implementation roadmap
 
-Each milestone ends with its stated acceptance gate. The 0.1 release requires
-all milestones; early milestones are not separate compatibility promises.
+Each milestone ends with its stated acceptance gate. Early milestones are not
+separate compatibility promises. The 0.1 release is the minimal production cut
+defined in [implementation-plan.md](implementation-plan.md#01-production-cut). It
+requires each milestone only within that cut; checkpoint compaction, builtin
+catalog supplements, telemetry, and the supported bootstrap are deferred to 0.2.
 
 ### M1: configuration, syntax, diagnostics, and graph foundations
 
@@ -188,8 +191,8 @@ all milestones; early milestones are not separate compatibility promises.
 
 - Implement versioned migration state, operation journal, locking,
   upgrade/downgrade/repair operations, unified host command, runtime bundles,
-  cache integration, lazy flags, and checkpoint-based history compaction for
-  empty-database bootstrap.
+  cache integration, and lazy flags. Checkpoint-based history compaction for
+  empty-database bootstrap is deferred to 0.2.
 - Gate: migration integration tests pass on SQLite and PostgreSQL, and the four-
   configuration build matrix proves disabled dependencies remain unused.
 

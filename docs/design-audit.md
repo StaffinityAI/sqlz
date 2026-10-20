@@ -22,7 +22,7 @@ is accepted.
 | Errors | payload ownership, privacy, telemetry | Resolved | [errors-and-observability.md](errors-and-observability.md) | M3–M5 |
 | Config | schema, roots, profiles, codecs, projects | Resolved | [configuration.md](configuration.md) | M1 |
 | Migrations | DAG, files, convergence, transactions | Resolved | [migrations.md](migrations.md) | M1–M5 |
-| Compaction | checkpoint replacement and source pruning | Proposed | [adr/0036-checkpoint-migrations-and-history-compaction.md](adr/0036-checkpoint-migrations-and-history-compaction.md) | M5 |
+| Compaction | checkpoint replacement and source pruning | Proposed; deferred to 0.2 | [adr/0036-checkpoint-migrations-and-history-compaction.md](adr/0036-checkpoint-migrations-and-history-compaction.md) | M5 |
 | State | identity, checksums, journal, upgrades | Resolved; checkpoint extension proposed | [migration-state.md](migration-state.md) | M5 |
 | CLI | unified commands, JSON, confirmations | Resolved | [cli.md](cli.md) | M5 |
 | Compatibility | SemVer, formats, Zig/DB/platform matrix | Resolved | [compatibility.md](compatibility.md) | M6 |

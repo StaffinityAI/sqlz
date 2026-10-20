@@ -1,17 +1,22 @@
 # Implementation plan
 
 This is the dependency-ordered implementation plan for finishing sqlz 0.1. It is
-the authority on implementation status; the other documents define normative
-behavior. Update a slice when work is completed, split, deferred, or newly
-discovered.
+the authority on implementation status and release scope; the other documents
+define normative behavior. Update a slice when work is completed, split, deferred,
+or newly discovered.
 
-“Finished” means every required slice below satisfies its acceptance gate and the
-0.1 release gate passes. Checkpoint migrations and history compaction are included
-because the current M5 roadmap requires them, but implementation starts only after
-[ADR 0036](adr/0036-checkpoint-migrations-and-history-compaction.md) is accepted or
-superseded. The project-backed SQLite-to-PostgreSQL import has additional detail in
-[sqlite-postgres-bootstrap-plan.md](sqlite-postgres-bootstrap-plan.md); keep both
-trackers synchronized.
+sqlz 0.1 is a **minimal production-ready cut** for SQLite and PostgreSQL, defined
+in [0.1 production cut](#01-production-cut) below. “Finished” means every slice in
+that cut satisfies its **0.1 gate** and the 0.1 release gate passes. Each slice
+keeps its full deliverables and acceptance gate as the long-term target; a
+**0.1 scope** paragraph narrows what the release requires. Work outside the cut is
+deferred to 0.2, which also completes the reduced slices.
+
+Checkpoint migrations and history compaction
+([ADR 0036](adr/0036-checkpoint-migrations-and-history-compaction.md)) and the
+SQLite-to-PostgreSQL bootstrap are deferred to 0.2. The bootstrap has additional
+detail in [sqlite-postgres-bootstrap-plan.md](sqlite-postgres-bootstrap-plan.md);
+keep both trackers synchronized.
 
 Status vocabulary:
 
@@ -19,7 +24,8 @@ Status vocabulary:
 - **Partial**: a usable foundation exists, but the acceptance gate is not met.
 - **Not started**: no production implementation exists.
 - **Blocked**: work depends on an unresolved design or upstream issue.
-- **Post-0.1**: deliberately outside the release scope.
+- **Deferred to 0.2**: outside the 0.1 production cut, planned for 0.2.
+- **Post-0.1**: deliberately outside the release scope with no planned release.
 
 ## Current baseline
 
@@ -50,6 +56,90 @@ The checked-query surface is functional but still has source-manager, parser,
 catalog, codec, generated-API, runtime-safety, observability, build, and release
 hardening gaps.
 
+## 0.1 production cut
+
+### Definition
+
+0.1 is the smallest release an application can run in production against SQLite
+or PostgreSQL. Production-ready means:
+
+1. **Migrations are applied safely.** An application upgrades or downgrades its
+   database from the generated runtime bundle at startup or through the CLI. Every
+   run holds a lock, validates project identity and revision checksums, records
+   applied state only at transaction boundaries, and leaves a journal from which an
+   interrupted run can be diagnosed and explicitly resolved.
+2. **Queries never return wrong data silently.** Storage-class and range mismatches
+   are structured errors. Unsupported engine versions are rejected. Connections
+   with failed cleanup are discarded rather than reused.
+3. **Ordinary application types work.** UUID, JSON, date/time, nullable values,
+   enums, and custom scalar codecs bind and decode on both backends.
+4. **Errors can be acted on and are safe to log.** Runtime errors carry backend,
+   operation, SQLite extended code or PostgreSQL SQLSTATE, and constraint fields.
+   The redacted subset never contains values or credentials.
+5. **Connections are secure.** PostgreSQL TLS verifies the CA and hostname, with
+   tests that use real certificates.
+6. **Untrusted input fails closed.** Configured paths, symlinks, input limits, and
+   arbitrary source bytes cannot escape roots, panic, hang, or bypass limits.
+7. **Persisted formats are frozen.** Configuration, format-1 manifests, database
+   state, journal, runtime bundle, CLI JSON, and diagnostic codes are versioned and
+   have backward-read fixtures.
+8. **The claims are tested.** CI covers x86_64 Linux and arm64 macOS, PostgreSQL
+   15-18, and bundled SQLite, plus migration recovery and CLI jobs.
+
+### Slice scope
+
+| Slice | Status | 0.1 scope |
+| --- | --- | --- |
+| 1. Status documentation | Complete | Full |
+| 2. Source trust boundaries and config enforcement | Partial | Full |
+| 3. Source manager and lexer | Partial | Full |
+| 4. SQL and migration-DDL surface | Partial | Reduced: freeze the current subset; downgrade checking and opaque directive |
+| 5. Builtin catalogs and supplements | Not started | Deferred to 0.2 |
+| 6. Semantic diagnostics and warnings | Partial | Reduced: stable error codes, no fallback spans, minimal warnings |
+| 7. Application types and codecs | Partial | Full, except custom-codec arrays |
+| 8. Generated and embedded query metadata | Partial | Reduced: no query IDs |
+| 9. Runtime errors and telemetry | Partial | Reduced: errors only; telemetry deferred |
+| 10. SQLite runtime safety | Partial | Full |
+| 11. PostgreSQL runtime conformance | Partial | Full |
+| 12. Build invalidation and atomic cache | Partial | Reduced: no cross compilation or checkpoint inputs |
+| 13. Migration design gates | Not started | Reduced: ordinary state, lock, and journal decisions only |
+| 14. Ordinary migration planner | Not started | Full |
+| 15. Migration identity and checksums | Not started | Full, with a fixed builtin-semantics version instead of supplements |
+| 16. Database state store | Not started | Full |
+| 17. Operation journal and recovery | Not started | Full, except confirmed pruning |
+| 18. SQLite migration runner | Not started | Full, except telemetry |
+| 19. PostgreSQL migration runner | Not started | Full, except telemetry |
+| 20. Status, history, and plan operations | Not started | Full |
+| 21-23. Checkpoints and history compaction | Not started | Deferred to 0.2 |
+| 24. Runtime migration bundles and APIs | Not started | Full, without checkpoint data |
+| 25. Unified CLI shell | Partial | Reduced: no authoring commands |
+| 26. Migration and state CLI commands | Not started | Reduced: upgrade, downgrade, stamp, repair, journal show |
+| 27-29. Bootstrap hardening and convergence | Partial | Deferred to 0.2; existing command ships as experimental |
+| 30. Security and privacy verification | Partial | Reduced to the 0.1 surface |
+| 31. CI matrix | Partial | Reduced: bundled SQLite only; no checkpoint or bootstrap jobs |
+| 32. Performance | Not started | Reduced: recorded baselines, no numeric gates |
+| 33. Freeze formats and APIs | Not started | Full for the 0.1 surface |
+| 34. Release gate | Not started | Full for the 0.1 surface |
+
+### Execution order
+
+Work proceeds in waves. Each wave lists the slices that can run in parallel:
+
+1. **Unblock:** finish slice 2; decide slice 13 (ordinary migration design
+   only); slice 3.
+2. **Migration core (backend-neutral, testable offline):** slices 14, 15, 16, and
+   17, in that order. In parallel, the downgrade-checking and opaque-directive
+   parts of slice 4, because the runners execute downgrade SQL.
+3. **Runtime hardening (parallel with wave 2):** slices 9 (errors), 7, 10, 11, and
+   the reduced slices 6 and 8.
+4. **Runners and runtime API:** slices 18 and 19 in parallel, then 20 and 24.
+5. **CLI:** reduced slices 25 and 26.
+6. **Release:** reduced slices 12, 30, 31, and 32, then 33 and 34.
+
+The critical path is 2 → 13 → 14 → 15 → 16 → 17 → 18/19 → 20 → 24 → 26 → 33 → 34.
+Slice 13 is the next decision point: it is design-only, and it gates all migration
+execution.
+
 ## Ordered feature slices
 
 ### 1. Reconcile current-status documentation
@@ -75,6 +165,8 @@ subsystem and matches this plan, the public README, and the codebase.
 **Status:** Partial
 
 **Depends on:** Slice 1
+
+**0.1 scope:** Full.
 
 **Deliverables:**
 
@@ -104,6 +196,8 @@ documented deferral exists for every format-1 configuration field.
 
 **Depends on:** Slice 2
 
+**0.1 scope:** Full.
+
 **Deliverables:**
 
 - Accept a UTF-8 BOM while excluding it from displayed source columns; reject
@@ -127,6 +221,16 @@ arbitrary bytes and deep nesting cannot panic, hang, or bypass configured limits
 **Status:** Partial
 
 **Depends on:** Slice 3
+
+**0.1 scope:** Reduced. The supported 0.1 query and DDL surface is the subset
+implemented today, recorded as a checked matrix with positive and negative fixtures;
+widening it is 0.2 work. Version profiles are limited to rejecting PostgreSQL majors
+outside 15-18 and SQLite profiles other than the reviewed `bundled` profile. Per-
+version capability gates are deferred. Required: `-- sqlz.opaque: no-schema-change`,
+downgrade-SQL parsing and type checking, and upgrade-then-downgrade round trips. The
+runners in slices 18-19 execute downgrade SQL, so they depend on this. **0.1 gate:**
+the matrix of the current subset, the opaque-directive suite, and the reversible
+round-trip suite pass on both backend catalogs.
 
 **Deliverables:**
 
@@ -153,9 +257,15 @@ round-trip suites pass on both backend catalogs.
 
 ### 5. Implement versioned builtin catalogs and project supplements
 
-**Status:** Not started
+**Status:** Deferred to 0.2
 
 **Depends on:** Slices 2-4
+
+**0.1 scope:** Deferred. 0.1 keeps the reviewed hard-coded builtin semantics,
+documents them as the 0.1 builtin catalog, and identifies them by a fixed builtin-
+semantics version that is included in cache keys and the slice 15 fingerprint.
+Project supplements are not loaded. Slice 2 must either reject the supplement
+configuration field or document its deferral.
 
 **Deliverables:**
 
@@ -180,7 +290,14 @@ precedence, conflicts, and provenance for SQLite 3.45-3.53 and PostgreSQL 15-18.
 
 **Status:** Partial
 
-**Depends on:** Slices 4-5
+**Depends on:** Slice 4
+
+**0.1 scope:** Reduced. Required: a stable code and a real primary span for every
+error, no unexplained file-start fallback, accumulation across files, and a frozen
+error-code registry. The 0.1 warnings are limited to `SELECT *` and an explicitly
+allowed newer engine, and `warnings_as_errors` and the warning caps apply to both.
+The rest of the warning registry is deferred. **0.1 gate:** every registered code
+has human and JSON golden coverage, and multi-file discovery accumulates to the cap.
 
 **Deliverables:**
 
@@ -201,7 +318,10 @@ and no known checker failure uses an unexplained file-start fallback.
 
 **Status:** Partial
 
-**Depends on:** Slices 5-6
+**Depends on:** Slice 6
+
+**0.1 scope:** Full, except arrays of custom-codec values, which are rejected with a
+diagnostic in 0.1.
 
 **Deliverables:**
 
@@ -226,6 +346,14 @@ borrowed/owned custom scalars, nullability, errors, UUIDs, and supported arrays;
 
 **Depends on:** Slice 7
 
+**0.1 scope:** Reduced. Required: resolve the `Row`/`OwnedRow` contract, PostgreSQL
+metadata for embedded declarations (embedded PostgreSQL queries must execute live),
+one documented surface for named and embedded queries, and byte-identical
+regeneration. Stable query IDs and telemetry metadata are deferred together with
+telemetry. Freeze the limitation on imported or qualified `.params`/`.row` types
+with compile fixtures. **0.1 gate:** embedded PostgreSQL queries execute live, and
+repeated generation is byte-identical.
+
 **Deliverables:**
 
 - Resolve the `Row`/`OwnedRow` promise by emitting named declarations or revising
@@ -247,9 +375,14 @@ repeated generation is byte-identical for identical logical input.
 
 ### 9. Finalize runtime error and telemetry contracts
 
-**Status:** Partial for errors; telemetry not started
+**Status:** Partial for errors; telemetry deferred to 0.2
 
 **Depends on:** Slices 6-8
+
+**0.1 scope:** Reduced to the error contract: finalized owned `sqlz.Error` fields,
+the redacted safe subset, and ownership and allocation-failure tests. The lifecycle
+callback framework and all telemetry events, including migration events, are
+deferred to 0.2.
 
 **Deliverables:**
 
@@ -274,7 +407,9 @@ owned by the slices implementing those operations.
 
 **Status:** Partial
 
-**Depends on:** Slices 7 and 9
+**Depends on:** Slices 7 and 9 (errors)
+
+**0.1 scope:** Full.
 
 **Deliverables:**
 
@@ -297,7 +432,11 @@ drain, and pool-replacement matrices pass and match the runtime/type-system docs
 **Status:** Partial; some pooled payload detail is blocked by pinned `pg.zig`
 recovery behavior
 
-**Depends on:** Slices 7 and 9
+**Depends on:** Slices 7 and 9 (errors)
+
+**0.1 scope:** Full. A single zio direct-and-pool smoke test meets the zio
+deliverable. Any pinned `pg.zig` limitation is linked and documented rather than
+blocking.
 
 **Deliverables:**
 
@@ -320,7 +459,16 @@ and version overrides; any upstream limitation is linked and narrowly documented
 
 **Status:** Partial
 
-**Depends on:** Slices 2, 5, and 8
+**Depends on:** Slices 2 and 8
+
+**0.1 scope:** Reduced. Required: invalidation for edits, additions, and removals of
+SQL, Zig, Ziggy, and migration inputs; multiple projects and ambiguous routing;
+atomic output replacement with interruption tests; proof that disabled drivers are
+never fetched, imported, linked, or embedded; and separating local cache keys from
+the slice 15 fingerprint. Cross-compilation fixtures, supplements, and
+checkpoint/`history.ziggy` registration are deferred. **0.1 gate:** fixtures cover
+every 0.1 invalidation transition, warm hits, generation failure points, and backend
+combinations.
 
 **Deliverables:**
 
@@ -342,9 +490,18 @@ hit, generation failure point, project/backend combination, and host/target spli
 
 ### 13. Close migration and bootstrap design gates
 
-**Status:** Blocked
+**Status:** Not started (no longer blocked: checkpoints are deferred)
 
 **Depends on:** Slices 1-2
+
+**0.1 scope:** Reduced to ordinary migrations. Required: physical state table and
+schema names, advisory-lock key derivation, the SQLite lock and timeout policy,
+statement-journal boundaries for PostgreSQL `never` revisions, the public migration
+result identifiers, and the security decisions on privileges, ownership,
+confirmation, and journal payloads. ADR 0036 stays Proposed and is decided with the
+0.2 checkpoint work. The bootstrap ADR is deferred with the bootstrap. **0.1 gate:**
+an accepted ADR or implementation notes leave no open decision required by slices
+14-20 and 24-26.
 
 **Deliverables:**
 
@@ -366,6 +523,8 @@ open architectural decision required by slices 14-29.
 
 **Depends on:** Slices 2, 4, and 13
 
+**0.1 scope:** Full.
+
 **Deliverables:**
 
 - Model format-1 physical applied revisions, unknown state, and unavailable SQL
@@ -386,7 +545,11 @@ and irreversible preflight without a database connection.
 
 **Status:** Not started
 
-**Depends on:** Slices 5, 12-14
+**Depends on:** Slices 12-14
+
+**0.1 scope:** Full. The fingerprint includes the fixed builtin-semantics version
+from slice 5 instead of supplement identity. Checkpoint and history fields are added
+in 0.2 without changing format-1 meaning.
 
 **Deliverables:**
 
@@ -406,7 +569,9 @@ runtime/CLI error.
 
 **Status:** Not started
 
-**Depends on:** Slices 9, 13-15
+**Depends on:** Slices 9 (errors) and 13-15
+
+**0.1 scope:** Full.
 
 **Deliverables:**
 
@@ -429,6 +594,9 @@ fixtures produce equivalent logical snapshots for the same ordinary history.
 
 **Depends on:** Slices 13 and 16
 
+**0.1 scope:** Full, except confirmed journal pruning. 0.1 retains journals
+indefinitely, and pruning is deferred.
+
 **Deliverables:**
 
 - Record append-only command runs and ordered revision/statement steps using only
@@ -448,7 +616,9 @@ continuation is ambiguous.
 
 **Status:** Not started
 
-**Depends on:** Slices 10 and 14-17
+**Depends on:** Slices 4 (downgrade checking), 10, and 14-17
+
+**0.1 scope:** Full, except lifecycle telemetry, which is deferred with slice 9.
 
 **Deliverables:**
 
@@ -470,7 +640,9 @@ identity/checksum drift, journal visibility, and poisoned connection handling.
 
 **Status:** Not started
 
-**Depends on:** Slices 11 and 14-17
+**Depends on:** Slices 4 (downgrade checking), 11, and 14-17
+
+**0.1 scope:** Full, except lifecycle telemetry, which is deferred with slice 9.
 
 **Deliverables:**
 
@@ -497,6 +669,8 @@ SQLite runner.
 
 **Depends on:** Slices 14-19
 
+**0.1 scope:** Full.
+
 **Deliverables:**
 
 - Expose shared read-only state validation, target resolution, status, history, and
@@ -512,9 +686,11 @@ state facts and equivalent runtime, human, and JSON plans for shared fixtures.
 
 ### 21. Implement checkpoint manifest format and planner extension
 
-**Status:** Blocked on Slice 13
+**Status:** Deferred to 0.2
 
 **Depends on:** Slices 13-20
+
+**0.1 scope:** Deferred.
 
 **Deliverables:**
 
@@ -535,9 +711,11 @@ partial deployment, and finalized-ID reuse.
 
 ### 22. Verify checkpoint equivalence and fresh selection
 
-**Status:** Not started
+**Status:** Deferred to 0.2
 
 **Depends on:** Slice 21
+
+**0.1 scope:** Deferred.
 
 **Deliverables:**
 
@@ -557,9 +735,11 @@ historical coexistence, and refusal to jump from partial history on both backend
 
 ### 23. Implement checkpoint state, adoption, and finalization
 
-**Status:** Not started
+**Status:** Deferred to 0.2
 
 **Depends on:** Slices 17 and 21-22
+
+**0.1 scope:** Deferred.
 
 **Deliverables:**
 
@@ -584,7 +764,12 @@ finalization, and repeated compaction.
 
 **Status:** Not started
 
-**Depends on:** Slices 14-23
+**Depends on:** Slices 14-20
+
+**0.1 scope:** Full, without checkpoint paths and history tombstones. The bundle
+format reserves a version bump for adding them in 0.2. **0.1 gate:** runtime and
+host planning match for all ordinary fixtures, both runners execute generated
+bundles, and disabled backends add no bundle code.
 
 **Deliverables:**
 
@@ -607,6 +792,12 @@ the generated bundle and checker metadata.
 
 **Depends on:** Slices 6, 12, and 20
 
+**0.1 scope:** Reduced. Required: project routing, shared argument, connection,
+confirmation, output, redaction, and exit-code handling; versioned JSON; and the
+`check`, `status`, `history`, and `plan` commands. The authoring commands `init`,
+`revision create`, and `revision merge` are deferred; authors write manifests by
+hand in 0.1. **0.1 gate:** the command matrix covers the 0.1 commands.
+
 **Deliverables:**
 
 - Route `zig build sqlz -- <command>` across registered projects; infer a project
@@ -627,7 +818,14 @@ without mutation.
 
 **Status:** Not started
 
-**Depends on:** Slices 18-25
+**Depends on:** Slices 18-20 and 25
+
+**0.1 scope:** Reduced to `upgrade`, confirmed `downgrade`, `state stamp` (adopting
+an existing database), `state repair` (resolving an incomplete command run recorded
+by the journal), and `journal show`. `state init` is implicit in upgrade. `state
+rebind`, `journal prune`, and all checkpoint commands are deferred. **0.1 gate:**
+CLI and runtime plans are equivalent, and each 0.1 command has human/JSON,
+confirmation, failure, and both-backend fixtures.
 
 **Deliverables:**
 
@@ -644,9 +842,14 @@ human/JSON, confirmation, failure, and backend integration fixtures where releva
 
 ### 27. Harden bootstrap transfer planning and source inspection
 
-**Status:** Partial
+**Status:** Deferred to 0.2 (initial implementation exists)
 
 **Depends on:** Slices 2, 7, 10, and 15-16
+
+**0.1 scope:** Deferred. The existing `bootstrap postgres` command ships in 0.1 as
+**experimental**: it is documented as such, excluded from compatibility and format
+guarantees, and kept green by its existing CI path. Its private head replay is not a
+0.1 migration path.
 
 **Deliverables:**
 
@@ -669,9 +872,11 @@ state/structure mismatch, snapshot stability, overflow, and deterministic order.
 
 ### 28. Converge bootstrap on shared migration and CLI primitives
 
-**Status:** Partial
+**Status:** Deferred to 0.2 (initial implementation exists)
 
 **Depends on:** Slices 19-20 and 25-27
+
+**0.1 scope:** Deferred. See slice 27.
 
 **Deliverables:**
 
@@ -692,9 +897,11 @@ wiped managed destinations.
 
 ### 29. Complete bootstrap safety and version coverage
 
-**Status:** Partial
+**Status:** Deferred to 0.2 (initial implementation exists)
 
 **Depends on:** Slice 28
+
+**0.1 scope:** Deferred. See slice 27.
 
 **Deliverables:**
 
@@ -715,7 +922,12 @@ supported PostgreSQL majors and public command examples match the implementation
 
 **Status:** Partial
 
-**Depends on:** Slices 2 and 9-29
+**Depends on:** Slices 2, 9-20, and 24-26
+
+**0.1 scope:** Reduced to the 0.1 surface. The traceability table covers every
+`security.md` promise that applies to 0.1 features and marks checkpoint, bootstrap,
+and telemetry promises as deferred. Redaction tests cover runtime errors, human and
+JSON output, journals, and connection URLs.
 
 **Deliverables:**
 
@@ -737,6 +949,14 @@ supported PostgreSQL majors and public command examples match the implementation
 
 **Depends on:** Feature slices as they land
 
+**0.1 scope:** Reduced. Required: the full runtime suite on x86_64 Linux and arm64
+macOS; a Windows compile check; PostgreSQL 15-18; bundled SQLite; certificate TLS;
+the zio smoke test; state, lock, and recovery jobs; CLI jobs; and parser, manifest,
+graph, and planner fuzz suites with retained corpora. The SQLite 3.45-3.53
+differential jobs (only the bundled profile ships), cross compilation, checkpoint
+jobs, and bootstrap failure jobs are deferred. **0.1 gate:** the CI matrix matches
+the 0.1 rows of `testing.md` and `compatibility.md`.
+
 **Deliverables:**
 
 - Run full runtime suites on x86_64 Linux and arm64 macOS; compile-check Windows.
@@ -754,7 +974,12 @@ supported PostgreSQL majors and public command examples match the implementation
 
 **Status:** Not started
 
-**Depends on:** Slices 8, 18-19, 24, and 29
+**Depends on:** Slices 8, 18-19, and 24
+
+**0.1 scope:** Reduced to reproducible runners and recorded baselines for cold and
+warm checking, row decoding, pools, and runtime migration. Numeric regression gates,
+driver comparisons, and bootstrap benchmarks are deferred. **0.1 gate:** each 0.1
+benchmark has a runner and a recorded, versioned baseline.
 
 **Deliverables:**
 
@@ -773,7 +998,12 @@ reproducible runner, recorded baseline, owner, and enforced numeric threshold.
 
 **Status:** Not started
 
-**Depends on:** Slices 1-32
+**Depends on:** Slices 1-32 within the 0.1 cut
+
+**0.1 scope:** Full for the 0.1 surface: configuration, format-1 manifests,
+generated-query metadata, the migration bundle, CLI JSON, database state, the
+journal, and diagnostic codes. The history registry and checkpoint formats are
+frozen in 0.2. The documentation marks deferred features as such.
 
 **Deliverables:**
 
@@ -792,7 +1022,10 @@ missing required 0.1 row and all persisted-format compatibility fixtures pass.
 
 **Status:** Not started
 
-**Depends on:** Slices 1-33
+**Depends on:** Slices 1-33 within the 0.1 cut
+
+**0.1 scope:** Full for the 0.1 surface. Published claims name the experimental
+bootstrap and the deferred 0.2 scope.
 
 **Deliverables:**
 
@@ -810,42 +1043,62 @@ all green; remaining work is only the post-0.1 scope below.
 
 ## Dependency summary
 
-The critical path is:
+The 0.1 critical path and execution waves are listed in
+[0.1 production cut](#01-production-cut). The full dependency order, including 0.2
+work, is:
 
 1. Source/checker/runtime foundations: slices 1-12.
 2. Design decisions and ordinary migration core: slices 13-20.
-3. Checkpoint extension: slices 21-23.
+3. Checkpoint extension (0.2): slices 21-23.
 4. Runtime migration and unified CLI: slices 24-26.
-5. Bootstrap hardening and convergence: slices 27-29.
+5. Bootstrap hardening and convergence (0.2): slices 27-29.
 6. Release verification and stabilization: slices 30-34.
 
 SQLite and PostgreSQL runners branch independently from the shared planner, state,
 and journal. Ordinary migration work remains separate from checkpoint extensions.
 Query/catalog/codec hardening may proceed in parallel with the ordinary migration
 core where the listed dependencies permit it. No CLI or bootstrap feature may grow
-a private planner, state store, journal, or migration runner.
+a private planner, state store, journal, or migration runner; the experimental 0.1
+bootstrap is the single documented exception until slice 28 lands.
 
 ## Tracked current divergences
 
-| Promise or contract | Current state | Closing slice |
-| --- | --- | --- |
-| All configuration limits and path boundaries are enforced | Only part of the limits and lexical path checks are active | 2-3 |
-| Source manager follows BOM/UTF-8/column/line-ending rules | Position mapping exists; the full contract lacks coverage | 3 |
-| Full documented query/DDL subset, opaque directives, and downgrade checks | A practical subset exists; unsupported and round-trip gaps remain | 4 |
-| Versioned builtin catalogs and supplements | Narrow hard-coded semantics exist; supplements are not loaded | 5 |
-| Complete diagnostics and warning policy | Core cases are rich; some failures are generic and warnings are absent | 6 |
-| General codecs and documented builtin application types | Derived enums work; general codecs and UUID are absent | 7 |
-| Named rows, embedded backend metadata, stable query IDs | Generated/embedded metadata remains incomplete | 8 |
-| Detailed structured errors and telemetry | Basic owned errors exist; telemetry is absent | 9 |
-| Non-STRICT validation, SQLite version policy, rollback poisoning | Partial range checks/runtime cleanup exist | 10 |
-| PostgreSQL zio sockets, live TLS, detailed pooled errors | Plain TCP and TLS compilation exist | 11 |
-| Automated invalidation, atomic output, semantic cache keys | Inputs are broadly registered but guarantees are incomplete | 12 |
-| Stateful ordinary migration planner/state/journal/runners | Only graph discovery and offline replay exist | 14-20 |
-| Checkpoints/history compaction | Designed, ADR still Proposed, no code exists | 13, 21-23 |
-| Runtime migration module | Not generated | 24 |
-| Full unified CLI | Bootstrap-only operational routing exists | 25-26 |
-| Bootstrap uses normal state/runner and full safety matrix | Private head replay and initial transfer path exist | 27-29 |
-| Full security/platform/fuzz/performance/compatibility gates | Core CI exists; release matrix is incomplete | 30-34 |
+| Promise or contract | Current state | Closing slice | Release |
+| --- | --- | --- | --- |
+| All configuration limits and path boundaries are enforced | Only part of the limits and lexical path checks are active | 2-3 | 0.1 |
+| Source manager follows BOM/UTF-8/column/line-ending rules | Position mapping exists; the full contract lacks coverage | 3 | 0.1 |
+| Full documented query/DDL subset, opaque directives, and downgrade checks | A practical subset exists; unsupported and round-trip gaps remain | 4 | 0.1 (reduced); full surface 0.2 |
+| Versioned builtin catalogs and supplements | Narrow hard-coded semantics exist; supplements are not loaded | 5 | 0.2 |
+| Complete diagnostics and warning policy | Core cases are rich; some failures are generic and warnings are absent | 6 | 0.1 (reduced); full warnings 0.2 |
+| General codecs and documented builtin application types | Derived enums work; general codecs and UUID are absent | 7 | 0.1 |
+| Named rows, embedded backend metadata, stable query IDs | Generated/embedded metadata remains incomplete | 8 | 0.1 (reduced); query IDs 0.2 |
+| Detailed structured errors and telemetry | Basic owned errors exist; telemetry is absent | 9 | 0.1 errors; telemetry 0.2 |
+| Non-STRICT validation, SQLite version policy, rollback poisoning | Partial range checks/runtime cleanup exist | 10 | 0.1 |
+| PostgreSQL zio sockets, live TLS, detailed pooled errors | Plain TCP and TLS compilation exist | 11 | 0.1 |
+| Automated invalidation, atomic output, semantic cache keys | Inputs are broadly registered but guarantees are incomplete | 12 | 0.1 (reduced); cross compilation 0.2 |
+| Stateful ordinary migration planner/state/journal/runners | Only graph discovery and offline replay exist | 14-20 | 0.1 |
+| Checkpoints/history compaction | Designed, ADR still Proposed, no code exists | 13, 21-23 | 0.2 |
+| Runtime migration module | Not generated | 24 | 0.1 |
+| Full unified CLI | Bootstrap-only operational routing exists | 25-26 | 0.1 (reduced); authoring/prune/rebind 0.2 |
+| Bootstrap uses normal state/runner and full safety matrix | Private head replay and initial transfer path exist | 27-29 | 0.2; experimental in 0.1 |
+| Full security/platform/fuzz/performance/compatibility gates | Core CI exists; release matrix is incomplete | 30-34 | 0.1 (reduced) |
+
+## Deferred to 0.2
+
+These are planned and designed, but outside the 0.1 production cut:
+
+- versioned builtin catalogs and Ziggy project supplements (slice 5);
+- the full warning registry, stable query IDs, and lifecycle telemetry (slices 6,
+  8, and 9);
+- arrays of custom-codec values (slice 7);
+- widening the query/DDL surface and per-version capability gates for SQLite
+  3.45-3.53 beyond the bundled profile (slices 4 and 31);
+- checkpoint migrations and history compaction, including the ADR 0036 decision
+  (slices 13 and 21-23);
+- the authoring commands `init`, `revision create`, and `revision merge`, plus
+  `state rebind`, `journal prune`, and checkpoint commands (slices 17, 25, and 26);
+- the SQLite-to-PostgreSQL bootstrap as a supported command (slices 27-29);
+- cross-compilation fixtures and numeric performance gates (slices 12, 31, and 32).
 
 ## Explicit post-0.1 scope
 
