@@ -156,7 +156,8 @@ pub fn addProjectInputs(b: *std.Build, run: *std.Build.Step.Run, config: std.Bui
     var walker = directory.walk(b.allocator) catch @panic("out of memory");
     defer walker.deinit();
     while (walker.next(b.graph.io) catch return) |entry| {
-        if (entry.kind != .file or skipPath(entry.path) or !checkerInput(entry.basename)) continue;
+        if ((entry.kind != .file and entry.kind != .sym_link) or
+            skipPath(entry.path) or !checkerInput(entry.basename)) continue;
         run.addFileInput(b.path(b.pathJoin(&.{ root, entry.path })));
     }
 }

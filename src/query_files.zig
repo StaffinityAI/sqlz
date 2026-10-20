@@ -1,4 +1,5 @@
 const std = @import("std");
+const inputs = @import("sqlz_inputs");
 
 pub const Backends = struct {
     sqlite: bool = false,
@@ -243,11 +244,10 @@ fn sameNamespace(lhs: []const u8, rhs: []const u8) bool {
 /// variant. `discoverAll` leaves duplicates for the caller to report.
 pub fn discover(
     allocator: std.mem.Allocator,
-    io: std.Io,
+    project_inputs: *inputs.Inputs,
     root: std.Io.Dir,
-    max_source_bytes: usize,
 ) anyerror!Discovery {
-    var discovery = try discoverAll(allocator, io, root, max_source_bytes);
+    var discovery = try discoverAll(allocator, project_inputs, root);
     errdefer discovery.deinit();
     for (0..discovery.sources.len) |index| {
         if (duplicateVariant(discovery.sources, index) != null) return error.DuplicateQueryVariant;
@@ -273,10 +273,10 @@ pub fn duplicateVariant(sources: []const Source, index: usize) ?usize {
 
 pub fn discoverAll(
     allocator: std.mem.Allocator,
-    io: std.Io,
+    project_inputs: *inputs.Inputs,
     root: std.Io.Dir,
-    max_source_bytes: usize,
 ) anyerror!Discovery {
+    const io = project_inputs.io;
     var paths: std.ArrayList([]const u8) = .empty;
     defer {
         for (paths.items) |path| allocator.free(path);
@@ -285,8 +285,9 @@ pub fn discoverAll(
     var walker = try root.walk(allocator);
     defer walker.deinit();
     while (try walker.next(io)) |entry| {
-        if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".sql") or
-            hiddenPath(entry.path)) continue;
+        if (hiddenPath(entry.path)) continue;
+        const kind = try project_inputs.entryKind(entry.dir, entry.basename, entry.kind);
+        if (kind != .file or !std.mem.endsWith(u8, entry.path, ".sql")) continue;
         try paths.append(allocator, try allocator.dupe(u8, entry.path));
     }
     std.mem.sort([]const u8, paths.items, {}, struct {
@@ -294,6 +295,9 @@ pub fn discoverAll(
             return std.mem.lessThan(u8, lhs, rhs);
         }
     }.lessThan);
+    // Each file is one query, so the limit applies before any is read, and
+    // in path order so the reported file is deterministic.
+    for (paths.items) |path| try project_inputs.countQueries(root, path, 1);
 
     var sources: std.ArrayList(Source) = .empty;
     errdefer {
@@ -301,7 +305,7 @@ pub fn discoverAll(
         sources.deinit(allocator);
     }
     for (paths.items) |path| {
-        const contents = try root.readFileAlloc(io, path, allocator, .limited(max_source_bytes));
+        const contents = try project_inputs.readFile(allocator, root, path);
         defer allocator.free(contents);
         var source = try parse(allocator, path, contents);
         errdefer source.deinit();
@@ -334,7 +338,8 @@ fn hiddenPath(path: []const u8) bool {
     while (components.next()) |component| {
         if (component.len > 0 and component[0] == '.') return true;
         if (std.mem.eql(u8, component, "zig-cache") or
-            std.mem.eql(u8, component, "zig-out")) return true;
+            std.mem.eql(u8, component, "zig-out") or
+            std.mem.eql(u8, component, "zig-pkg")) return true;
     }
     return false;
 }

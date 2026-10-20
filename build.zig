@@ -47,6 +47,12 @@ pub fn build(b: *std.Build) !void {
         .target = host_target,
         .optimize = optimize,
     });
+    const inputs_mod = b.addModule("sqlz_inputs", .{
+        .root_source_file = b.path("src/inputs.zig"),
+        .target = host_target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "sqlz_diagnostics", .module = diagnostics_mod }},
+    });
     // An adapter module is published exactly when its option is enabled, even
     // before its lazy driver is fetched, so `addProject` can tell a disabled
     // backend from one still being fetched.
@@ -136,6 +142,7 @@ pub fn build(b: *std.Build) !void {
         .imports = &.{
             .{ .name = "ziggy", .module = ziggy_dep.module("ziggy") },
             .{ .name = "sqlz_diagnostics", .module = diagnostics_mod },
+            .{ .name = "sqlz_inputs", .module = inputs_mod },
         },
     });
     const ir_mod = b.addModule("sqlz_ir", .{
@@ -158,12 +165,16 @@ pub fn build(b: *std.Build) !void {
         .root_source_file = b.path("src/query_files.zig"),
         .target = host_target,
         .optimize = optimize,
+        .imports = &.{.{ .name = "sqlz_inputs", .module = inputs_mod }},
     });
     const zig_queries_mod = b.addModule("sqlz_zig_queries", .{
         .root_source_file = b.path("src/zig_queries.zig"),
         .target = host_target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "sqlz_query_files", .module = query_files_mod }},
+        .imports = &.{
+            .{ .name = "sqlz_query_files", .module = query_files_mod },
+            .{ .name = "sqlz_inputs", .module = inputs_mod },
+        },
     });
     const checker_mod = b.addModule("sqlz_checker", .{
         .root_source_file = b.path("src/checker.zig"),
@@ -213,6 +224,7 @@ pub fn build(b: *std.Build) !void {
             .{ .name = "sqlz_generator", .module = generator_mod },
             .{ .name = "sqlz_catalog", .module = catalog_mod },
             .{ .name = "sqlz_diagnostics", .module = diagnostics_mod },
+            .{ .name = "sqlz_inputs", .module = inputs_mod },
         },
     });
     const codegen_exe = b.addExecutable(.{
@@ -252,6 +264,7 @@ pub fn build(b: *std.Build) !void {
                 .{ .name = "sqlz_catalog", .module = catalog_mod },
                 .{ .name = "sqlz_checker", .module = checker_mod },
                 .{ .name = "sqlz_config", .module = config_mod },
+                .{ .name = "sqlz_inputs", .module = inputs_mod },
                 .{ .name = "sqlz_migrations", .module = migrations_mod },
                 .{ .name = "pg", .module = host_pg.module("pg") },
                 .{ .name = "zqlite", .module = host_zqlite.module("zqlite") },
@@ -431,6 +444,24 @@ pub fn build(b: *std.Build) !void {
     test_step.dependOn(&run_parser.step);
     offline_step.dependOn(&run_parser.step);
 
+    const inputs_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/inputs.zig"),
+            .target = host_target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "sqlz_codegen", .module = codegen_mod },
+                .{ .name = "sqlz_diagnostics", .module = diagnostics_mod },
+                .{ .name = "sqlz_inputs", .module = inputs_mod },
+            },
+        }),
+    });
+    const run_inputs = b.addRunArtifact(inputs_tests);
+    test_step.dependOn(&run_inputs.step);
+    offline_step.dependOn(&run_inputs.step);
+    const inputs_step = b.step("test-inputs", "Run project input boundary tests");
+    inputs_step.dependOn(&run_inputs.step);
+
     const config_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("test/config.zig"),
@@ -453,7 +484,10 @@ pub fn build(b: *std.Build) !void {
             .root_source_file = b.path("test/zig_queries.zig"),
             .target = host_target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "sqlz_zig_queries", .module = zig_queries_mod }},
+            .imports = &.{
+                .{ .name = "sqlz_zig_queries", .module = zig_queries_mod },
+                .{ .name = "sqlz_inputs", .module = inputs_mod },
+            },
         }),
     });
     const run_zig_queries = b.addRunArtifact(zig_query_tests);
@@ -487,6 +521,7 @@ pub fn build(b: *std.Build) !void {
                 .{ .name = "sqlz_migrations", .module = migrations_mod },
                 .{ .name = "ziggy", .module = ziggy_dep.module("ziggy") },
                 .{ .name = "sqlz_diagnostics", .module = diagnostics_mod },
+                .{ .name = "sqlz_inputs", .module = inputs_mod },
             },
         }),
     });
@@ -509,6 +544,7 @@ pub fn build(b: *std.Build) !void {
                 .{ .name = "sqlz_migrations", .module = migrations_mod },
                 .{ .name = "sqlz_query_files", .module = query_files_mod },
                 .{ .name = "sqlz_zig_queries", .module = zig_queries_mod },
+                .{ .name = "sqlz_inputs", .module = inputs_mod },
             },
         }),
     });
@@ -579,7 +615,10 @@ pub fn build(b: *std.Build) !void {
             .root_source_file = b.path("test/query_files.zig"),
             .target = host_target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "sqlz_query_files", .module = query_files_mod }},
+            .imports = &.{
+                .{ .name = "sqlz_query_files", .module = query_files_mod },
+                .{ .name = "sqlz_inputs", .module = inputs_mod },
+            },
         }),
     });
     const run_query_files = b.addRunArtifact(query_file_tests);

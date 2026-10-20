@@ -91,7 +91,7 @@ or PostgreSQL. Production-ready means:
 | Slice | Status | 0.1 scope |
 | --- | --- | --- |
 | 1. Status documentation | Complete | Full |
-| 2. Source trust boundaries and config enforcement | Partial | Full |
+| 2. Source trust boundaries and config enforcement | Complete | Full |
 | 3. Source manager and lexer | Partial | Full |
 | 4. SQL and migration-DDL surface | Partial | Reduced: freeze the current subset; downgrade checking and opaque directive |
 | 5. Builtin catalogs and supplements | Not started | Deferred to 0.2 |
@@ -125,8 +125,8 @@ or PostgreSQL. Production-ready means:
 
 Work proceeds in waves. Each wave lists the slices that can run in parallel:
 
-1. **Unblock:** finish slice 2; decide slice 13 (ordinary migration design
-   only); slice 3.
+1. **Unblock:** decide slice 13 (ordinary migration design only); slice 3.
+   Slice 2 is complete.
 2. **Migration core (backend-neutral, testable offline):** slices 14, 15, 16, and
    17, in that order. In parallel, the downgrade-checking and opaque-directive
    parts of slice 4, because the runners execute downgrade SQL.
@@ -136,7 +136,7 @@ Work proceeds in waves. Each wave lists the slices that can run in parallel:
 5. **CLI:** reduced slices 25 and 26.
 6. **Release:** reduced slices 12, 30, 31, and 32, then 33 and 34.
 
-The critical path is 2 → 13 → 14 → 15 → 16 → 17 → 18/19 → 20 → 24 → 26 → 33 → 34.
+The critical path is 13 → 14 → 15 → 16 → 17 → 18/19 → 20 → 24 → 26 → 33 → 34.
 Slice 13 is the next decision point: it is design-only, and it gates all migration
 execution.
 
@@ -162,7 +162,33 @@ subsystem and matches this plan, the public README, and the codebase.
 
 ### 2. Fix source trust boundaries and configuration enforcement
 
-**Status:** Partial
+**Status:** Complete
+
+**Landed:** `src/inputs.zig` is the single read boundary for the checker and
+bootstrap. It resolves the canonical project root, confines configured roots and
+every read (including symlinked files and fixed-name revision files) to it,
+never follows directory symlinks, and charges each read against `source_bytes`
+and `registered_source_bytes` before buffering. Revision and query counts are
+checked before the corresponding files are read. `sqlz.ziggy` is read under a
+fixed 1 MiB bound and then counted like any other input. Boundary errors are S021
+(limits) and S022 (paths) diagnostics naming the offending file. The threat model
+is in [security.md](security.md#threat-model); boundary and boundary-plus-one
+fixtures are in `test/inputs.zig`; `config.field_usage` and its test cover every
+format-1 field.
+
+Recorded deferrals, each owned by a later slice:
+
+- External-root registration: 0.1 has no build API for it, so every input must
+  resolve inside the project directory and nothing is exempt. Adding one needs a
+  `ProjectOptions` field and a configuration spelling for paths outside the root.
+- `tokens_per_source` and `nesting_depth` are accepted but enforced in slice 3.
+- `warnings_as_errors` has no effect until slice 6 introduces warnings.
+- `catalog_supplements` must be empty (rejected otherwise) until slice 5 (0.2).
+- Checkpoint manifests and `history.ziggy` are not read in 0.1 (slices 21-23); they
+  join the same boundary when they are.
+- `allow_untested_version`, profiles, project ID, and `migration_lock_timeout_ms`
+  are emitted as the generated `sqlz_project` namespace; the SQLite version gate
+  (slice 10) and the migration runners (slices 18-19) consume them.
 
 **Depends on:** Slice 1
 
@@ -264,7 +290,7 @@ round-trip suites pass on both backend catalogs.
 **0.1 scope:** Deferred. 0.1 keeps the reviewed hard-coded builtin semantics,
 documents them as the 0.1 builtin catalog, and identifies them by a fixed builtin-
 semantics version that is included in cache keys and the slice 15 fingerprint.
-Project supplements are not loaded. Slice 2 must either reject the supplement
+Project supplements are not loaded. Slice 2 rejects a non-empty supplement
 configuration field or document its deferral.
 
 **Deliverables:**
@@ -1065,7 +1091,7 @@ bootstrap is the single documented exception until slice 28 lands.
 
 | Promise or contract | Current state | Closing slice | Release |
 | --- | --- | --- | --- |
-| All configuration limits and path boundaries are enforced | Only part of the limits and lexical path checks are active | 2-3 | 0.1 |
+| All configuration limits and path boundaries are enforced | Paths, symlinks, byte, revision, query, and diagnostic limits are enforced; token and nesting limits are not | 3 | 0.1 |
 | Source manager follows BOM/UTF-8/column/line-ending rules | Position mapping exists; the full contract lacks coverage | 3 | 0.1 |
 | Full documented query/DDL subset, opaque directives, and downgrade checks | A practical subset exists; unsupported and round-trip gaps remain | 4 | 0.1 (reduced); full surface 0.2 |
 | Versioned builtin catalogs and supplements | Narrow hard-coded semantics exist; supplements are not loaded | 5 | 0.2 |

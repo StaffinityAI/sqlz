@@ -1,5 +1,4 @@
 const std = @import("std");
-const ziggy = @import("ziggy");
 const config = @import("sqlz_config");
 const migrations = @import("sqlz_migrations");
 const query_files = @import("sqlz_query_files");
@@ -9,6 +8,7 @@ const analysis = @import("sqlz_analysis");
 const catalog = @import("sqlz_catalog");
 const generator = @import("sqlz_generator");
 const diagnostics = @import("sqlz_diagnostics");
+const sqlz_inputs = @import("sqlz_inputs");
 
 pub const Error = error{
     UnboundCodec,
@@ -106,28 +106,49 @@ pub fn generateProjectWithOptions(
     options: GenerateOptions,
     diagnostic_list: ?*diagnostics.List,
 ) ![]u8 {
-    const bindings = options.codecs;
-    const raw_config = try project_dir.readFileAlloc(io, config_name, allocator, .limited(16 * 1024 * 1024));
-    defer allocator.free(raw_config);
-    const config_source = try allocator.dupeZ(u8, raw_config);
-    defer allocator.free(config_source);
-    var meta: ziggy.Deserializer.Meta = .init;
-    var loaded = try config.parse(allocator, config_source, &meta);
+    var loaded = try config.load(allocator, io, project_dir, config_name);
     defer loaded.deinit();
     const project = loaded.config();
+    var project_inputs = try sqlz_inputs.Inputs.init(allocator, io, project_dir, .fromConfig(project.limits));
+    defer project_inputs.deinit();
+    return generateLoaded(
+        allocator,
+        &loaded,
+        &project_inputs,
+        config_name,
+        options,
+        diagnostic_list,
+    ) catch |err| {
+        if (diagnostic_list) |list| {
+            if (try project_inputs.appendDiagnostic(list, err)) return error.ProjectCheckFailed;
+        }
+        return err;
+    };
+}
+
+fn generateLoaded(
+    allocator: std.mem.Allocator,
+    loaded: *const config.Loaded,
+    project_inputs: *sqlz_inputs.Inputs,
+    config_name: []const u8,
+    options: GenerateOptions,
+    diagnostic_list: ?*diagnostics.List,
+) ![]u8 {
+    const project = loaded.config();
+    const bindings = options.codecs;
+    if (diagnostic_list) |list|
+        list.setLimit(std.math.cast(usize, project.limits.diagnostics) orelse return error.InvalidLimit);
+    try project_inputs.register(config_name, loaded.source_len);
     if (options.runtime.sqlite and project.backends.sqlite == null)
         return error.RuntimeBackendWithoutProfile;
     if (options.runtime.postgres and project.backends.postgres == null)
         return error.RuntimeBackendWithoutProfile;
-    if (diagnostic_list) |list|
-        list.setLimit(std.math.cast(usize, project.limits.diagnostics) orelse return error.InvalidLimit);
     const sqlite_dialect: checker.SqliteDialect = if (project.backends.sqlite) |sqlite| .{
         .profile = checker.SqliteProfile.fromString(sqlite.profile) orelse unreachable,
     } else .{};
     const postgres_dialect: checker.PostgresDialect = if (project.backends.postgres) |postgres| .{
         .profile = checker.PostgresProfile.fromString(postgres.profile) orelse unreachable,
     } else .{};
-    const source_limit = std.math.cast(usize, project.limits.source_bytes) orelse return error.InvalidLimit;
 
     // Codec IDs and build bindings are one to one: the Ziggy file owns the
     // database patterns, `build.zig` owns the Zig declaration, and neither side
@@ -179,12 +200,13 @@ pub fn generateProjectWithOptions(
         };
     }
 
-    var migration_dir = try project_dir.openDir(io, project.migrations, .{ .iterate = true });
+    const io = project_inputs.io;
+    var migration_dir = try project_inputs.openRoot(project.migrations);
     defer migration_dir.close(io);
     var migration_discovery = if (diagnostic_list) |list|
-        try migrations.discoverWithDiagnostics(allocator, io, migration_dir, source_limit, list)
+        try migrations.discoverWithDiagnostics(allocator, project_inputs, migration_dir, list)
     else
-        try migrations.discover(allocator, io, migration_dir, source_limit);
+        try migrations.discover(allocator, project_inputs, migration_dir);
     defer migration_discovery.deinit();
     if (diagnostic_list) |list| if (list.slice().len != 0) return error.ProjectCheckFailed;
     var sqlite_schema: ?catalog.Catalog = if (project.backends.sqlite != null)
@@ -214,9 +236,9 @@ pub fn generateProjectWithOptions(
     defer if (postgres_schema) |*schema| schema.deinit();
 
     for (project.zig_roots) |zig_root| {
-        var zig_dir = try project_dir.openDir(io, zig_root, .{ .iterate = true });
+        var zig_dir = try project_inputs.openRoot(zig_root);
         defer zig_dir.close(io);
-        var embedded = try zig_queries.discover(allocator, io, zig_dir, source_limit);
+        var embedded = try zig_queries.discover(allocator, project_inputs, zig_dir);
         defer embedded.deinit();
         for (embedded.sources) |*source| {
             // Embedded declarations produce no generated output; checking them
@@ -268,9 +290,9 @@ pub fn generateProjectWithOptions(
 
     var iterator = project.sql_roots.fields.iterator();
     while (iterator.next()) |entry| {
-        var sql_dir = try project_dir.openDir(io, entry.value_ptr.*, .{ .iterate = true });
+        var sql_dir = try project_inputs.openRoot(entry.value_ptr.*);
         defer sql_dir.close(io);
-        var discovery = try query_files.discoverAll(allocator, io, sql_dir, source_limit);
+        var discovery = try query_files.discoverAll(allocator, project_inputs, sql_dir);
         errdefer discovery.deinit();
         const checked = try allocator.alloc(checker.CheckedQuery, discovery.sources.len);
         var checked_count: usize = 0;
@@ -343,7 +365,19 @@ pub fn generateProjectWithOptions(
         initialized += 1;
     }
     if (diagnostic_list) |list| if (list.slice().len != 0) return error.ProjectCheckFailed;
-    return generator.generateProjectModuleWithCodecs(allocator, roots, generator_codecs);
+    return generator.generateProjectModuleWithOptions(allocator, roots, .{
+        .codecs = generator_codecs,
+        .project = .{
+            .id = project.project_id,
+            .sqlite_profile = if (project.backends.sqlite) |sqlite| sqlite.profile else null,
+            .postgres_profile = if (project.backends.postgres) |postgres|
+                std.fmt.parseInt(u16, postgres.profile, 10) catch unreachable
+            else
+                null,
+            .allow_untested_version = project.allow_untested_version,
+            .migration_lock_timeout_ms = project.migration_lock_timeout_ms,
+        },
+    });
 }
 
 fn appendSourceDiagnostic(

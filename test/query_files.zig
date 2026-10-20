@@ -1,4 +1,5 @@
 const std = @import("std");
+const inputs = @import("sqlz_inputs");
 const query_files = @import("sqlz_query_files");
 
 test "parses strict named SQL directives" {
@@ -34,11 +35,12 @@ test "discovers SQL recursively in bytewise path order" {
     });
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ignored.txt", .data = "not sql" });
 
+    var project_inputs = try inputs.Inputs.init(std.testing.allocator, std.testing.io, tmp.dir, .{});
+    defer project_inputs.deinit();
     var discovery = try query_files.discover(
         std.testing.allocator,
-        std.testing.io,
+        &project_inputs,
         tmp.dir,
-        1024 * 1024,
     );
     defer discovery.deinit();
     try std.testing.expectEqual(@as(usize, 2), discovery.sources.len);
@@ -60,11 +62,12 @@ test "rejects unknown directives and overlapping query names" {
         "-- sqlz.cardinality: exec\nDELETE FROM users";
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a.sql", .data = duplicate });
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "b.sql", .data = duplicate });
+    var project_inputs = try inputs.Inputs.init(std.testing.allocator, std.testing.io, tmp.dir, .{});
+    defer project_inputs.deinit();
     try std.testing.expectError(error.DuplicateQueryVariant, query_files.discover(
         std.testing.allocator,
-        std.testing.io,
+        &project_inputs,
         tmp.dir,
-        1024 * 1024,
     ));
 }
 
@@ -80,11 +83,12 @@ test "a query name repeats freely across directories" {
     }
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "find.sql", .data = query });
 
+    var project_inputs = try inputs.Inputs.init(std.testing.allocator, std.testing.io, tmp.dir, .{});
+    defer project_inputs.deinit();
     var discovery = try query_files.discover(
         std.testing.allocator,
-        std.testing.io,
+        &project_inputs,
         tmp.dir,
-        1024 * 1024,
     );
     defer discovery.deinit();
     try std.testing.expectEqual(@as(usize, 3), discovery.sources.len);

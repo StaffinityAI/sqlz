@@ -1,4 +1,5 @@
 const std = @import("std");
+const inputs = @import("sqlz_inputs");
 const migrations = @import("sqlz_migrations");
 const diagnostics = @import("sqlz_diagnostics");
 const ziggy = @import("ziggy");
@@ -169,11 +170,12 @@ test "discovers revision directories in bytewise order" {
         .data = "DROP TABLE users",
     });
 
+    var project_inputs = try inputs.Inputs.init(std.testing.allocator, std.testing.io, tmp.dir, .{});
+    defer project_inputs.deinit();
     var discovery = try migrations.discover(
         std.testing.allocator,
-        std.testing.io,
+        &project_inputs,
         tmp.dir,
-        1024 * 1024,
     );
     defer discovery.deinit();
     try std.testing.expectEqual(@as(usize, 2), discovery.revisions.len);
@@ -226,11 +228,12 @@ test "discovers all backend and direction SQL files" {
         .data = file.sql,
     });
 
+    var project_inputs = try inputs.Inputs.init(std.testing.allocator, std.testing.io, tmp.dir, .{});
+    defer project_inputs.deinit();
     var discovery = try migrations.discover(
         std.testing.allocator,
-        std.testing.io,
+        &project_inputs,
         tmp.dir,
-        1024 * 1024,
     );
     defer discovery.deinit();
     const found = &discovery.revisions[0];
@@ -260,9 +263,11 @@ test "requires downgrade SQL for reversible revisions" {
         .data = "CREATE TABLE users (id BIGINT PRIMARY KEY)",
     });
 
+    var project_inputs = try inputs.Inputs.init(std.testing.allocator, std.testing.io, tmp.dir, .{});
+    defer project_inputs.deinit();
     try std.testing.expectError(
         error.MissingDowngradeSql,
-        migrations.discover(std.testing.allocator, std.testing.io, tmp.dir, 1024 * 1024),
+        migrations.discover(std.testing.allocator, &project_inputs, tmp.dir),
     );
 }
 
@@ -292,9 +297,11 @@ test "rejects SQL for a backend not targeted by the manifest" {
         .data = "CREATE INDEX users_id_key ON users(id)",
     });
 
+    var project_inputs = try inputs.Inputs.init(std.testing.allocator, std.testing.io, tmp.dir, .{});
+    defer project_inputs.deinit();
     try std.testing.expectError(
         error.UnexpectedBackendSql,
-        migrations.discover(std.testing.allocator, std.testing.io, tmp.dir, 1024 * 1024),
+        migrations.discover(std.testing.allocator, &project_inputs, tmp.dir),
     );
 }
 
@@ -371,11 +378,12 @@ test "allows SQL-free reversible merge revisions" {
         if (item.down) |sql| try revision.writeFile(std.testing.io, .{ .sub_path = "postgres.down.sql", .data = sql });
     }
 
+    var project_inputs = try inputs.Inputs.init(std.testing.allocator, std.testing.io, tmp.dir, .{});
+    defer project_inputs.deinit();
     var discovery = try migrations.discover(
         std.testing.allocator,
-        std.testing.io,
+        &project_inputs,
         tmp.dir,
-        1024 * 1024,
     );
     defer discovery.deinit();
     try std.testing.expectEqual(@as(usize, 4), discovery.revisions.len);
@@ -417,11 +425,12 @@ test "migration diagnostics accumulate invalid manifests in path order" {
 
     var list: diagnostics.List = .init(std.testing.allocator, 10);
     defer list.deinit();
+    var project_inputs = try inputs.Inputs.init(std.testing.allocator, std.testing.io, tmp.dir, .{});
+    defer project_inputs.deinit();
     var discovery = try migrations.discoverWithDiagnostics(
         std.testing.allocator,
-        std.testing.io,
+        &project_inputs,
         tmp.dir,
-        1024 * 1024,
         &list,
     );
     defer discovery.deinit();
@@ -459,11 +468,12 @@ test "migration graph diagnostics label missing parents and multiple heads" {
     }
     var list: diagnostics.List = .init(std.testing.allocator, 10);
     defer list.deinit();
+    var project_inputs = try inputs.Inputs.init(std.testing.allocator, std.testing.io, tmp.dir, .{});
+    defer project_inputs.deinit();
     var discovery = try migrations.discoverWithDiagnostics(
         std.testing.allocator,
-        std.testing.io,
+        &project_inputs,
         tmp.dir,
-        1024 * 1024,
         &list,
     );
     defer discovery.deinit();

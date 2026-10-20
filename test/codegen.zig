@@ -157,6 +157,24 @@ test "project diagnostic limit above the default preserves all diagnostics" {
     try std.testing.expect(!list.truncated);
 }
 
+test "a diagnostic count equal to the limit is not truncated" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try writeDiagnosticProject(&tmp, 2);
+    var list: diagnostics.List = .init(std.testing.allocator, 100);
+    defer list.deinit();
+    try std.testing.expectError(error.ProjectCheckFailed, codegen.generateProjectWithCodecsAndDiagnostics(
+        std.testing.allocator,
+        std.testing.io,
+        tmp.dir,
+        "sqlz.ziggy",
+        &.{},
+        &list,
+    ));
+    try std.testing.expectEqual(@as(usize, 2), list.slice().len);
+    try std.testing.expect(!list.truncated);
+}
+
 test "project diagnostic limit truncates deterministically" {
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();

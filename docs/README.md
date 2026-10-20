@@ -130,7 +130,7 @@ production code exists but the relevant 0.1 acceptance gates are not complete.
 
 | Top-level subsystem | Status | Implemented now | Principal remaining work |
 | --- | --- | --- | --- |
-| Project configuration and source registration | Partial | strict format-1 configuration/manifests and broad build-input registration | trust boundaries, all project limits, field propagation, and atomic invalidation guarantees |
+| Project configuration and source registration | Partial | strict format-1 configuration/manifests, canonical root and symlink confinement, enforced byte/revision/query/diagnostic limits, generated runtime settings, and broad build-input registration | token and nesting limits (slice 3) and atomic invalidation guarantees |
 | Migration discovery and offline schema replay | Partial | revision discovery, DAG validation, deterministic ordering, supported DDL replay, and merge-parent convergence for SQLite/PostgreSQL catalogs | full documented DDL/profile surface, downgrade checking, opaque directives, builtins, and supplements |
 | SQL parsing, checking, and diagnostics | Partial | pinned `libpg_query`, named-parameter rewriting, named/embedded query discovery, semantic checks for the current subset, and human/versioned JSON diagnostics | source-manager/lexer limits, complete SQL surface, builtin catalogs, warnings, and diagnostic hardening |
 | Generated checked-query bindings | Partial | deterministic named-query generation, embedded declaration verification, and build-cache module integration | stable generated metadata/query IDs, embedded PostgreSQL metadata, and final `Row`/`OwnedRow` contract |

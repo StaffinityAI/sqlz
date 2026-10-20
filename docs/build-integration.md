@@ -96,7 +96,9 @@ pub fn addProjectInputs(
 The tool discovers its own inputs, so the configuration file alone does not
 describe what the generated module depends on. `addProject` registers every
 `.sql`, `.zig`, and `.ziggy` file under the project directory as an input of the
-check step, skipping hidden directories, `zig-out`, `zig-cache`, and `zig-pkg`.
+check step, including symlinked files, skipping hidden directories, `zig-out`,
+`zig-cache`, and `zig-pkg`. The checker skips the same directories when it walks
+SQL and Zig roots.
 Editing a query, adding one, or removing one therefore re-runs the checker;
 without those inputs the step would report a cache hit and a drifted query would
 keep its previously generated bindings. A configuration supplied as a generated
@@ -113,6 +115,10 @@ exports `sqlz.sqlite` and `sqlz.postgres` according to dependency options. It is
 one module per dependency, shared by every project: Zig admits a source file to
 only one module per compilation, so per-project facades could not share an
 executable.
+
+Besides the configured query roots, the generated module declares
+`sqlz_project`, which carries the runtime settings from `sqlz.ziggy`; see
+[configuration.md](configuration.md#field-usage).
 
 `sqlz.ziggy` owns paths, profile selection, root aliases, supplements, limits,
 project identity, and database codec patterns. Build registration owns only Zig
