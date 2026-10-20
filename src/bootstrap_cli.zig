@@ -4,10 +4,10 @@ const bootstrap = @import("sqlz_bootstrap");
 const catalog = @import("sqlz_catalog");
 const checker = @import("sqlz_checker");
 const config = @import("sqlz_config");
+const inputs = @import("sqlz_inputs");
 const migrations = @import("sqlz_migrations");
 const pg = @import("pg");
 const zqlite = @import("zqlite");
-const ziggy = @import("ziggy");
 
 const registration_marker = "--sqlz-build-registrations";
 
@@ -49,6 +49,13 @@ fn usage(err: anyerror) @TypeOf(err) {
         "usage: zig build sqlz -- bootstrap postgres --from-sqlite PATH [--project NAME] [--postgres-url URL] [--wipe-postgres --yes]",
         .{},
     );
+    return err;
+}
+
+/// Names the input behind a boundary error, which the error alone cannot.
+fn inputFailure(project_inputs: *const inputs.Inputs, err: anyerror) anyerror {
+    if (inputs.isBoundaryError(err))
+        std.log.err("{s}: {t}", .{ project_inputs.failure_path orelse ".", err });
     return err;
 }
 
@@ -122,25 +129,29 @@ fn run(
     var project_dir = try std.Io.Dir.cwd().openDir(io, project_path, .{ .iterate = true });
     defer project_dir.close(io);
 
-    const raw_config = try project_dir.readFileAlloc(io, config_name, allocator, .limited(16 * 1024 * 1024));
-    defer allocator.free(raw_config);
-    const config_source = try allocator.dupeZ(u8, raw_config);
-    defer allocator.free(config_source);
-    var meta: ziggy.Deserializer.Meta = .init;
-    var loaded = try config.parse(allocator, config_source, &meta);
+    var loaded = try config.load(allocator, io, project_dir, config_name);
     defer loaded.deinit();
     const project = loaded.config();
+    var project_inputs = try inputs.Inputs.init(
+        allocator,
+        io,
+        project_dir,
+        .fromConfig(project.limits),
+    );
+    defer project_inputs.deinit();
+    project_inputs.register(config_name, loaded.source_len) catch |err|
+        return inputFailure(&project_inputs, err);
     if (project.backends.sqlite == null or project.backends.postgres == null)
         return error.BootstrapRequiresBothBackends;
     if (project.backends.postgres.?.search_path.len != 1 or
         std.mem.eql(u8, project.backends.postgres.?.search_path[0], "public"))
         return error.DedicatedPostgresSchemaRequired;
     const destination_schema = project.backends.postgres.?.search_path[0];
-    const source_limit = std.math.cast(usize, project.limits.source_bytes) orelse return error.InvalidLimit;
-
-    var migration_dir = try project_dir.openDir(io, project.migrations, .{ .iterate = true });
+    var migration_dir = project_inputs.openRoot(project.migrations) catch |err|
+        return inputFailure(&project_inputs, err);
     defer migration_dir.close(io);
-    var discovery = try migrations.discover(allocator, io, migration_dir, source_limit);
+    var discovery = migrations.discover(allocator, &project_inputs, migration_dir) catch |err|
+        return inputFailure(&project_inputs, err);
     defer discovery.deinit();
     for (discovery.revisions) |revision| {
         const manifest = revision.manifest.manifest();

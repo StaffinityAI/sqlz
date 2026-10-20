@@ -18,6 +18,98 @@ test "generates a PostgreSQL-only project" {
     try std.testing.expect(std.mem.indexOf(u8, generated, ".sqlite = true") == null);
 }
 
+test "a runtime backend needs a checking profile" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try writeProject(&tmp, false);
+
+    const generated = try codegen.generateProjectWithOptions(
+        std.testing.allocator,
+        std.testing.io,
+        tmp.dir,
+        "sqlz.ziggy",
+        .{ .runtime = .{ .postgres = true } },
+        null,
+    );
+    std.testing.allocator.free(generated);
+    try std.testing.expectError(error.RuntimeBackendWithoutProfile, codegen.generateProjectWithOptions(
+        std.testing.allocator,
+        std.testing.io,
+        tmp.dir,
+        "sqlz.ziggy",
+        .{ .runtime = .{ .sqlite = true } },
+        null,
+    ));
+}
+
+test "a query name repeats across directories as separate namespaces" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try writeProject(&tmp, false);
+    var admin = try tmp.dir.createDirPathOpen(std.testing.io, "queries/admin", .{});
+    defer admin.close(std.testing.io);
+    try admin.writeFile(std.testing.io, .{
+        .sub_path = "get_user.sql",
+        .data =
+        \\-- sqlz.name: get_user
+        \\-- sqlz.backends: postgres
+        \\-- sqlz.cardinality: optional
+        \\
+        \\SELECT id FROM users WHERE id=:id
+        ,
+    });
+
+    const generated = try codegen.generateProject(
+        std.testing.allocator,
+        std.testing.io,
+        tmp.dir,
+        "sqlz.ziggy",
+    );
+    defer std.testing.allocator.free(generated);
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, generated, "pub const get_user ="));
+    try std.testing.expect(std.mem.indexOf(u8, generated, "admin") != null);
+}
+
+test "a duplicate query variant points at both names" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try writeProject(&tmp, false);
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "queries/get_user_copy.sql",
+        .data =
+        \\-- sqlz.name: get_user
+        \\-- sqlz.backends: postgres
+        \\-- sqlz.cardinality: optional
+        \\
+        \\SELECT id FROM users WHERE id=:id
+        ,
+    });
+    var list: diagnostics.List = .init(std.testing.allocator, 100);
+    defer list.deinit();
+    try std.testing.expectError(error.ProjectCheckFailed, codegen.generateProjectWithCodecsAndDiagnostics(
+        std.testing.allocator,
+        std.testing.io,
+        tmp.dir,
+        "sqlz.ziggy",
+        &.{},
+        &list,
+    ));
+    try std.testing.expectEqual(@as(usize, 1), list.slice().len);
+    const diagnostic = list.slice()[0];
+    try std.testing.expectEqualStrings("G001", diagnostic.code);
+    try std.testing.expectEqualStrings(
+        "query `get_user` is already defined for postgres in this directory",
+        diagnostic.message,
+    );
+    try std.testing.expectEqualStrings("get_user_copy.sql", diagnostic.primary.?.path);
+    try std.testing.expectEqual(@as(usize, 1), diagnostic.primary.?.start.line);
+    try std.testing.expectEqual(@as(usize, 15), diagnostic.primary.?.start.column);
+    try std.testing.expectEqual(@as(usize, 23), diagnostic.primary.?.end.column);
+    try std.testing.expectEqual(@as(usize, 1), diagnostic.labels.len);
+    try std.testing.expectEqualStrings("get_user.sql", diagnostic.labels[0].span.path);
+    try std.testing.expectEqualStrings("first defined here", diagnostic.labels[0].message);
+}
+
 test "project checking accumulates query diagnostics in source order" {
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
@@ -51,6 +143,24 @@ test "project diagnostic limit above the default preserves all diagnostics" {
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try writeDiagnosticProject(&tmp, 1000);
+    var list: diagnostics.List = .init(std.testing.allocator, 100);
+    defer list.deinit();
+    try std.testing.expectError(error.ProjectCheckFailed, codegen.generateProjectWithCodecsAndDiagnostics(
+        std.testing.allocator,
+        std.testing.io,
+        tmp.dir,
+        "sqlz.ziggy",
+        &.{},
+        &list,
+    ));
+    try std.testing.expectEqual(@as(usize, 2), list.slice().len);
+    try std.testing.expect(!list.truncated);
+}
+
+test "a diagnostic count equal to the limit is not truncated" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try writeDiagnosticProject(&tmp, 2);
     var list: diagnostics.List = .init(std.testing.allocator, 100);
     defer list.deinit();
     try std.testing.expectError(error.ProjectCheckFailed, codegen.generateProjectWithCodecsAndDiagnostics(

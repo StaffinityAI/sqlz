@@ -1,5 +1,6 @@
 const std = @import("std");
 const query_files = @import("sqlz_query_files");
+const inputs = @import("sqlz_inputs");
 
 pub const Discovery = query_files.Discovery;
 
@@ -13,7 +14,6 @@ pub const Error = error{
     InvalidCardinality,
     InvalidDeclaredType,
     InvalidCodecMap,
-    DuplicateQueryVariant,
 } || std.mem.Allocator.Error || std.zig.string_literal.ParseError;
 
 pub fn parse(
@@ -36,10 +36,10 @@ pub fn parse(
 
 pub fn discover(
     allocator: std.mem.Allocator,
-    io: std.Io,
+    project_inputs: *inputs.Inputs,
     root: std.Io.Dir,
-    max_source_bytes: usize,
 ) anyerror!Discovery {
+    const io = project_inputs.io;
     var paths: std.ArrayList([]const u8) = .empty;
     defer {
         for (paths.items) |path| allocator.free(path);
@@ -48,8 +48,10 @@ pub fn discover(
     var walker = try root.walk(allocator);
     defer walker.deinit();
     while (try walker.next(io)) |entry| {
-        if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".zig") or
-            hiddenPath(entry.path)) continue;
+        if (hiddenPath(entry.path)) continue;
+        const candidate = std.mem.endsWith(u8, entry.basename, ".zig");
+        const kind = try project_inputs.entryKind(entry.dir, entry.basename, entry.kind, candidate);
+        if (kind != .file or !candidate) continue;
         try paths.append(allocator, try allocator.dupe(u8, entry.path));
     }
     std.mem.sort([]const u8, paths.items, {}, struct {
@@ -64,7 +66,7 @@ pub fn discover(
         sources.deinit(allocator);
     }
     for (paths.items) |path| {
-        const contents = try root.readFileAlloc(io, path, allocator, .limited(max_source_bytes));
+        const contents = try project_inputs.readFile(allocator, root, path);
         defer allocator.free(contents);
         const terminated = try allocator.dupeZ(u8, contents);
         defer allocator.free(terminated);
@@ -74,13 +76,11 @@ pub fn discover(
             for (parsed.sources[moved..]) |*source| source.deinit();
             allocator.free(parsed.sources);
         }
+        try project_inputs.countQueries(root, path, parsed.sources.len);
+        // Embedded declarations generate nothing and are named through their
+        // own file's containers, so a name may repeat across them; Zig itself
+        // rejects a repeat within one container.
         for (parsed.sources) |*source| {
-            for (sources.items) |existing| {
-                if (std.mem.eql(u8, existing.name, source.name) and
-                    ((existing.backends.sqlite and source.backends.sqlite) or
-                        (existing.backends.postgres and source.backends.postgres)))
-                    return error.DuplicateQueryVariant;
-            }
             try sources.append(allocator, source.*);
             moved += 1;
         }
@@ -428,7 +428,8 @@ fn hiddenPath(path: []const u8) bool {
     while (components.next()) |component| {
         if (component.len > 0 and component[0] == '.') return true;
         if (std.mem.eql(u8, component, "zig-cache") or
-            std.mem.eql(u8, component, "zig-out")) return true;
+            std.mem.eql(u8, component, "zig-out") or
+            std.mem.eql(u8, component, "zig-pkg")) return true;
     }
     return false;
 }

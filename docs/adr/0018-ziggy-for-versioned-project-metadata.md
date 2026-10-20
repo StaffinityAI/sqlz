@@ -11,7 +11,7 @@ schema-validated versioned metadata.
 ## Decision
 
 Use Ziggy for `sqlz.ziggy`, `revision.ziggy`, and catalog supplements. Pin commit
-`6760f0f4c4fc1ae01428bc6d87109e32124eeeb7` for Zig 0.16.0 compatibility.
+`0b61581980d6905dd4108a618d602f5778593122` for Zig 0.16.0 compatibility.
 
 ## Alternatives considered
 

@@ -1,6 +1,8 @@
 # SQLite-to-PostgreSQL bootstrap implementation plan
 
-Status: initial implementation available. Keep this document current as scope
+Status: initial implementation available; **experimental in 0.1 and deferred to
+0.2** as a supported command (see the
+[0.1 production cut](implementation-plan.md#01-production-cut)). Keep this document current as scope
 changes, implementation slices land, or new constraints are discovered. The
 general release checklist remains [implementation-plan.md](implementation-plan.md);
 this document is the source of truth for the bootstrap feature.

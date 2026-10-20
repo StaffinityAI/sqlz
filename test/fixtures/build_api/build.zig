@@ -18,13 +18,16 @@ pub fn build(b: *std.Build) void {
     const project = tool.addProject(.{
         .name = "fixture",
         .config = b.path("sqlz.ziggy"),
+        // The configuration has only a SQLite profile, so PostgreSQL stays out of
+        // this project's runtime set even when the dependency builds its adapter.
+        .runtime = .{ .sqlite = sqlite },
         .codecs = &.{.{ .id = "tier", .module = types, .declaration = "Tier" }},
     });
     const embedded = b.createModule(.{
         .root_source_file = b.path("src/queries.zig"),
         .target = b.graph.host,
         .imports = &.{
-            .{ .name = "sqlz", .module = sqlz.module("sqlz") },
+            .{ .name = "sqlz", .module = project.runtime_module },
             .{ .name = "types", .module = types },
         },
     });

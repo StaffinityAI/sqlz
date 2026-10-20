@@ -58,11 +58,36 @@ pub fn generateProjectModule(allocator: std.mem.Allocator, roots: []const RootIn
     return generateProjectModuleWithCodecs(allocator, roots, &.{});
 }
 
+/// The `sqlz.ziggy` settings runtime code consumes, emitted as the
+/// `sqlz_project` namespace. Config validation reserves the `sqlz` prefix for
+/// root aliases, so the name cannot collide with a query root.
+pub const ProjectSettings = struct {
+    id: []const u8,
+    sqlite_profile: ?[]const u8 = null,
+    postgres_profile: ?u16 = null,
+    allow_untested_version: bool = false,
+    migration_lock_timeout_ms: u32 = 30_000,
+};
+
+pub const ModuleOptions = struct {
+    codecs: []const CodecBinding = &.{},
+    project: ?ProjectSettings = null,
+};
+
 pub fn generateProjectModuleWithCodecs(
     allocator: std.mem.Allocator,
     roots: []const RootInput,
     codecs: []const CodecBinding,
 ) Error![]u8 {
+    return generateProjectModuleWithOptions(allocator, roots, .{ .codecs = codecs });
+}
+
+pub fn generateProjectModuleWithOptions(
+    allocator: std.mem.Allocator,
+    roots: []const RootInput,
+    options: ModuleOptions,
+) Error![]u8 {
+    const codecs = options.codecs;
     const sorted_roots = try allocator.dupe(RootInput, roots);
     defer allocator.free(sorted_roots);
     std.mem.sort(RootInput, sorted_roots, {}, struct {
@@ -100,6 +125,7 @@ pub fn generateProjectModuleWithCodecs(
             try output.print(allocator, "    sqlz.assertCodec({s}.{s});\n", .{ codec.import_name, codec.declaration });
         try output.appendSlice(allocator, "}\n");
     }
+    if (options.project) |project| try writeProjectSettings(&output, allocator, project);
     try output.appendSlice(allocator,
         \\
         \\// Generated checked queries; do not edit.
@@ -107,6 +133,29 @@ pub fn generateProjectModuleWithCodecs(
     );
     for (sorted_roots) |root| try writeRoot(&output, allocator, root.alias, root.inputs, sorted_codecs);
     return output.toOwnedSlice(allocator);
+}
+
+fn writeProjectSettings(
+    output: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    project: ProjectSettings,
+) Error!void {
+    try output.appendSlice(allocator,
+        \\
+        \\/// Runtime settings from `sqlz.ziggy`.
+        \\pub const sqlz_project = struct {
+        \\
+    );
+    try output.print(allocator, "    pub const id = \"{f}\";\n", .{std.zig.fmtString(project.id)});
+    if (project.sqlite_profile) |profile| {
+        try output.print(allocator, "    pub const sqlite_profile: ?[]const u8 = \"{f}\";\n", .{std.zig.fmtString(profile)});
+    } else try output.appendSlice(allocator, "    pub const sqlite_profile: ?[]const u8 = null;\n");
+    if (project.postgres_profile) |profile| {
+        try output.print(allocator, "    pub const postgres_profile: ?u16 = {d};\n", .{profile});
+    } else try output.appendSlice(allocator, "    pub const postgres_profile: ?u16 = null;\n");
+    try output.print(allocator, "    pub const allow_untested_version = {};\n", .{project.allow_untested_version});
+    try output.print(allocator, "    pub const migration_lock_timeout_ms: u32 = {d};\n", .{project.migration_lock_timeout_ms});
+    try output.appendSlice(allocator, "};\n");
 }
 
 fn writeRoot(

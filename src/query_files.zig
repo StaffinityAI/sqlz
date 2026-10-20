@@ -1,4 +1,5 @@
 const std = @import("std");
+const inputs = @import("sqlz_inputs");
 
 pub const Backends = struct {
     sqlite: bool = false,
@@ -47,6 +48,11 @@ pub const Source = struct {
     sql_offset: usize = 0,
     sql_line: usize = 1,
     sql_column: usize = 1,
+    /// Where the `sqlz.name` directive's value sits, for diagnostics that
+    /// point at the query's name rather than its SQL.
+    name_offset: usize = 0,
+    name_line: usize = 1,
+    name_column: usize = 1,
     sql_source_offsets: ?[]const usize = null,
     source_text: ?[]const u8 = null,
     param_codecs: []const CodecOverride = &.{},
@@ -125,6 +131,7 @@ pub const Error = error{
 
 pub fn parse(allocator: std.mem.Allocator, path: []const u8, contents: []const u8) Error!Source {
     var name: ?[]const u8 = null;
+    var name_offset: usize = 0;
     var backends: ?Backends = null;
     var cardinality: ?Cardinality = null;
     var seen: std.StringHashMapUnmanaged(void) = .empty;
@@ -159,6 +166,7 @@ pub fn parse(allocator: std.mem.Allocator, path: []const u8, contents: []const u
         if (std.mem.eql(u8, key, "name")) {
             if (!isIdentifier(value)) return error.InvalidName;
             name = value;
+            name_offset = @intFromPtr(value.ptr) - @intFromPtr(contents.ptr);
         } else if (std.mem.eql(u8, key, "backends")) {
             backends = try parseBackends(value);
         } else if (std.mem.eql(u8, key, "cardinality")) {
@@ -211,17 +219,96 @@ pub fn parse(allocator: std.mem.Allocator, path: []const u8, contents: []const u
         .sql_offset = sql_offset,
         .sql_line = sql_line,
         .sql_column = sql_column,
+        .name_offset = name_offset,
+        .name_line = lineAt(contents, name_offset),
+        .name_column = columnAt(contents, name_offset),
         .param_codecs = try param_codecs.toOwnedSlice(allocator),
         .column_codecs = try column_codecs.toOwnedSlice(allocator),
     };
 }
 
+fn lineAt(contents: []const u8, offset: usize) usize {
+    return std.mem.count(u8, contents[0..offset], "\n") + 1;
+}
+
+fn columnAt(contents: []const u8, offset: usize) usize {
+    const line_start = if (std.mem.lastIndexOfScalar(u8, contents[0..offset], '\n')) |newline| newline + 1 else 0;
+    return offset - line_start + 1;
+}
+
+/// Discovers every query file under `root` and rejects the first duplicate
+/// variant. `discoverAll` leaves duplicates for the caller to report.
 pub fn discover(
     allocator: std.mem.Allocator,
-    io: std.Io,
+    project_inputs: *inputs.Inputs,
     root: std.Io.Dir,
-    max_source_bytes: usize,
 ) anyerror!Discovery {
+    var discovery = try discoverAll(allocator, project_inputs, root);
+    errdefer discovery.deinit();
+    var variants = try Variants.init(allocator, discovery.sources);
+    defer variants.deinit(allocator);
+    for (variants.duplicate) |duplicate| {
+        if (duplicate != null) return error.DuplicateQueryVariant;
+    }
+    return discovery;
+}
+
+/// How sources group into logical queries. Directories are namespaces, so a
+/// name repeats freely across them. Within one directory, files sharing a name
+/// are that query's backend variants and must not both cover a backend.
+/// Computed in one pass, since a project may hold many thousands of queries.
+pub const Variants = struct {
+    /// For each source, the index of the first source with the same directory
+    /// and name: the identity of its logical query.
+    group: []usize,
+    /// For each source, the earliest source it collides with on a backend.
+    duplicate: []?usize,
+
+    pub fn init(allocator: std.mem.Allocator, sources: []const Source) !Variants {
+        const Backends_ = struct { first: usize, sqlite: ?usize = null, postgres: ?usize = null };
+        var arena: std.heap.ArenaAllocator = .init(allocator);
+        defer arena.deinit();
+        var groups: std.StringHashMapUnmanaged(Backends_) = .empty;
+        const group = try allocator.alloc(usize, sources.len);
+        errdefer allocator.free(group);
+        const duplicate = try allocator.alloc(?usize, sources.len);
+        errdefer allocator.free(duplicate);
+        for (sources, 0..) |source, index| {
+            const key = try std.fmt.allocPrint(arena.allocator(), "{s}\x00{s}", .{
+                std.fs.path.dirname(source.path) orelse "",
+                source.name,
+            });
+            const entry = try groups.getOrPut(arena.allocator(), key);
+            if (!entry.found_existing) entry.value_ptr.* = .{ .first = index };
+            const state = entry.value_ptr;
+            group[index] = state.first;
+            var collision: ?usize = null;
+            if (source.backends.sqlite) {
+                if (state.sqlite) |first| collision = first else state.sqlite = index;
+            }
+            if (source.backends.postgres) {
+                if (state.postgres) |first| {
+                    collision = if (collision) |other| @min(other, first) else first;
+                } else state.postgres = index;
+            }
+            duplicate[index] = collision;
+        }
+        return .{ .group = group, .duplicate = duplicate };
+    }
+
+    pub fn deinit(self: *Variants, allocator: std.mem.Allocator) void {
+        allocator.free(self.group);
+        allocator.free(self.duplicate);
+        self.* = undefined;
+    }
+};
+
+pub fn discoverAll(
+    allocator: std.mem.Allocator,
+    project_inputs: *inputs.Inputs,
+    root: std.Io.Dir,
+) anyerror!Discovery {
+    const io = project_inputs.io;
     var paths: std.ArrayList([]const u8) = .empty;
     defer {
         for (paths.items) |path| allocator.free(path);
@@ -230,8 +317,10 @@ pub fn discover(
     var walker = try root.walk(allocator);
     defer walker.deinit();
     while (try walker.next(io)) |entry| {
-        if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".sql") or
-            hiddenPath(entry.path)) continue;
+        if (hiddenPath(entry.path)) continue;
+        const candidate = std.mem.endsWith(u8, entry.basename, ".sql");
+        const kind = try project_inputs.entryKind(entry.dir, entry.basename, entry.kind, candidate);
+        if (kind != .file or !candidate) continue;
         try paths.append(allocator, try allocator.dupe(u8, entry.path));
     }
     std.mem.sort([]const u8, paths.items, {}, struct {
@@ -239,6 +328,9 @@ pub fn discover(
             return std.mem.lessThan(u8, lhs, rhs);
         }
     }.lessThan);
+    // Each file is one query, so the limit applies before any is read, and
+    // in path order so the reported file is deterministic.
+    for (paths.items) |path| try project_inputs.countQueries(root, path, 1);
 
     var sources: std.ArrayList(Source) = .empty;
     errdefer {
@@ -246,16 +338,10 @@ pub fn discover(
         sources.deinit(allocator);
     }
     for (paths.items) |path| {
-        const contents = try root.readFileAlloc(io, path, allocator, .limited(max_source_bytes));
+        const contents = try project_inputs.readFile(allocator, root, path);
         defer allocator.free(contents);
         var source = try parse(allocator, path, contents);
         errdefer source.deinit();
-        for (sources.items) |existing| {
-            if (std.mem.eql(u8, existing.name, source.name) and
-                ((existing.backends.sqlite and source.backends.sqlite) or
-                    (existing.backends.postgres and source.backends.postgres)))
-                return error.DuplicateQueryVariant;
-        }
         try sources.append(allocator, source);
     }
     return .{ .allocator = allocator, .sources = try sources.toOwnedSlice(allocator) };
@@ -285,7 +371,8 @@ fn hiddenPath(path: []const u8) bool {
     while (components.next()) |component| {
         if (component.len > 0 and component[0] == '.') return true;
         if (std.mem.eql(u8, component, "zig-cache") or
-            std.mem.eql(u8, component, "zig-out")) return true;
+            std.mem.eql(u8, component, "zig-out") or
+            std.mem.eql(u8, component, "zig-pkg")) return true;
     }
     return false;
 }

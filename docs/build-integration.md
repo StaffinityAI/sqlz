@@ -10,7 +10,6 @@ build.
 | --- | --- | --- |
 | `sqlite` | `false` | fetch/build the zqlite runtime adapter |
 | `postgres` | `false` | fetch/build the pg.zig runtime adapter |
-| `sqlite_system` | `false` | use system SQLite; requires `sqlite` |
 | `postgres_tls` | `false` | enable driver TLS; requires `postgres` |
 
 The package manifest marks both drivers lazy. `build.zig` calls
@@ -18,6 +17,16 @@ The package manifest marks both drivers lazy. `build.zig` calls
 imported, compiled, translated, or linked. Core/checker-only, SQLite-only,
 PostgreSQL-only, and both-backend builds are mandatory test configurations. There
 is no implicit default backend or runtime `AnyDatabase`.
+Only the reviewed bundled zqlite capability profile is in the 0.1 contract;
+there is no `sqlite_system` build option.
+
+The dependency options decide what is linked; each project then declares the
+subset it executes and migrates against with `ProjectOptions.runtime`, which
+defaults to none. `addProject` panics at configure time when the runtime set names
+an adapter the dependency was configured without, and the check step fails with
+S020 when it names a backend that has no checking profile in `sqlz.ziggy`. A
+backend may be checked without being in the runtime set, never the reverse. See
+[ADR 0042](adr/0042-backend-selection-ownership.md).
 
 ## Build API
 
@@ -28,6 +37,7 @@ const tool = sqlz_build.addTool(b, .{ .dependency = sqlz_dep });
 const app_db = tool.addProject(.{
     .name = "app",
     .config = b.path("sqlz.ziggy"),
+    .runtime = .{ .sqlite = true },
 });
 
 exe.root_module.addImport("sqlz", app_db.runtime_module);
@@ -48,9 +58,15 @@ pub const CodecBinding = struct {
     declaration: []const u8,
 };
 
+pub const Backends = struct {
+    sqlite: bool = false,
+    postgres: bool = false,
+};
+
 pub const ProjectOptions = struct {
     name: []const u8,
     config: std.Build.LazyPath,
+    runtime: Backends = .{},
     codecs: []const CodecBinding = &.{},
 };
 
@@ -80,7 +96,9 @@ pub fn addProjectInputs(
 The tool discovers its own inputs, so the configuration file alone does not
 describe what the generated module depends on. `addProject` registers every
 `.sql`, `.zig`, and `.ziggy` file under the project directory as an input of the
-check step, skipping hidden directories, `zig-out`, `zig-cache`, and `zig-pkg`.
+check step, including symlinked files, skipping hidden directories, `zig-out`,
+`zig-cache`, and `zig-pkg`. The checker skips the same directories when it walks
+SQL and Zig roots.
 Editing a query, adding one, or removing one therefore re-runs the checker;
 without those inputs the step would report a cache hit and a drifted query would
 keep its previously generated bindings. A configuration supplied as a generated
@@ -93,7 +111,14 @@ the checker and added to the
 generated module as an import named `sqlz_codec_<id>`; a configured ID without a
 binding, or a binding the configuration never declares, fails the check.
 The runtime facade always exposes backend-neutral query contracts and conditionally
-exports `sqlz.sqlite` and `sqlz.postgres` according to dependency options.
+exports `sqlz.sqlite` and `sqlz.postgres` according to dependency options. It is
+one module per dependency, shared by every project: Zig admits a source file to
+only one module per compilation, so per-project facades could not share an
+executable.
+
+Besides the configured query roots, the generated module declares
+`sqlz_project`, which carries the runtime settings from `sqlz.ziggy`; see
+[configuration.md](configuration.md#field-usage).
 
 `sqlz.ziggy` owns paths, profile selection, root aliases, supplements, limits,
 project identity, and database codec patterns. Build registration owns only Zig

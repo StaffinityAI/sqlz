@@ -1,7 +1,10 @@
 # sqlz design documents
 
-Status: normative design for sqlz 0.1. The checker, generator, and SQLite
-runtime are implemented; PostgreSQL, migration execution, and the CLI are not.
+Status: normative design for sqlz 0.1. The checker, generator, and checked-query
+runtimes for SQLite and PostgreSQL are implemented for the current subset.
+Revision discovery and offline catalog replay exist, but stateful database
+migration planning and execution are the largest missing subsystem. The only
+operational CLI path is the initial partial `bootstrap postgres` command.
 [implementation-plan.md](implementation-plan.md) is the authority on what exists
 today, including the places where code still trails these documents.
 
@@ -119,10 +122,40 @@ not for ordinary schema or PRAGMA work.
 6. Disabled backends cost nothing. A disabled driver is not fetched, imported,
    compiled, or linked.
 
+## Current implementation status
+
+This table is checked against the codebase and the ordered slices in
+[implementation-plan.md](implementation-plan.md). “Partial” means useful
+production code exists but the relevant 0.1 acceptance gates are not complete.
+
+| Top-level subsystem | Status | Implemented now | Principal remaining work |
+| --- | --- | --- | --- |
+| Project configuration and source registration | Partial | strict format-1 configuration/manifests, canonical root and symlink confinement, enforced byte/revision/query/diagnostic limits, generated runtime settings, and broad build-input registration | token and nesting limits (slice 3) and atomic invalidation guarantees |
+| Migration discovery and offline schema replay | Partial | revision discovery, DAG validation, deterministic ordering, supported DDL replay, and merge-parent convergence for SQLite/PostgreSQL catalogs | full documented DDL/profile surface, downgrade checking, opaque directives, builtins, and supplements |
+| SQL parsing, checking, and diagnostics | Partial | pinned `libpg_query`, named-parameter rewriting, named/embedded query discovery, semantic checks for the current subset, and human/versioned JSON diagnostics | source-manager/lexer limits, complete SQL surface, builtin catalogs, warnings, and diagnostic hardening |
+| Generated checked-query bindings | Partial | deterministic named-query generation, embedded declaration verification, and build-cache module integration | stable generated metadata/query IDs, embedded PostgreSQL metadata, and final `Row`/`OwnedRow` contract |
+| SQLite checked-query runtime | Partial | all four cardinalities, borrowed/owned rows, transactions, native pools, typed options, and enum codecs | non-STRICT storage validation, engine version enforcement, custom codecs, and poisoned-cleanup handling |
+| PostgreSQL checked-query runtime | Partial | all four cardinalities, borrowed/owned rows, transactions, native pools, enum codecs, one-dimensional arrays, and server-version enforcement | zio socket proof, live TLS, finalized server errors, cancellation/timeouts, and dirty-connection recovery |
+| Build integration and examples | Partial | lazy core/SQLite/PostgreSQL/both/TLS builds, host/target separation, offline checking, and runnable checked examples | complete invalidation matrix, atomic outputs, semantic cache keys, cross compilation, and release hardening |
+| Stateful database migrations | Not started | no database planner, state store, journal, lock, runner, or generated runtime migration bundle; discovery/replay above is offline only | ordinary planner through SQLite/PostgreSQL runners, status/history/plan operations, and the runtime bundle; checkpoint extensions are deferred to 0.2 |
+| Build-integrated CLI | Partial | registered-project routing for `bootstrap postgres` only | unified command shell, read-only and migration commands, confirmation, versioned JSON, and shared output/errors |
+| SQLite-to-PostgreSQL bootstrap | Partial (experimental in 0.1; deferred to 0.2) | dedicated-schema reset, transactional private head replay, bound row transfer, sequence restoration, and one CI success path | shared migration primitives/state/journal/lock, stronger inspection and mapping, confirmation/JSON, and safety matrix |
+| Security, compatibility, CI, and release gates | Partial | core offline/service-backed gates, PostgreSQL 15-18 runtime matrix, and initial security design | traceability, full platform/engine/fuzz/recovery matrix, performance baselines, frozen formats/APIs, and release gate |
+
+The current dependency pins are Ziggy
+`0b61581980d6905dd4108a618d602f5778593122`, zqlite
+`b519eea9b1a2b5fcad68af6d0629e717e8746684`, and pg.zig
+`f6442abf3fb0bbcf1007fac4799607f35688a89e`. The supported public runtime build
+options are `sqlite`, `postgres`, and `postgres_tls`; no `sqlite_system` option is
+implemented or claimed for 0.1.
+
 ## Implementation roadmap
 
-Each milestone ends with its stated acceptance gate. The 0.1 release requires
-all milestones; early milestones are not separate compatibility promises.
+Each milestone ends with its stated acceptance gate. Early milestones are not
+separate compatibility promises. The 0.1 release is the minimal production cut
+defined in [implementation-plan.md](implementation-plan.md#01-production-cut). It
+requires each milestone only within that cut; checkpoint compaction, builtin
+catalog supplements, telemetry, and the supported bootstrap are deferred to 0.2.
 
 ### M1: configuration, syntax, diagnostics, and graph foundations
 
@@ -158,8 +191,8 @@ all milestones; early milestones are not separate compatibility promises.
 
 - Implement versioned migration state, operation journal, locking,
   upgrade/downgrade/repair operations, unified host command, runtime bundles,
-  cache integration, lazy flags, and checkpoint-based history compaction for
-  empty-database bootstrap.
+  cache integration, and lazy flags. Checkpoint-based history compaction for
+  empty-database bootstrap is deferred to 0.2.
 - Gate: migration integration tests pass on SQLite and PostgreSQL, and the four-
   configuration build matrix proves disabled dependencies remain unused.
 

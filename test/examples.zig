@@ -26,6 +26,31 @@ test "every example query is checked for SQLite and PostgreSQL" {
     try expectBoth(@import("embedded_declarations").promote);
     try expectBoth(@import("embedded_declarations").by_tier);
     try expectBoth(@import("embedded_declarations").newest);
+    try expectBoth(queries.app.basic_sql_file.add_user);
+    try expectBoth(queries.app.basic_sql_file.find_user);
+    try expectBoth(@import("basic_embedded_query").insert_user);
+    try expectBoth(@import("basic_embedded_query").list_users);
+    try expectBoth(@import("basic_transaction").insert_name);
+    try expectBoth(@import("basic_transaction").total_users);
+}
+
+fn expectOutput(comptime example: type, expected: []const u8) !void {
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try example.run(std.testing.allocator, std.testing.io, &out.writer);
+    try std.testing.expectEqualStrings(expected, out.written());
+}
+
+test "basic SQL file example" {
+    try expectOutput(@import("basic_sql_file"), "user 1: Ada\n");
+}
+
+test "basic embedded query example" {
+    try expectOutput(@import("basic_embedded_query"), "user 1: Ada\nuser 2: Grace\nuser 3: Barbara\n");
+}
+
+test "basic transaction example" {
+    try expectOutput(@import("basic_transaction"), "after rollback: 0 users\nafter commit: 1 users\n");
 }
 
 test "account CRUD example" {

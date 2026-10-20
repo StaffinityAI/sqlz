@@ -1,4 +1,5 @@
 const std = @import("std");
+const inputs = @import("sqlz_inputs");
 const zig_queries = @import("sqlz_zig_queries");
 
 test "discovers direct embedded query declarations in containers" {
@@ -62,11 +63,12 @@ test "discovers Zig roots in deterministic path order" {
     });
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ignored.txt", .data = "not Zig" });
 
+    var project_inputs = try inputs.Inputs.init(std.testing.allocator, std.testing.io, tmp.dir, .{});
+    defer project_inputs.deinit();
     var discovery = try zig_queries.discover(
         std.testing.allocator,
-        std.testing.io,
+        &project_inputs,
         tmp.dir,
-        1024 * 1024,
     );
     defer discovery.deinit();
     try std.testing.expectEqual(@as(usize, 2), discovery.sources.len);
@@ -180,4 +182,23 @@ test "rejects a tuple row struct" {
         error.InvalidDeclaredType,
         zig_queries.parse(std.testing.allocator, "src/users.zig", source),
     );
+}
+
+test "an embedded query name repeats freely across files" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const source = "const sqlz = @import(\"sqlz\");\n" ++
+        "pub const find = sqlz.Query(.{ .sql = \"DELETE FROM users\", .backends = .{ .sqlite = true }, .cardinality = .exec });";
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a.zig", .data = source });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "b.zig", .data = source });
+
+    var project_inputs = try inputs.Inputs.init(std.testing.allocator, std.testing.io, tmp.dir, .{});
+    defer project_inputs.deinit();
+    var discovery = try zig_queries.discover(
+        std.testing.allocator,
+        &project_inputs,
+        tmp.dir,
+    );
+    defer discovery.deinit();
+    try std.testing.expectEqual(@as(usize, 2), discovery.sources.len);
 }

@@ -59,13 +59,67 @@ pub const ValidationError = error{
     InvalidLimit,
     InvalidCodecId,
     MissingCodecPatterns,
+    UnsupportedCatalogSupplements,
 };
 
 pub const Error = ziggy.Deserializer.Error || ValidationError;
 
+/// The fixed bound for reading `sqlz.ziggy` itself. The configured
+/// `limits.source_bytes` is unknown until the file is parsed, so the file is
+/// first read under this bound and then charged against the parsed limits.
+pub const max_config_bytes: usize = 1024 * 1024;
+
+/// How each format-1 field reaches its consumer. Every field of `Config` and
+/// its nested structs has exactly one entry; `test/config.zig` checks that.
+pub const Usage = enum {
+    /// Enforced while loading or checking the project.
+    checker,
+    /// Emitted into the generated module for runtime code to consume.
+    runtime,
+    /// Accepted and validated, but its consumer is not implemented yet.
+    deferred,
+};
+
+pub const FieldUsage = struct {
+    field: []const u8,
+    usage: Usage,
+    consumer: []const u8,
+};
+
+pub const field_usage = [_]FieldUsage{
+    .{ .field = "format_version", .usage = .checker, .consumer = "config.validate" },
+    .{ .field = "project_id", .usage = .runtime, .consumer = "generated `sqlz_project.id`" },
+    .{ .field = "migrations", .usage = .checker, .consumer = "migration discovery" },
+    .{ .field = "sql_roots", .usage = .checker, .consumer = "named query discovery and namespaces" },
+    .{ .field = "zig_roots", .usage = .checker, .consumer = "embedded query discovery" },
+    .{ .field = "backends", .usage = .checker, .consumer = "catalog replay and query checking" },
+    .{ .field = "backends.sqlite.profile", .usage = .runtime, .consumer = "checker dialect; generated `sqlz_project.sqlite_profile`" },
+    .{ .field = "backends.sqlite.database", .usage = .checker, .consumer = "config.validate: only `main` in 0.1" },
+    .{ .field = "backends.sqlite.capabilities", .usage = .checker, .consumer = "config.validate: only `bundled` in 0.1" },
+    .{ .field = "backends.postgres.profile", .usage = .runtime, .consumer = "checker dialect; generated `sqlz_project.postgres_profile`" },
+    .{ .field = "backends.postgres.search_path", .usage = .checker, .consumer = "PostgreSQL catalog name resolution" },
+    .{ .field = "catalog_supplements", .usage = .checker, .consumer = "config.validate: must be empty until supplements load (0.2, slice 5)" },
+    .{ .field = "codecs", .usage = .checker, .consumer = "codec bindings and type checking" },
+    .{ .field = "codecs.sqlite_types", .usage = .checker, .consumer = "codec scalar resolution" },
+    .{ .field = "codecs.postgres_types", .usage = .checker, .consumer = "codec scalar resolution" },
+    .{ .field = "limits", .usage = .checker, .consumer = "inputs.Inputs" },
+    .{ .field = "limits.source_bytes", .usage = .checker, .consumer = "inputs.Inputs: every read, including `sqlz.ziggy`" },
+    .{ .field = "limits.tokens_per_source", .usage = .deferred, .consumer = "slice 3: rewriting, parsing, and Zig discovery" },
+    .{ .field = "limits.nesting_depth", .usage = .deferred, .consumer = "slice 3: parsing, Zig discovery, and AST adaptation" },
+    .{ .field = "limits.diagnostics", .usage = .checker, .consumer = "diagnostics.List cap" },
+    .{ .field = "limits.revisions", .usage = .checker, .consumer = "migration discovery, before manifests are read" },
+    .{ .field = "limits.queries", .usage = .checker, .consumer = "named and embedded query discovery" },
+    .{ .field = "limits.registered_source_bytes", .usage = .checker, .consumer = "inputs.Inputs: total bytes read" },
+    .{ .field = "migration_lock_timeout_ms", .usage = .runtime, .consumer = "generated `sqlz_project.migration_lock_timeout_ms`; migration runners (slices 18-19)" },
+    .{ .field = "warnings_as_errors", .usage = .deferred, .consumer = "slice 6: the checker emits no warnings yet" },
+    .{ .field = "allow_untested_version", .usage = .runtime, .consumer = "generated `sqlz_project.allow_untested_version`; runtime version policy" },
+};
+
 pub const Loaded = struct {
     value: Config,
     arena: std.heap.ArenaAllocator,
+    /// Length of the configuration source, for the caller's input budget.
+    source_len: usize,
 
     pub fn config(self: *const Loaded) *const Config {
         return &self.value;
@@ -84,11 +138,34 @@ pub fn parse(
 ) Error!Loaded {
     var arena: std.heap.ArenaAllocator = .init(allocator);
     errdefer arena.deinit();
-    const value = try ziggy.deserializeLeaky(Config, arena.allocator(), source, meta, .{
+    // Dictionary keys borrow the source even with `copy_strings`, so the
+    // loaded value keeps its own copy instead of the caller's buffer.
+    const owned_source = try arena.allocator().dupeZ(u8, source);
+    const value = try ziggy.deserializeLeaky(Config, arena.allocator(), owned_source, meta, .{
         .copy_strings = .always,
     });
     try validate(&value);
-    return .{ .value = value, .arena = arena };
+    return .{ .value = value, .arena = arena, .source_len = source.len };
+}
+
+/// Reads and parses the configuration file `name` in `dir` under
+/// `max_config_bytes`. The caller charges `source_len` against the parsed
+/// limits.
+pub fn load(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    dir: std.Io.Dir,
+    name: []const u8,
+) !Loaded {
+    const raw = dir.readFileAlloc(io, name, allocator, .limited(max_config_bytes + 1)) catch |err| switch (err) {
+        error.StreamTooLong => return error.ConfigurationTooLarge,
+        else => return err,
+    };
+    defer allocator.free(raw);
+    const source = try allocator.dupeZ(u8, raw);
+    defer allocator.free(source);
+    var meta: ziggy.Deserializer.Meta = .init;
+    return parse(allocator, source, &meta);
 }
 
 pub fn validate(config: *const Config) ValidationError!void {
@@ -101,10 +178,16 @@ pub fn validate(config: *const Config) ValidationError!void {
     try validatePath(config.migrations);
     for (config.zig_roots) |path| try validatePath(path);
     for (config.catalog_supplements) |path| try validatePath(path);
+    // Supplements are not loaded in 0.1. Accepting them would let a project
+    // believe its declared functions and types were checked.
+    if (config.catalog_supplements.len != 0) return error.UnsupportedCatalogSupplements;
 
     var roots = config.sql_roots.fields.iterator();
     while (roots.next()) |entry| {
-        if (!isIdentifier(entry.key_ptr.*)) return error.InvalidSqlRootAlias;
+        // Aliases become top-level declarations of the generated module,
+        // which reserves the `sqlz` prefix for its own declarations.
+        if (!isIdentifier(entry.key_ptr.*) or reserved(entry.key_ptr.*))
+            return error.InvalidSqlRootAlias;
         try validatePath(entry.value_ptr.*);
     }
 
@@ -168,6 +251,10 @@ fn validatePath(path: []const u8) ValidationError!void {
             std.mem.eql(u8, component, ".."))
             return error.InvalidPath;
     }
+}
+
+fn reserved(name: []const u8) bool {
+    return std.mem.eql(u8, name, "sqlz") or std.mem.startsWith(u8, name, "sqlz_");
 }
 
 fn isIdentifier(name: []const u8) bool {

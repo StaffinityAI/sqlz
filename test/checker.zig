@@ -1,4 +1,5 @@
 const std = @import("std");
+const sqlz_inputs = @import("sqlz_inputs");
 const analysis = @import("sqlz_analysis");
 const checker = @import("sqlz_checker");
 const catalog = @import("sqlz_catalog");
@@ -489,11 +490,12 @@ test "discovery and replay apply common SQL before SQLite SQL" {
         .data = "DROP TABLE users",
     });
 
+    var project_inputs = try sqlz_inputs.Inputs.init(std.testing.allocator, std.testing.io, tmp.dir, .{});
+    defer project_inputs.deinit();
     var discovery = try migrations.discover(
         std.testing.allocator,
-        std.testing.io,
+        &project_inputs,
         tmp.dir,
-        1024 * 1024,
     );
     defer discovery.deinit();
     var schema = try checker.replayDiscoveredSqlite(std.testing.allocator, &discovery);

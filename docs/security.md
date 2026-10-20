@@ -4,11 +4,35 @@ sqlz processes repository-controlled SQL/Ziggy/Zig source, database-controlled
 metadata and errors, driver connections, and user-supplied CLI paths. None should
 be assumed safe merely because checking occurs at build time.
 
+## Threat model
+
+The table names each boundary, what crosses it, and the control that holds it.
+Rows whose consumer is not implemented yet fix the rule that consumer must follow.
+
+| Boundary | Threat | Control | Status |
+| --- | --- | --- | --- |
+| Configured roots | A root path reads files outside the project | Lexical path rules in `config.validate`; canonical containment check in `inputs.Inputs.openRoot` | enforced |
+| Symlinks in roots | A file or directory link reaches outside the project, loops, or duplicates sources | Opened file handles must resolve inside the project; directory links are never followed; both fail with S022 | enforced |
+| Non-regular inputs | A FIFO or device in place of a source blocks or floods the check | Only regular files are opened; anything else fails with S022 | enforced |
+| Input size and count | Oversized or numerous sources exhaust memory or time | `source_bytes`, `registered_source_bytes`, `revisions`, `queries`, and `diagnostics` limits, checked before buffering; fixed 1 MiB bound for `sqlz.ziggy` | enforced; token and nesting limits in slice 3 |
+| Generated cache paths | Generated code lands outside the build cache or collides | Output path is a build-system `addOutputFileArg` in the content-addressed cache; generated names come from validated identifiers | enforced; atomicity in slice 12 |
+| Dynamic SQL identifiers | Schema or table names from configuration or catalogs inject SQL | Identifiers are validated or quoted by dialect-aware helpers, never concatenated raw; values are always bound | enforced for search path and bootstrap; required of migration state SQL |
+| State ownership | A database is migrated by the wrong project or with forged state | `project_id` identity and checksum checks; state lives in a dedicated schema/table set | slices 15-16 |
+| Schema privileges | Migration credentials exceed what deployment needs | Documented minimal privileges; sqlz never requests superuser or trigger disabling | slices 18-19 |
+| Destructive commands | Downgrade, stamp, repair, or bootstrap reset destroy data | Explicit confirmation, lock, and identity checks; fail closed on any mismatch | slices 26-27 |
+| Secrets | Connection strings or credentials leak into output | Never emitted in diagnostics, journals, telemetry, or JSON | enforced for current transports |
+| Journals | Persisted journals leak SQL text, values, or credentials | Journals record only stable codes, revision IDs, and hashes | slice 17 |
+| Telemetry | Events leak values or alter query semantics | Disabled by default; safe IDs and codes only; callback failure cannot change results | deferred to 0.2 |
+
 ## Source and generated files
 
-Configuration paths are normalized, bounded by registered roots, and protected
-against traversal and symlink surprises. Parser limits prevent unbounded input,
-nesting, diagnostics, or project counts. Generated modules are written only to the
+Every file the checker reads goes through one input boundary that resolves the
+canonical project root, checks each opened handle against it (so a link swapped
+in after a check cannot redirect a read), and charges the read against the
+configured limits before parsing. Directory symlinks
+inside roots are never followed. There is no external-root registration in 0.1,
+so no input outside the directory holding `sqlz.ziggy` is ever read. Parser
+limits prevent unbounded input, nesting, diagnostics, or project counts. Generated modules are written only to the
 build cache using collision-resistant content keys; SQL identifiers are quoted by
 dialect-aware helpers, never concatenated from unchecked runtime strings.
 

@@ -263,10 +263,12 @@ pub fn codeForError(err: anyerror) []const u8 {
         error.UnsupportedStatement, error.DuplicateTable, error.DuplicateColumn => "C001",
         error.BackendNotSelected, error.UnexpectedResultColumns, error.MissingResultColumns, error.MissingDeclaredField, error.UnexpectedDeclaredField, error.DeclaredFieldOrder, error.DeclaredTypeMismatch, error.DeclaredNullabilityMismatch, error.UninferredDeclaredType, error.MissingDeclaredRow, error.UnexpectedDeclaredRow => "Q001",
         error.UnknownCodec, error.UnknownCodecTarget, error.IncompatibleCodec, error.MissingCodecForDeclaredType => "T001",
-        error.InvalidNamespace, error.NamespaceCollision, error.UnsupportedType, error.IncompatibleBackendContract => "G001",
+        error.InvalidNamespace, error.NamespaceCollision, error.DuplicateQueryVariant, error.UnsupportedType, error.IncompatibleBackendContract => "G001",
         error.ProjectCheckFailed => "G002",
         error.DiagnosticLimitReached => "S099",
-        error.UnsupportedFormatVersion, error.InvalidProjectId, error.InvalidPath, error.InvalidLimit => "S020",
+        error.UnsupportedFormatVersion, error.InvalidProjectId, error.InvalidPath, error.InvalidLimit, error.RuntimeBackendWithoutProfile, error.MissingBackend, error.InvalidSqlRootAlias, error.UnsupportedSqliteProfile, error.UnsupportedSqliteCapabilities, error.UnsupportedPostgresProfile, error.InvalidCodecId, error.MissingCodecPatterns, error.UnsupportedCatalogSupplements => "S020",
+        error.ConfigurationTooLarge, error.SourceTooLarge, error.RegisteredSourceLimitExceeded, error.RevisionLimitExceeded, error.QueryLimitExceeded => "S021",
+        error.PathEscapesProject, error.SymlinkedDirectory, error.NotRegularFile => "S022",
         error.OutOfMemory => "I001",
         else => "I999",
     };
@@ -288,6 +290,17 @@ pub fn messageForError(err: anyerror) []const u8 {
         error.ConflictingResultType => "set-operation result branches have conflicting types",
         error.ConflictingParameterType => "named parameter uses have conflicting types",
         error.UnknownCodec => "query references an unknown codec",
+        error.DuplicateQueryVariant => "two query files in one directory define the same name for the same backend",
+        error.RuntimeBackendWithoutProfile => "runtime backend has no checking profile in sqlz.ziggy",
+        error.UnsupportedCatalogSupplements => "catalog supplements are not supported in sqlz 0.1",
+        error.ConfigurationTooLarge => "sqlz.ziggy exceeds the 1 MiB configuration bound",
+        error.SourceTooLarge => "source file exceeds `limits.source_bytes`",
+        error.RegisteredSourceLimitExceeded => "project sources exceed `limits.registered_source_bytes`",
+        error.RevisionLimitExceeded => "migration revisions exceed `limits.revisions`",
+        error.QueryLimitExceeded => "project queries exceed `limits.queries`",
+        error.PathEscapesProject => "project input resolves outside the project directory",
+        error.SymlinkedDirectory => "symlinked directories are not followed in project roots",
+        error.NotRegularFile => "project input is not a regular file",
         error.IncompatibleCodec => "codec does not match the inferred database type",
         error.IncompatibleBackendContract => "backend query contracts are incompatible",
         error.ProjectCheckFailed => "project checking produced one or more diagnostics",
@@ -305,5 +318,6 @@ pub fn isCheckedSourceError(err: anyerror) bool {
     const code = codeForError(err);
     return code[0] == 'M' or code[0] == 'C' or code[0] == 'Q' or
         code[0] == 'T' or code[0] == 'G' or std.mem.eql(u8, code, "S010") or
-        std.mem.eql(u8, code, "S020");
+        std.mem.eql(u8, code, "S020") or std.mem.eql(u8, code, "S021") or
+        std.mem.eql(u8, code, "S022");
 }

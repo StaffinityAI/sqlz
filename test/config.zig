@@ -137,3 +137,80 @@ test "the project root is a valid source root, unlike a dot component" {
         config.parse(std.testing.allocator, unnormalized, &meta),
     );
 }
+
+test "catalog supplements are rejected until they are loaded" {
+    var meta: ziggy.Deserializer.Meta = .init;
+    const source = try std.testing.allocator.dupeZ(
+        u8,
+        valid ++ ".catalog_supplements = [\"sqlz/catalog.ziggy\"],\n",
+    );
+    defer std.testing.allocator.free(source);
+    try std.testing.expectError(
+        error.UnsupportedCatalogSupplements,
+        config.parse(std.testing.allocator, source, &meta),
+    );
+}
+
+test "root aliases may not use the generated module's reserved prefix" {
+    var meta: ziggy.Deserializer.Meta = .init;
+    for ([_][]const u8{ "sqlz", "sqlz_project" }) |alias| {
+        const replacement = try std.fmt.allocPrint(std.testing.allocator, ".{{ .{s} = \"queries\" }}", .{alias});
+        defer std.testing.allocator.free(replacement);
+        const replaced = try std.mem.replaceOwned(
+            u8,
+            std.testing.allocator,
+            valid,
+            ".{ .app = \"queries\" }",
+            replacement,
+        );
+        defer std.testing.allocator.free(replaced);
+        const source = try std.testing.allocator.dupeZ(u8, replaced);
+        defer std.testing.allocator.free(source);
+        try std.testing.expectError(
+            error.InvalidSqlRootAlias,
+            config.parse(std.testing.allocator, source, &meta),
+        );
+    }
+}
+
+test "the loaded value outlives the caller's source buffer" {
+    var meta: ziggy.Deserializer.Meta = .init;
+    const source = try std.testing.allocator.dupeZ(u8, valid);
+    var loaded = config.parse(std.testing.allocator, source, &meta) catch |err| {
+        std.testing.allocator.free(source);
+        return err;
+    };
+    defer loaded.deinit();
+    @memset(source, 0);
+    std.testing.allocator.free(source);
+    try std.testing.expect(loaded.config().sql_roots.fields.get("app") != null);
+    try std.testing.expectEqual(valid.len, loaded.source_len);
+}
+
+test "every format-1 field has exactly one documented use" {
+    const nested = .{
+        .{ "", config.Config },
+        .{ "backends.sqlite.", config.Sqlite },
+        .{ "backends.postgres.", config.Postgres },
+        .{ "codecs.", config.Codec },
+        .{ "limits.", config.Limits },
+    };
+    var expected: usize = 0;
+    inline for (nested) |entry| {
+        inline for (@typeInfo(entry[1]).@"struct".fields) |field| {
+            const name = entry[0] ++ field.name;
+            var matches: usize = 0;
+            for (config.field_usage) |usage| {
+                if (std.mem.eql(u8, usage.field, name)) matches += 1;
+            }
+            if (matches != 1) {
+                std.debug.print("field `{s}` has {d} usage entries\n", .{ name, matches });
+                return error.TestUnexpectedResult;
+            }
+            expected += 1;
+        }
+    }
+    // Each field matched exactly one entry, so equal counts mean no entry
+    // names a field that does not exist.
+    try std.testing.expectEqual(expected, config.field_usage.len);
+}

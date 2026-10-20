@@ -1,6 +1,7 @@
 const std = @import("std");
 const ziggy = @import("ziggy");
 const diagnostics = @import("sqlz_diagnostics");
+const inputs = @import("sqlz_inputs");
 
 pub const Backend = enum { sqlite, postgres };
 pub const Direction = enum { up, down };
@@ -181,32 +182,32 @@ pub fn validateManifest(manifest: *const Manifest) ManifestValidationError!void 
     }
 }
 
+/// Discovers the revisions in the migration root `root`, reading every file
+/// through `project_inputs` so the project's path and size limits apply.
 pub fn discover(
     allocator: std.mem.Allocator,
-    io: std.Io,
+    project_inputs: *inputs.Inputs,
     root: std.Io.Dir,
-    max_source_bytes: usize,
 ) anyerror!Discovery {
-    return discoverImpl(allocator, io, root, max_source_bytes, null);
+    return discoverImpl(allocator, project_inputs, root, null);
 }
 
 pub fn discoverWithDiagnostics(
     allocator: std.mem.Allocator,
-    io: std.Io,
+    project_inputs: *inputs.Inputs,
     root: std.Io.Dir,
-    max_source_bytes: usize,
     diagnostic_list: *diagnostics.List,
 ) anyerror!Discovery {
-    return discoverImpl(allocator, io, root, max_source_bytes, diagnostic_list);
+    return discoverImpl(allocator, project_inputs, root, diagnostic_list);
 }
 
 fn discoverImpl(
     allocator: std.mem.Allocator,
-    io: std.Io,
+    project_inputs: *inputs.Inputs,
     root: std.Io.Dir,
-    max_source_bytes: usize,
     diagnostic_list: ?*diagnostics.List,
 ) anyerror!Discovery {
+    const io = project_inputs.io;
     const diagnostics_before = if (diagnostic_list) |list| list.slice().len else 0;
     var directory_names: std.ArrayList([]const u8) = .empty;
     defer {
@@ -215,7 +216,12 @@ fn discoverImpl(
     }
     var iterator = root.iterate();
     while (try iterator.next(io)) |entry| {
-        if (entry.kind != .directory) continue;
+        // Only directories are revisions; files in the root are never read.
+        const kind = try project_inputs.entryKind(root, entry.name, entry.kind, false);
+        if (kind != .directory) continue;
+        // Count before any manifest is read, so an oversized history fails
+        // without buffering it.
+        try project_inputs.countRevisions(root, directory_names.items.len + 1);
         try directory_names.append(allocator, try allocator.dupe(u8, entry.name));
     }
     std.mem.sort([]const u8, directory_names.items, {}, struct {
@@ -232,12 +238,7 @@ fn discoverImpl(
     for (directory_names.items) |directory_name| {
         var directory = try root.openDir(io, directory_name, .{});
         defer directory.close(io);
-        const raw_manifest = try directory.readFileAlloc(
-            io,
-            "revision.ziggy",
-            allocator,
-            .limited(max_source_bytes),
-        );
+        const raw_manifest = try project_inputs.readFile(allocator, directory, "revision.ziggy");
         defer allocator.free(raw_manifest);
         const manifest_source = try allocator.dupeZ(u8, raw_manifest);
         defer allocator.free(manifest_source);
@@ -269,53 +270,17 @@ fn discoverImpl(
             return error.DirectoryRevisionMismatch;
         }
 
-        const common_up = try readOptionalSql(
-            allocator,
-            io,
-            directory,
-            "common.up.sql",
-            max_source_bytes,
-        );
+        const common_up = try project_inputs.readOptional(allocator, directory, "common.up.sql");
         errdefer allocator.free(common_up);
-        const common_down = try readOptionalSql(
-            allocator,
-            io,
-            directory,
-            "common.down.sql",
-            max_source_bytes,
-        );
+        const common_down = try project_inputs.readOptional(allocator, directory, "common.down.sql");
         errdefer allocator.free(common_down);
-        const sqlite_up = try readOptionalSql(
-            allocator,
-            io,
-            directory,
-            "sqlite.up.sql",
-            max_source_bytes,
-        );
+        const sqlite_up = try project_inputs.readOptional(allocator, directory, "sqlite.up.sql");
         errdefer allocator.free(sqlite_up);
-        const sqlite_down = try readOptionalSql(
-            allocator,
-            io,
-            directory,
-            "sqlite.down.sql",
-            max_source_bytes,
-        );
+        const sqlite_down = try project_inputs.readOptional(allocator, directory, "sqlite.down.sql");
         errdefer allocator.free(sqlite_down);
-        const postgres_up = try readOptionalSql(
-            allocator,
-            io,
-            directory,
-            "postgres.up.sql",
-            max_source_bytes,
-        );
+        const postgres_up = try project_inputs.readOptional(allocator, directory, "postgres.up.sql");
         errdefer allocator.free(postgres_up);
-        const postgres_down = try readOptionalSql(
-            allocator,
-            io,
-            directory,
-            "postgres.down.sql",
-            max_source_bytes,
-        );
+        const postgres_down = try project_inputs.readOptional(allocator, directory, "postgres.down.sql");
         errdefer allocator.free(postgres_down);
 
         const manifest = loaded.manifest();
@@ -714,24 +679,6 @@ fn isZiggyError(err: anyerror) bool {
     return switch (err) {
         error.Unexpected, error.Overflow, error.DuplicateField, error.UnknownField, error.MissingField => true,
         else => false,
-    };
-}
-
-fn readOptionalSql(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    directory: std.Io.Dir,
-    name: []const u8,
-    max_source_bytes: usize,
-) anyerror![]const u8 {
-    return directory.readFileAlloc(
-        io,
-        name,
-        allocator,
-        .limited(max_source_bytes),
-    ) catch |err| switch (err) {
-        error.FileNotFound => allocator.dupe(u8, ""),
-        else => err,
     };
 }
 
