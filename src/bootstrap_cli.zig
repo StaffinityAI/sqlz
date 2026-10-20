@@ -159,11 +159,17 @@ fn run(
             return error.NonTransactionalMigrationUnsupported;
     }
 
+    const limits: checker.parser.Limits = .{
+        .tokens = project.limits.tokens_per_source,
+        .nesting = project.limits.nesting_depth,
+    };
     const sqlite_dialect: checker.SqliteDialect = .{
         .profile = checker.SqliteProfile.fromString(project.backends.sqlite.?.profile) orelse unreachable,
+        .limits = limits,
     };
     const postgres_dialect: checker.PostgresDialect = .{
         .profile = checker.PostgresProfile.fromString(project.backends.postgres.?.profile) orelse unreachable,
+        .limits = limits,
     };
     var sqlite_catalog = try checker.replayDiscoveredSqliteWithDialect(allocator, &discovery, sqlite_dialect);
     defer sqlite_catalog.deinit();
@@ -301,8 +307,10 @@ fn applyPostgresMigrations(
         const revision = &discovery.revisions[index];
         const manifest = revision.manifest.manifest();
         if (!migrations.targetsBackend(manifest, .postgres)) continue;
-        if (revision.common_up.len != 0) _ = try conn.exec(revision.common_up, .{});
-        if (revision.postgres_up.len != 0) _ = try conn.exec(revision.postgres_up, .{});
+        const common_up = migrations.DiscoveredRevision.executable(revision.common_up);
+        const postgres_up = migrations.DiscoveredRevision.executable(revision.postgres_up);
+        if (common_up.len != 0) _ = try conn.exec(common_up, .{});
+        if (postgres_up.len != 0) _ = try conn.exec(postgres_up, .{});
     }
 }
 

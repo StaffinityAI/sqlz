@@ -118,6 +118,27 @@ const Fixture = struct {
         try std.testing.expectEqualStrings(path, list.slice()[0].primary.?.path);
     }
 
+    /// Like `expectDiagnostic`, and also checks where in the file it points.
+    fn expectDiagnosticAt(self: *Fixture, code: []const u8, path: []const u8, line: usize, column: usize) !void {
+        var list: diagnostics.List = .init(allocator, 100);
+        defer list.deinit();
+        try std.testing.expectError(error.ProjectCheckFailed, codegen.generateProjectWithCodecsAndDiagnostics(
+            allocator,
+            io,
+            self.tmp.dir,
+            "sqlz.ziggy",
+            &.{},
+            &list,
+        ));
+        try std.testing.expectEqual(@as(usize, 1), list.slice().len);
+        const diagnostic = list.slice()[0];
+        try std.testing.expectEqualStrings(code, diagnostic.code);
+        try std.testing.expectEqualStrings(path, diagnostic.primary.?.path);
+        try std.testing.expectEqual(line, diagnostic.primary.?.start.line);
+        try std.testing.expectEqual(column, diagnostic.primary.?.start.column);
+        try std.testing.expect(diagnostic.primary.?.excerpt != null);
+    }
+
     fn expectGenerates(self: *Fixture) !void {
         const generated = try self.generate();
         allocator.free(generated);
@@ -416,6 +437,9 @@ test "boundary errors are checked-source failures" {
         error.PathEscapesProject,
         error.SymlinkedDirectory,
         error.NotRegularFile,
+        error.TokenLimitExceeded,
+        error.NestingLimitExceeded,
+        error.InvalidUtf8,
     }) |err| try std.testing.expectEqual(@as(u8, 1), diagnostics.exitCode(err));
 }
 
@@ -428,4 +452,106 @@ test "a source path that is not a regular file fails instead of blocking" {
     try fixture.tmp.dir.createDirPath(io, "migrations/000000000001_t0/revision.ziggy");
     _ = try fixture.writeConfig("[]", "");
     try fixture.expectDiagnostic("S022", "migrations/000000000001_t0/revision.ziggy");
+}
+
+test "malformed UTF-8 fails with its exact position" {
+    var fixture: Fixture = .init();
+    defer fixture.deinit();
+    try fixture.writeRevisions(1);
+    try fixture.write("queries/a.sql", "-- sqlz.name: a\n-- sqlz.backends: sqlite\n" ++
+        "-- sqlz.cardinality: many\n\nSELECT 'é' AS a, '\xFF' AS b FROM t0");
+    _ = try fixture.writeConfig("[]", "");
+    // Reported at the byte, counted in characters: `é` is one column.
+    try fixture.expectDiagnosticAt("S011", "queries/a.sql", 5, 19);
+}
+
+test "malformed UTF-8 in a revision manifest or Zig root fails closed" {
+    var fixture: Fixture = .init();
+    defer fixture.deinit();
+    try fixture.writeStandard();
+    try fixture.write("src/bad.zig", "const a = \"\xC3\";\n");
+    _ = try fixture.writeConfig("[\"src\"]", "");
+    try fixture.expectDiagnosticAt("S011", "src/bad.zig", 1, 12);
+}
+
+test "a source with a byte order mark and CRLF line endings checks cleanly" {
+    var fixture: Fixture = .init();
+    defer fixture.deinit();
+    try fixture.writeRevisions(1);
+    try fixture.write("queries/a.sql", "\xEF\xBB\xBF-- sqlz.name: a\r\n-- sqlz.backends: sqlite\r\n-- sqlz.cardinality: many\r\n\r\nSELECT id\r\nFROM t0\r\n");
+    _ = try fixture.writeConfig("[]", "");
+    try fixture.expectGenerates();
+}
+
+/// A query of exactly 12 tokens nested 4 levels deep, deeper and longer than
+/// the fixture's migrations.
+fn writeLimitQuery(fixture: *Fixture) !void {
+    try fixture.writeRevisions(1);
+    try fixture.write("queries/big.sql",
+        \\-- sqlz.name: big
+        \\-- sqlz.backends: sqlite
+        \\-- sqlz.cardinality: many
+        \\
+        \\SELECT ((((id)))) FROM t0
+        \\WHERE id = 1
+    );
+}
+
+test "a query of exactly limits.tokens_per_source tokens is accepted, one more is not" {
+    var fixture: Fixture = .init();
+    defer fixture.deinit();
+    try writeLimitQuery(&fixture);
+    // SELECT ( ( ( ( id ) ) ) ) FROM t0 WHERE id = 1: 16 tokens.
+    var buffer: [64]u8 = undefined;
+    _ = try fixture.writeConfig("[]", try limitsField(&buffer, "tokens_per_source", 16));
+    try fixture.expectGenerates();
+    _ = try fixture.writeConfig("[]", try limitsField(&buffer, "tokens_per_source", 15));
+    try fixture.expectDiagnosticAt("S021", "big.sql", 6, 12);
+}
+
+test "a query nested exactly limits.nesting_depth deep is accepted, one deeper is not" {
+    var fixture: Fixture = .init();
+    defer fixture.deinit();
+    try writeLimitQuery(&fixture);
+    var buffer: [64]u8 = undefined;
+    _ = try fixture.writeConfig("[]", try limitsField(&buffer, "nesting_depth", 4));
+    try fixture.expectGenerates();
+    _ = try fixture.writeConfig("[]", try limitsField(&buffer, "nesting_depth", 3));
+    try fixture.expectDiagnosticAt("S021", "big.sql", 5, 11);
+}
+
+test "migration SQL is held to the token and nesting limits" {
+    var fixture: Fixture = .init();
+    defer fixture.deinit();
+    try fixture.writeRevisions(1);
+    try fixture.writeQuery("queries/a.sql", "a");
+    // CREATE TABLE t0 ( id INTEGER PRIMARY KEY ): 9 tokens, one level.
+    var buffer: [64]u8 = undefined;
+    _ = try fixture.writeConfig("[]", try limitsField(&buffer, "tokens_per_source", 9));
+    try fixture.expectGenerates();
+    _ = try fixture.writeConfig("[]", try limitsField(&buffer, "tokens_per_source", 8));
+    try fixture.expectDiagnosticAt("S021", "000000000001_t0/common.up.sql", 1, 40);
+}
+
+test "a Zig root is held to the token and nesting limits" {
+    var fixture: Fixture = .init();
+    defer fixture.deinit();
+    try fixture.writeRevisions(1);
+    try fixture.write("src/embedded.zig",
+        \\const sqlz = @import("sqlz");
+        \\pub const find = sqlz.Query(.{
+        \\    .sql = "SELECT id FROM t0",
+        \\    .backends = .{ .sqlite = true },
+        \\    .cardinality = .many,
+        \\    .row = struct { id: i64 },
+        \\});
+    );
+    try fixture.write("queries/.keep.sql", "");
+    var buffer: [64]u8 = undefined;
+    // Three levels: `sqlz.Query(`, its `.{`, and the `.{` or `struct {`
+    // inside it.
+    _ = try fixture.writeConfig("[\"src\"]", try limitsField(&buffer, "nesting_depth", 3));
+    try fixture.expectGenerates();
+    _ = try fixture.writeConfig("[\"src\"]", try limitsField(&buffer, "nesting_depth", 2));
+    try fixture.expectDiagnosticAt("S021", "src/embedded.zig", 4, 18);
 }

@@ -4,6 +4,7 @@
 //! before anything is parsed or generated.
 const std = @import("std");
 const diagnostics = @import("sqlz_diagnostics");
+const source = @import("sqlz_source");
 
 pub const Error = error{
     PathEscapesProject,
@@ -12,7 +13,10 @@ pub const Error = error{
     RegisteredSourceLimitExceeded,
     RevisionLimitExceeded,
     QueryLimitExceeded,
+    TokenLimitExceeded,
+    NestingLimitExceeded,
     NotRegularFile,
+    InvalidUtf8,
 };
 
 /// The project-level limits a discovery pass enforces. Defaults match the
@@ -22,6 +26,8 @@ pub const Limits = struct {
     registered_source_bytes: u64 = 512 * 1024 * 1024,
     revisions: u32 = 10_000,
     queries: u32 = 100_000,
+    tokens_per_source: u64 = 1_000_000,
+    nesting_depth: u32 = 256,
 
     /// Selects the input limits from a parsed `sqlz.ziggy` `.limits` value.
     /// Taken structurally so this module stays independent of the config parser.
@@ -31,6 +37,8 @@ pub const Limits = struct {
             .registered_source_bytes = limits.registered_source_bytes,
             .revisions = limits.revisions,
             .queries = limits.queries,
+            .tokens_per_source = limits.tokens_per_source,
+            .nesting_depth = limits.nesting_depth,
         };
     }
 };
@@ -47,6 +55,10 @@ pub const Inputs = struct {
     /// Project-relative path of the input that crossed a boundary, kept so the
     /// caller can point its diagnostic at the offending file.
     failure_path: ?[]u8 = null,
+    /// Where in that input the boundary was crossed, when it was crossed
+    /// inside the text rather than by the file as a whole.
+    failure_span: ?diagnostics.Span = null,
+    failure_excerpt: ?[]u8 = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -69,6 +81,7 @@ pub const Inputs = struct {
 
     pub fn deinit(self: *Inputs) void {
         if (self.failure_path) |path| self.allocator.free(path);
+        if (self.failure_excerpt) |excerpt| self.allocator.free(excerpt);
         self.allocator.free(self.project_path);
         self.* = undefined;
     }
@@ -160,7 +173,32 @@ pub const Inputs = struct {
             try self.failAt(dir, sub_path);
             return err;
         };
+        // Every consumer decodes its source as UTF-8, so a malformed byte
+        // fails here, once, at its exact offset.
+        if (source.invalidUtf8Offset(contents)) |offset| {
+            try self.failInside(dir, sub_path, contents, offset, offset + 1);
+            return error.InvalidUtf8;
+        }
         return contents;
+    }
+
+    /// Records that `text`, read from `sub_path` in `dir`, crossed a boundary
+    /// at `start..end`, such as a token or nesting limit found while lexing.
+    pub fn failInside(
+        self: *Inputs,
+        dir: std.Io.Dir,
+        sub_path: []const u8,
+        text: []const u8,
+        start: usize,
+        end: usize,
+    ) !void {
+        std.debug.assert(start <= end);
+        if (self.failure_path != null) return;
+        try self.failAt(dir, sub_path);
+        const span = diagnostics.spanAt("", text, start, end);
+        self.failure_excerpt = try self.allocator.dupe(u8, span.excerpt.?);
+        self.failure_span = span;
+        self.failure_span.?.excerpt = self.failure_excerpt;
     }
 
     /// Like `readFile`, but a missing file reads as empty.
@@ -227,15 +265,17 @@ pub const Inputs = struct {
     pub fn appendDiagnostic(self: *const Inputs, list: *diagnostics.List, err: anyerror) !bool {
         if (!isBoundaryError(err)) return false;
         const path = self.failure_path orelse ".";
+        var primary: diagnostics.Span = self.failure_span orelse .{
+            .path = "",
+            .start = .{ .offset = 0, .line = 1, .column = 1 },
+            .end = .{ .offset = 0, .line = 1, .column = 1 },
+        };
+        primary.path = path;
         try list.appendDiagnostic(.{
             .severity = .err,
             .code = diagnostics.codeForError(err),
             .message = diagnostics.messageForError(err),
-            .primary = .{
-                .path = path,
-                .start = .{ .offset = 0, .line = 1, .column = 1 },
-                .end = .{ .offset = 0, .line = 1, .column = 1 },
-            },
+            .primary = primary,
             .help = help(err),
         });
         return true;
@@ -269,7 +309,10 @@ pub fn isBoundaryError(err: anyerror) bool {
         error.RegisteredSourceLimitExceeded,
         error.RevisionLimitExceeded,
         error.QueryLimitExceeded,
+        error.TokenLimitExceeded,
+        error.NestingLimitExceeded,
         error.NotRegularFile,
+        error.InvalidUtf8,
         => true,
         else => false,
     };
@@ -283,7 +326,10 @@ fn help(err: anyerror) []const u8 {
         error.RegisteredSourceLimitExceeded => "raise `.limits.registered_source_bytes` or narrow the configured roots",
         error.RevisionLimitExceeded => "raise `.limits.revisions`",
         error.QueryLimitExceeded => "raise `.limits.queries` or narrow the configured roots",
+        error.TokenLimitExceeded => "split the source or raise `.limits.tokens_per_source`",
+        error.NestingLimitExceeded => "flatten the expression or raise `.limits.nesting_depth`",
         error.NotRegularFile => "replace it with a regular file",
+        error.InvalidUtf8 => "save the file as UTF-8",
         else => unreachable,
     };
 }

@@ -4,9 +4,15 @@ const diagnostics = @import("sqlz_diagnostics");
 
 pub const ast = libpg_query;
 
+pub const lexer = @import("lexer.zig");
+pub const Limits = lexer.Limits;
+
 pub const RewrittenSql = struct {
     sql: []u8,
     names: []const []const u8,
+    /// For each byte of `sql`, plus one past its end, the offset in the
+    /// original source it came from. A marker maps every byte to the colon
+    /// of the parameter it replaced.
     original_offsets: []const usize,
 
     pub fn deinit(self: *RewrittenSql, allocator: std.mem.Allocator) void {
@@ -18,7 +24,7 @@ pub const RewrittenSql = struct {
     }
 };
 
-const ParameterStyle = enum { sqlite, postgres };
+const MarkerStyle = enum { sqlite, postgres };
 
 pub const SqliteProfile = enum(u8) {
     v3_45,
@@ -45,6 +51,7 @@ pub const SqliteProfile = enum(u8) {
 
 pub const SqliteDialect = struct {
     profile: SqliteProfile = .v3_53,
+    limits: Limits = .{},
 };
 
 pub const PostgresProfile = enum(u8) {
@@ -64,21 +71,30 @@ pub const PostgresProfile = enum(u8) {
 
 pub const PostgresDialect = struct {
     profile: PostgresProfile = .v15,
+    limits: Limits = .{},
 };
 
+/// Rewrites `:name` parameters to SQLite `?N` markers, lexing SQLite syntax.
 pub fn rewriteSqlite(allocator: std.mem.Allocator, source: []const u8) !RewrittenSql {
-    return rewriteParameters(allocator, source, .sqlite);
+    return rewriteParameters(allocator, source, .sqlite, .sqlite);
 }
 
+/// Rewrites `:name` parameters to PostgreSQL `$N` markers, lexing PostgreSQL
+/// syntax.
 pub fn rewritePostgres(allocator: std.mem.Allocator, source: []const u8) !RewrittenSql {
-    return rewriteParameters(allocator, source, .postgres);
+    return rewriteParameters(allocator, source, .postgres, .postgres);
 }
 
+/// Replaces each named parameter with a positional marker numbered in
+/// first-use order and copies every other byte, so the output differs from
+/// the source only at parameters. A byte order mark becomes spaces, keeping
+/// every offset after it unchanged.
 fn rewriteParameters(
     allocator: std.mem.Allocator,
     source: []const u8,
-    comptime style: ParameterStyle,
-) !RewrittenSql {
+    dialect: lexer.Dialect,
+    comptime style: MarkerStyle,
+) std.mem.Allocator.Error!RewrittenSql {
     var output: std.ArrayList(u8) = .empty;
     errdefer output.deinit(allocator);
     var offsets: std.ArrayList(usize) = .empty;
@@ -88,79 +104,39 @@ fn rewriteParameters(
         for (names.items) |name| allocator.free(name);
         names.deinit(allocator);
     }
+    var ordinals: std.StringHashMapUnmanaged(usize) = .empty;
+    defer ordinals.deinit(allocator);
+    try output.ensureTotalCapacity(allocator, source.len);
+    try offsets.ensureTotalCapacity(allocator, source.len + 1);
 
-    const State = enum {
-        normal,
-        single,
-        double,
-        backtick,
-        bracket,
-        line_comment,
-        block_comment,
-    };
-    var state: State = .normal;
-    var i: usize = 0;
-    while (i < source.len) {
-        const c = source[i];
-        switch (state) {
-            .normal => {
-                if (c == '\'') state = .single else if (c == '"') state = .double else if (c == 0x60) state = .backtick else if (c == '[') state = .bracket else if (c == '-' and i + 1 < source.len and source[i + 1] == '-') state = .line_comment else if (c == '/' and i + 1 < source.len and source[i + 1] == '*') state = .block_comment else if (c == ':' and (i == 0 or source[i - 1] != ':') and i + 1 < source.len and isIdentStart(source[i + 1])) {
-                    var end = i + 2;
-                    while (end < source.len and isIdentContinue(source[end])) : (end += 1) {}
-                    const name = source[i + 1 .. end];
-                    var ordinal: usize = 0;
-                    for (names.items, 1..) |existing, candidate| {
-                        if (std.mem.eql(u8, existing, name)) {
-                            ordinal = candidate;
-                            break;
-                        }
-                    }
-                    if (ordinal == 0) {
-                        try names.append(allocator, try allocator.dupe(u8, name));
-                        ordinal = names.items.len;
-                    }
-                    const marker = try std.fmt.allocPrint(allocator, switch (style) {
-                        .sqlite => "?{d}",
-                        .postgres => "$" ++ "{d}",
-                    }, .{ordinal});
-                    defer allocator.free(marker);
-                    try output.appendSlice(allocator, marker);
-                    try offsets.appendNTimes(allocator, i, marker.len);
-                    i = end;
-                    continue;
-                }
-            },
-            .single => if (c == '\'' and !(i + 1 < source.len and source[i + 1] == '\'')) {
-                state = .normal;
-            } else if (c == '\'' and i + 1 < source.len and source[i + 1] == '\'') {
-                try output.append(allocator, c);
-                try offsets.append(allocator, i);
-                i += 1;
-            },
-            .double => {
-                if (c == '"') state = .normal;
-            },
-            .backtick => {
-                if (c == 0x60) state = .normal;
-            },
-            .bracket => {
-                if (c == ']') state = .normal;
-            },
-            .line_comment => {
-                if (c == '\n') state = .normal;
-            },
-            .block_comment => if (c == '*' and i + 1 < source.len and source[i + 1] == '/') {
-                try output.append(allocator, c);
-                try offsets.append(allocator, i);
-                i += 1;
-                state = .normal;
-            },
-        }
-        try output.append(allocator, c);
-        try offsets.append(allocator, i);
-        i += 1;
+    var copied: usize = 0;
+    if (std.mem.startsWith(u8, source, "\xEF\xBB\xBF")) {
+        try output.appendSlice(allocator, "   ");
+        try offsets.appendSlice(allocator, &.{ 0, 1, 2 });
+        copied = 3;
     }
+    var tokens: lexer.Lexer = .init(source, dialect);
+    while (tokens.next()) |token| {
+        if (token.kind != .parameter) continue;
+        try appendOriginal(allocator, &output, &offsets, source, copied, token.start);
+        const name = source[token.start + 1 .. token.end];
+        const entry = try ordinals.getOrPut(allocator, name);
+        if (!entry.found_existing) {
+            try names.append(allocator, try allocator.dupe(u8, name));
+            entry.value_ptr.* = names.items.len;
+        }
+        var marker_buffer: [24]u8 = undefined;
+        const marker = std.fmt.bufPrint(&marker_buffer, switch (style) {
+            .sqlite => "?{d}",
+            .postgres => "${d}",
+        }, .{entry.value_ptr.*}) catch unreachable;
+        try output.appendSlice(allocator, marker);
+        try offsets.appendNTimes(allocator, token.start, marker.len);
+        copied = token.end;
+    }
+    try appendOriginal(allocator, &output, &offsets, source, copied, source.len);
     try offsets.append(allocator, source.len);
+    std.debug.assert(offsets.items.len == output.items.len + 1);
 
     return .{
         .sql = try output.toOwnedSlice(allocator),
@@ -169,7 +145,26 @@ fn rewriteParameters(
     };
 }
 
-pub const ParseError = error{ EmptyInput, ParseError, UnsupportedSqliteFeature } || std.mem.Allocator.Error;
+fn appendOriginal(
+    allocator: std.mem.Allocator,
+    output: *std.ArrayList(u8),
+    offsets: *std.ArrayList(usize),
+    source: []const u8,
+    start: usize,
+    end: usize,
+) std.mem.Allocator.Error!void {
+    std.debug.assert(start <= end and end <= source.len);
+    try output.appendSlice(allocator, source[start..end]);
+    for (start..end) |offset| try offsets.append(allocator, offset);
+}
+
+pub const ParseError = error{
+    EmptyInput,
+    ParseError,
+    UnsupportedSqliteFeature,
+    TokenLimitExceeded,
+    NestingLimitExceeded,
+} || std.mem.Allocator.Error;
 
 pub const ParseResult = struct {
     rewritten: RewrittenSql,
@@ -185,9 +180,12 @@ pub const ParseResult = struct {
 
 pub const Diagnostic = struct {
     allocator: std.mem.Allocator,
+    /// S010 for a grammar error, S021 for a token or nesting limit.
+    code: []const u8 = "S010",
     message: []const u8,
     path: []const u8,
     original_offset: usize,
+    original_end: usize,
     rewritten_offset: usize,
     line: usize,
     column: usize,
@@ -198,21 +196,25 @@ pub const Diagnostic = struct {
             .line = self.line,
             .column = self.column,
         };
+        const width = @max(self.original_end, self.original_offset + 1) - self.original_offset;
         return .{
             .severity = .err,
-            .code = "S010",
+            .code = self.code,
             .message = self.message,
             .primary = .{
                 .path = self.path,
                 .start = position,
                 .end = .{
-                    .offset = self.original_offset + 1,
+                    .offset = self.original_offset + width,
                     .line = self.line,
-                    .column = self.column + 1,
+                    .column = self.column + width,
                 },
             },
             .labels = &.{},
-            .notes = &.{"reported by the PostgreSQL grammar after portable parameter rewriting"},
+            .notes = if (std.mem.eql(u8, self.code, "S010"))
+                &.{"reported by the PostgreSQL grammar after portable parameter rewriting"}
+            else
+                &.{},
         };
     }
 
@@ -227,10 +229,12 @@ pub const DetailedResult = union(enum) {
     syntax_error: Diagnostic,
 };
 
+pub const DetailedError = error{EmptyInput} || std.mem.Allocator.Error;
+
 pub fn parseDetailed(
     allocator: std.mem.Allocator,
     source: []const u8,
-) (error{EmptyInput} || std.mem.Allocator.Error)!DetailedResult {
+) DetailedError!DetailedResult {
     return parseDetailedSource(allocator, "<sql>", source);
 }
 
@@ -238,30 +242,85 @@ pub fn parseDetailedSource(
     allocator: std.mem.Allocator,
     path: []const u8,
     source: []const u8,
-) (error{EmptyInput} || std.mem.Allocator.Error)!DetailedResult {
+) DetailedError!DetailedResult {
+    return parseDetailedWithLimits(allocator, path, source, .{});
+}
+
+/// Parses PostgreSQL SQL and reports a grammar error, or a token or nesting
+/// limit crossed before the grammar ran, as a diagnostic in the original
+/// source.
+pub fn parseDetailedWithLimits(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    source: []const u8,
+    limits: Limits,
+) DetailedError!DetailedResult {
+    return parseLexed(allocator, path, source, .postgres, limits);
+}
+
+fn parseLexed(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    source: []const u8,
+    dialect: lexer.Dialect,
+    limits: Limits,
+) DetailedError!DetailedResult {
     if (source.len == 0) return error.EmptyInput;
-    var rewritten = try rewritePostgres(allocator, source);
+    // libpg_query reads a C string, so a NUL byte would hide everything after
+    // it from the check while a driver might still send it.
+    if (std.mem.indexOfScalar(u8, source, 0)) |offset| {
+        const position = diagnostics.positionAt(source, offset);
+        return .{ .syntax_error = .{
+            .allocator = allocator,
+            .message = try allocator.dupe(u8, "SQL contains a NUL byte"),
+            .path = path,
+            .original_offset = offset,
+            .original_end = offset + 1,
+            .rewritten_offset = 0,
+            .line = position.line,
+            .column = position.column,
+        } };
+    }
+    // Nothing reaches libpg_query until the source is known to be small and
+    // shallow enough for it, since its tree serializer recurses once per
+    // level and a long operator chain would overflow any stack.
+    if (lexer.checkLimits(source, dialect, limits)) |violation| {
+        const position = diagnostics.positionAt(source, violation.start);
+        return .{ .syntax_error = .{
+            .allocator = allocator,
+            .code = "S021",
+            .message = try allocator.dupe(u8, diagnostics.messageForError(violation.err())),
+            .path = path,
+            .original_offset = violation.start,
+            .original_end = violation.end,
+            .rewritten_offset = 0,
+            .line = position.line,
+            .column = position.column,
+        } };
+    }
+    var rewritten = try rewriteParameters(allocator, source, dialect, .postgres);
     errdefer rewritten.deinit(allocator);
 
     const terminated = try allocator.dupeZ(u8, rewritten.sql);
     defer allocator.free(terminated);
-
     const native = libpg_query.pg_query_parse_protobuf(terminated.ptr);
     defer libpg_query.pg_query_free_protobuf_parse_result(native);
     if (native.@"error") |native_error| {
+        // PostgreSQL reports a 1-based character position, not a byte offset.
         const cursor: usize = if (native_error.*.cursorpos <= 0)
             0
         else
-            @min(@as(usize, @intCast(native_error.*.cursorpos - 1)), rewritten.sql.len);
+            byteOffsetOfScalar(rewritten.sql, @intCast(native_error.*.cursorpos - 1));
         const message = try allocator.dupe(u8, std.mem.span(native_error.*.message));
         const original_offset = rewritten.original_offsets[cursor];
-        const position = sourcePosition(source, original_offset);
+        const position = diagnostics.positionAt(source, original_offset);
         rewritten.deinit(allocator);
         return .{ .syntax_error = .{
             .allocator = allocator,
             .message = message,
             .path = path,
             .original_offset = original_offset,
+            .original_end = original_offset + 1,
             .rewritten_offset = cursor,
             .line = position.line,
             .column = position.column,
@@ -280,26 +339,37 @@ pub fn parseDetailedSource(
     } };
 }
 
-fn sourcePosition(source: []const u8, offset: usize) struct { line: usize, column: usize } {
-    var line: usize = 1;
-    var column: usize = 1;
-    for (source[0..@min(offset, source.len)]) |byte| {
-        if (byte == '\n') {
-            line += 1;
-            column = 1;
-        } else {
-            column += 1;
-        }
+/// The byte offset of the `index`th Unicode scalar value in `text`, clamped
+/// to its length.
+fn byteOffsetOfScalar(text: []const u8, index: usize) usize {
+    var seen: usize = 0;
+    for (text, 0..) |byte, offset| {
+        if (byte & 0xC0 == 0x80) continue;
+        if (seen == index) return offset;
+        seen += 1;
     }
-    return .{ .line = line, .column = column };
+    return text.len;
 }
 
 pub fn parse(allocator: std.mem.Allocator, source: []const u8) ParseError!ParseResult {
-    return switch (try parseDetailed(allocator, source)) {
+    return parseWithLimits(allocator, source, .postgres, .{});
+}
+
+fn parseWithLimits(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    dialect: lexer.Dialect,
+    limits: Limits,
+) ParseError!ParseResult {
+    return switch (try parseLexed(allocator, "<sql>", source, dialect, limits)) {
         .ok => |result| result,
         .syntax_error => |value| {
             var diagnostic = value;
-            diagnostic.deinit();
+            defer diagnostic.deinit();
+            if (std.mem.eql(u8, diagnostic.code, "S021")) {
+                const violation = lexer.checkLimits(source, dialect, limits).?;
+                return violation.err();
+            }
             return error.ParseError;
         },
     };
@@ -310,28 +380,34 @@ pub fn parsePostgresWithDialect(
     source: []const u8,
     dialect: PostgresDialect,
 ) ParseError!ParseResult {
-    _ = dialect;
-    return parse(allocator, source);
+    return parseWithLimits(allocator, source, .postgres, dialect.limits);
 }
 
 pub fn parseSqlite(allocator: std.mem.Allocator, source: []const u8) ParseError!ParseResult {
     return parseSqliteWithDialect(allocator, source, .{});
 }
 
+/// Checks limits against the SQLite text, as both lexers see it, then hands
+/// the normalized text to the shared grammar. Normalization rejects the forms
+/// whose meaning the two lexers disagree on, so rewriting with the SQLite lexer
+/// finds the parameters the grammar will see.
 pub fn parseSqliteWithDialect(
     allocator: std.mem.Allocator,
     source: []const u8,
     dialect: SqliteDialect,
 ) ParseError!ParseResult {
+    if (lexer.checkLimits(source, .sqlite, dialect.limits)) |violation| return violation.err();
     const normalized = try normalizeSqlite(allocator, source, dialect);
     defer allocator.free(normalized);
-    var parsed = try parse(allocator, normalized);
+    var parsed = try parseWithLimits(allocator, normalized, .sqlite, dialect.limits);
     errdefer parsed.deinit();
     try validateSqliteTree(parsed.tree);
     return parsed;
 }
 
 fn validateSqliteTree(tree: *const libpg_query.PgQuery__ParseResult) error{UnsupportedSqliteFeature}!void {
+    // An empty statement list, such as `;` alone, has no array at all.
+    if (tree.n_stmts == 0) return;
     for (tree.stmts[0..tree.n_stmts]) |raw| {
         if (raw == null or raw.*.stmt == null) continue;
         try validateSqliteNode(raw.*.stmt);
@@ -403,97 +479,73 @@ fn validateSqliteWith(
     }
 }
 
+/// Masks SQLite-only syntax the shared grammar does not know, byte for byte,
+/// so every offset into the result is an offset into `source`. Forms that are
+/// valid in both dialects but lex differently — a dollar quote, an `E'...'`
+/// string, a nested block comment — are rejected rather than guessed at.
 fn normalizeSqlite(
     allocator: std.mem.Allocator,
     source: []const u8,
     dialect: SqliteDialect,
 ) (error{UnsupportedSqliteFeature} || std.mem.Allocator.Error)![]u8 {
-    var output: std.ArrayList(u8) = .empty;
-    errdefer output.deinit(allocator);
-    const State = enum { normal, single, double, backtick, bracket, line_comment, block_comment };
-    var state: State = .normal;
-    var index: usize = 0;
-    while (index < source.len) {
-        const c = source[index];
-        if (state == .normal and c == ':' and index + 1 < source.len and source[index + 1] == ':')
-            return error.UnsupportedSqliteFeature;
-        if (state == .normal and c == '_' and index > 0 and index + 1 < source.len and
-            std.ascii.isDigit(source[index - 1]) and std.ascii.isDigit(source[index + 1]))
-        {
-            if (@intFromEnum(dialect.profile) < @intFromEnum(SqliteProfile.v3_46))
-                return error.UnsupportedSqliteFeature;
-            // libpg_query does not recognize SQLite's separator. A digit keeps
-            // the token numeric and preserves every source offset; runtime SQL
-            // remains the original text.
-            try output.append(allocator, '0');
-            index += 1;
-            continue;
-        }
-        if (state == .normal and isIdentStart(c)) {
-            var end = index + 1;
-            while (end < source.len and isIdentContinue(source[end])) : (end += 1) {}
-            const word = source[index..end];
-            if (std.ascii.eqlIgnoreCase(word, "ILIKE") or
-                (std.ascii.eqlIgnoreCase(word, "SIMILAR") and keywordAfter(source, end, "TO") != null))
-                return error.UnsupportedSqliteFeature;
-            if (std.ascii.eqlIgnoreCase(word, "AUTOINCREMENT") or
-                (std.ascii.eqlIgnoreCase(word, "STRICT") and isTrailingTableOption(source, index, end)))
-            {
-                try appendMasked(&output, allocator, source[index..end]);
-                index = end;
-                continue;
-            }
-            if (std.ascii.eqlIgnoreCase(word, "WITHOUT")) {
-                if (keywordAfter(source, end, "ROWID")) |rowid_end| {
-                    try appendMasked(&output, allocator, source[index..rowid_end]);
-                    index = rowid_end;
-                    continue;
+    const output = try allocator.dupe(u8, source);
+    errdefer allocator.free(output);
+    var tokens: lexer.Lexer = .init(source, .sqlite);
+    var previous: ?lexer.Token = null;
+    while (tokens.next()) |token| : (previous = token) {
+        const text = token.text(source);
+        switch (token.kind) {
+            .operator => if (std.mem.eql(u8, text, "::")) return error.UnsupportedSqliteFeature,
+            .block_comment => if (std.mem.indexOf(u8, text[2..], "/*") != null)
+                return error.UnsupportedSqliteFeature,
+            // `$name` is a SQLite parameter but opens a dollar quote, or is an
+            // error, in PostgreSQL.
+            .placeholder => if (text[0] == '$') return error.UnsupportedSqliteFeature,
+            .punctuation => if (text[0] == '$') return error.UnsupportedSqliteFeature,
+            .string => if (previous) |before| {
+                if (before.kind == .identifier and before.end == token.start and
+                    std.ascii.eqlIgnoreCase(before.text(source), "E"))
+                    return error.UnsupportedSqliteFeature;
+            },
+            .number => if (std.mem.indexOfScalar(u8, text, '_')) |_| {
+                if (@intFromEnum(dialect.profile) < @intFromEnum(SqliteProfile.v3_46))
+                    return error.UnsupportedSqliteFeature;
+                // libpg_query does not recognize SQLite's separator. A digit
+                // keeps the token numeric and preserves every source offset;
+                // runtime SQL remains the original text.
+                for (token.start..token.end) |index| {
+                    if (source[index] == '_' and index > token.start and
+                        std.ascii.isDigit(source[index - 1]) and index + 1 < token.end and
+                        std.ascii.isDigit(source[index + 1])) output[index] = '0';
                 }
-            }
-            try output.appendSlice(allocator, word);
-            index = end;
-            if (std.ascii.eqlIgnoreCase(word, "INSERT")) {
-                if (keywordAfter(source, end, "OR")) |or_end| {
-                    if (keywordAfter(source, or_end, "IGNORE")) |ignore_end| {
-                        try appendMasked(&output, allocator, source[end..ignore_end]);
-                        index = ignore_end;
+            },
+            .identifier => {
+                if (std.ascii.eqlIgnoreCase(text, "ILIKE") or
+                    (std.ascii.eqlIgnoreCase(text, "SIMILAR") and keywordAfter(source, token.end, "TO") != null))
+                    return error.UnsupportedSqliteFeature;
+                if (std.ascii.eqlIgnoreCase(text, "AUTOINCREMENT") or
+                    (std.ascii.eqlIgnoreCase(text, "STRICT") and isTrailingTableOption(source, token.start, token.end)))
+                {
+                    mask(output, token.start, token.end);
+                } else if (std.ascii.eqlIgnoreCase(text, "WITHOUT")) {
+                    if (keywordAfter(source, token.end, "ROWID")) |rowid_end| mask(output, token.start, rowid_end);
+                } else if (std.ascii.eqlIgnoreCase(text, "INSERT")) {
+                    if (keywordAfter(source, token.end, "OR")) |or_end| {
+                        if (keywordAfter(source, or_end, "IGNORE")) |ignore_end| mask(output, token.end, ignore_end);
                     }
                 }
-            }
-            continue;
+            },
+            else => {},
         }
-        switch (state) {
-            .normal => {
-                if (c == '\'') state = .single else if (c == '"') state = .double else if (c == '`') state = .backtick else if (c == '[') state = .bracket else if (c == '-' and index + 1 < source.len and source[index + 1] == '-') state = .line_comment else if (c == '/' and index + 1 < source.len and source[index + 1] == '*') state = .block_comment;
-            },
-            .single => if (c == '\'' and !(index + 1 < source.len and source[index + 1] == '\'')) {
-                state = .normal;
-            } else if (c == '\'' and index + 1 < source.len and source[index + 1] == '\'') {
-                try output.append(allocator, c);
-                index += 1;
-            },
-            .double => if (c == '"') {
-                state = .normal;
-            },
-            .backtick => if (c == '`') {
-                state = .normal;
-            },
-            .bracket => if (c == ']') {
-                state = .normal;
-            },
-            .line_comment => if (c == '\n') {
-                state = .normal;
-            },
-            .block_comment => if (c == '*' and index + 1 < source.len and source[index + 1] == '/') {
-                try output.append(allocator, c);
-                index += 1;
-                state = .normal;
-            },
-        }
-        try output.append(allocator, source[index]);
-        index += 1;
     }
-    return output.toOwnedSlice(allocator);
+    std.debug.assert(output.len == source.len);
+    return output;
+}
+
+fn mask(output: []u8, start: usize, end: usize) void {
+    for (output[start..end]) |*c| {
+        if (c.* != '\n' and c.* != '\r') c.* = ' ';
+    }
 }
 
 fn keywordAfter(source: []const u8, start: usize, keyword: []const u8) ?usize {
@@ -512,10 +564,6 @@ fn isTrailingTableOption(source: []const u8, start: usize, end: usize) bool {
     var after = end;
     while (after < source.len and std.ascii.isWhitespace(source[after])) : (after += 1) {}
     return after == source.len or source[after] == ',' or source[after] == ';';
-}
-
-fn appendMasked(output: *std.ArrayList(u8), allocator: std.mem.Allocator, source: []const u8) !void {
-    for (source) |c| try output.append(allocator, if (c == '\n' or c == '\r') c else ' ');
 }
 
 fn isIdentStart(c: u8) bool {

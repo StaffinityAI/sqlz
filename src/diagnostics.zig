@@ -1,41 +1,34 @@
 const std = @import("std");
+const source = @import("sqlz_source");
 
 pub const format_version: u32 = 1;
 
 pub const Severity = enum { err, warning, note };
 pub const Format = enum { human, json };
 
-pub const Position = struct {
-    offset: usize,
-    line: usize,
-    column: usize,
-};
+pub const Position = source.Position;
 
 pub const Span = struct {
     path: []const u8,
     start: Position,
     end: Position,
+    /// The original text of the line holding `start`, without its line ending,
+    /// when the producer had the source at hand. Human output renders it with
+    /// an underline; JSON consumers already have the offsets.
+    excerpt: ?[]const u8 = null,
 };
 
-pub fn positionAt(source: []const u8, offset: usize) Position {
-    var line: usize = 1;
-    var column: usize = 1;
-    for (source[0..@min(offset, source.len)]) |byte| {
-        if (byte == '\n') {
-            line += 1;
-            column = 1;
-        } else {
-            column += 1;
-        }
-    }
-    return .{ .offset = @min(offset, source.len), .line = line, .column = column };
+pub fn positionAt(text: []const u8, offset: usize) Position {
+    return source.positionAt(text, offset);
 }
 
-pub fn spanAt(path: []const u8, source: []const u8, start: usize, end: usize) Span {
+/// The span of `start..end` in `text`, carrying the excerpt of its first line.
+pub fn spanAt(path: []const u8, text: []const u8, start: usize, end: usize) Span {
     return .{
         .path = path,
-        .start = positionAt(source, start),
-        .end = positionAt(source, @max(start, end)),
+        .start = source.positionAt(text, start),
+        .end = source.positionAt(text, @max(start, end)),
+        .excerpt = source.lineAt(text, start),
     };
 }
 
@@ -142,6 +135,7 @@ fn duplicateSpan(allocator: std.mem.Allocator, span: Span) std.mem.Allocator.Err
         .path = try allocator.dupe(u8, span.path),
         .start = span.start,
         .end = span.end,
+        .excerpt = if (span.excerpt) |text| try allocator.dupe(u8, text) else null,
     };
 }
 
@@ -169,6 +163,7 @@ pub fn renderHuman(writer: *std.Io.Writer, diagnostic: Diagnostic) !void {
             diagnostic.message,
         });
     }
+    if (diagnostic.primary) |span| try renderExcerpt(writer, span, '^');
     for (diagnostic.labels) |label| {
         try writer.print("  {s}:{d}:{d}: {s}: {s}\n", .{
             label.span.path,
@@ -177,9 +172,52 @@ pub fn renderHuman(writer: *std.Io.Writer, diagnostic: Diagnostic) !void {
             if (label.primary) "label" else "note",
             label.message,
         });
+        try renderExcerpt(writer, label.span, if (label.primary) '^' else '-');
     }
     for (diagnostic.notes) |note| try writer.print("  = note: {s}\n", .{note});
     if (diagnostic.help) |help| try writer.print("  = help: {s}\n", .{help});
+}
+
+/// Renders a span's excerpt under a gutter as wide as its line number:
+///
+///   |
+/// 6 | SELECT nickname FROM users
+///   |        ^^^^^^^^
+///
+/// Tabs are expanded to the fixed excerpt width, so the underline lines up
+/// with the text above it on any terminal.
+fn renderExcerpt(writer: *std.Io.Writer, span: Span, mark: u8) !void {
+    const line = span.excerpt orelse return;
+    const gutter = std.fmt.count("{d}", .{span.start.line});
+    const start = scalarPrefix(line, span.start.column - 1);
+    const end = if (span.end.line == span.start.line and span.end.column > span.start.column)
+        scalarPrefix(line, span.end.column - 1)
+    else
+        line.len;
+    const pad = source.displayWidth(line[0..start]);
+    const width = @max(source.displayWidth(line[start..@max(start, end)]), 1);
+    try writer.splatByteAll(' ', gutter + 1);
+    try writer.writeAll("|\n");
+    try writer.print("{d} | ", .{span.start.line});
+    try source.writeDisplay(writer, line);
+    try writer.writeByte('\n');
+    try writer.splatByteAll(' ', gutter + 1);
+    try writer.writeAll("| ");
+    try writer.splatByteAll(' ', pad);
+    try writer.splatByteAll(mark, width);
+    try writer.writeByte('\n');
+}
+
+/// The byte length of the first `count` scalar values of `line`, clamped to
+/// the line.
+fn scalarPrefix(line: []const u8, count: usize) usize {
+    var seen: usize = 0;
+    for (line, 0..) |byte, index| {
+        if (byte & 0xC0 == 0x80) continue;
+        if (seen == count) return index;
+        seen += 1;
+    }
+    return line.len;
 }
 
 pub fn renderJson(writer: *std.Io.Writer, diagnostic: Diagnostic) !void {
@@ -253,6 +291,7 @@ pub fn codeForError(err: anyerror) []const u8 {
         error.InvalidArguments => "S001",
         error.FileNotFound, error.AccessDenied, error.NotDir => "S002",
         error.ParseError, error.EmptyInput, error.UnsupportedSqliteFeature => "S010",
+        error.InvalidUtf8 => "S011",
         error.InvalidRevisionId, error.InvalidParentId, error.MissingParent, error.Cycle, error.MultipleHeads, error.DivergentMerge => "M001",
         error.MissingUpgradeSql, error.MissingDowngradeSql, error.UnexpectedBackendSql => "M002",
         error.MissingRelation => "Q020",
@@ -267,7 +306,7 @@ pub fn codeForError(err: anyerror) []const u8 {
         error.ProjectCheckFailed => "G002",
         error.DiagnosticLimitReached => "S099",
         error.UnsupportedFormatVersion, error.InvalidProjectId, error.InvalidPath, error.InvalidLimit, error.RuntimeBackendWithoutProfile, error.MissingBackend, error.InvalidSqlRootAlias, error.UnsupportedSqliteProfile, error.UnsupportedSqliteCapabilities, error.UnsupportedPostgresProfile, error.InvalidCodecId, error.MissingCodecPatterns, error.UnsupportedCatalogSupplements => "S020",
-        error.ConfigurationTooLarge, error.SourceTooLarge, error.RegisteredSourceLimitExceeded, error.RevisionLimitExceeded, error.QueryLimitExceeded => "S021",
+        error.ConfigurationTooLarge, error.SourceTooLarge, error.RegisteredSourceLimitExceeded, error.RevisionLimitExceeded, error.QueryLimitExceeded, error.TokenLimitExceeded, error.NestingLimitExceeded => "S021",
         error.PathEscapesProject, error.SymlinkedDirectory, error.NotRegularFile => "S022",
         error.OutOfMemory => "I001",
         else => "I999",
@@ -280,6 +319,7 @@ pub fn messageForError(err: anyerror) []const u8 {
         error.FileNotFound => "required project input was not found",
         error.AccessDenied => "project input could not be accessed",
         error.ParseError => "SQL syntax could not be parsed",
+        error.InvalidUtf8 => "source is not valid UTF-8",
         error.MissingParent => "migration references a missing parent",
         error.Cycle => "migration graph contains a cycle",
         error.MultipleHeads => "migration graph must have one effective head",
@@ -298,6 +338,8 @@ pub fn messageForError(err: anyerror) []const u8 {
         error.RegisteredSourceLimitExceeded => "project sources exceed `limits.registered_source_bytes`",
         error.RevisionLimitExceeded => "migration revisions exceed `limits.revisions`",
         error.QueryLimitExceeded => "project queries exceed `limits.queries`",
+        error.TokenLimitExceeded => "source exceeds `limits.tokens_per_source`",
+        error.NestingLimitExceeded => "source nesting exceeds `limits.nesting_depth`",
         error.PathEscapesProject => "project input resolves outside the project directory",
         error.SymlinkedDirectory => "symlinked directories are not followed in project roots",
         error.NotRegularFile => "project input is not a regular file",
@@ -317,7 +359,7 @@ pub fn exitCode(err: anyerror) u8 {
 pub fn isCheckedSourceError(err: anyerror) bool {
     const code = codeForError(err);
     return code[0] == 'M' or code[0] == 'C' or code[0] == 'Q' or
-        code[0] == 'T' or code[0] == 'G' or std.mem.eql(u8, code, "S010") or
+        code[0] == 'T' or code[0] == 'G' or std.mem.eql(u8, code, "S010") or std.mem.eql(u8, code, "S011") or
         std.mem.eql(u8, code, "S020") or std.mem.eql(u8, code, "S021") or
         std.mem.eql(u8, code, "S022");
 }

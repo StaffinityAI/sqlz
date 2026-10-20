@@ -202,3 +202,158 @@ test "an embedded query name repeats freely across files" {
     defer discovery.deinit();
     try std.testing.expectEqual(@as(usize, 2), discovery.sources.len);
 }
+
+test "a byte order mark keeps embedded SQL offsets in the file" {
+    const source: [:0]const u8 = "\xEF\xBB\xBFconst sqlz = @import(\"sqlz\");\r\n" ++
+        "pub const find = sqlz.Query(.{ .sql = \"SELECT 'é', id FROM users\", .backends = .{ .sqlite = true }, .cardinality = .many });\r\n";
+    var discovery = try zig_queries.parse(std.testing.allocator, "src/users.zig", source);
+    defer discovery.deinit();
+    const found = discovery.sources[0];
+    const sql_offset = std.mem.indexOf(u8, found.sql, "users").?;
+    const file_offset = found.sql_source_offsets.?[sql_offset];
+    try std.testing.expectEqualStrings("users", source[file_offset .. file_offset + 5]);
+    try std.testing.expectEqualStrings(source, found.source_text.?);
+}
+
+test "tokens_per_source bounds a Zig source at its boundary" {
+    const source: [:0]const u8 = "const a = 1;";
+    // `const`, `a`, `=`, `1`, `;`
+    try std.testing.expectEqual(@as(?zig_queries.Violation, null), zig_queries.checkLimits(source, .{ .tokens = 5 }));
+    const violation = zig_queries.checkLimits(source, .{ .tokens = 4 }).?;
+    try std.testing.expectEqual(error.TokenLimitExceeded, violation.err);
+    try std.testing.expectEqualStrings(";", source[violation.start..violation.end]);
+    try std.testing.expectError(error.TokenLimitExceeded, zig_queries.parseWithLimits(std.testing.allocator, "a.zig", source, .{ .tokens = 4 }));
+}
+
+test "nesting_depth bounds a Zig source at its boundary" {
+    const cases = [_]struct { [:0]const u8, u32, []const u8 }{
+        .{ "const a = ((1));", 2, "(" },
+        .{ "const a = !!!b;", 3, "!" },
+        .{ "const a = if (x) 1 else if (y) 2 else if (z) 3 else 4;", 3, "(" },
+        .{ "fn f() void { { {} } }", 3, "{" },
+        .{ "const T = [2][2]*const u8;", 3, "*" },
+        .{ "const T = E!E!u8;", 2, "!" },
+        .{ "fn f() void { if (a) while (b) {} }", 3, "(" },
+    };
+    for (cases) |case| {
+        const source, const depth, const crossing = case;
+        try std.testing.expectEqual(@as(?zig_queries.Violation, null), zig_queries.checkLimits(source, .{ .nesting = depth }));
+        const violation = zig_queries.checkLimits(source, .{ .nesting = depth - 1 }) orelse {
+            std.debug.print("expected `{s}` to exceed nesting {d}\n", .{ source, depth - 1 });
+            return error.TestUnexpectedResult;
+        };
+        try std.testing.expectEqual(error.NestingLimitExceeded, violation.err);
+        try std.testing.expectEqualStrings(crossing, source[violation.start..violation.end]);
+    }
+    // Separate statements, and an `if` nested inside a branch, do not extend
+    // an `else if` chain; the chain itself still counts.
+    try std.testing.expectEqual(@as(?zig_queries.Violation, null), zig_queries.checkLimits(
+        "fn f() void { if (a) {} else if (b) {} if (c) {} else if (d) {} while (e) {} for (f) |_| {} }",
+        .{ .nesting = 3 },
+    ));
+    try std.testing.expect(zig_queries.checkLimits(
+        "fn f() void { if (a) { if (x) {} } else if (b) { if (y) {} } else if (c) {} }",
+        .{ .nesting = 3 },
+    ) != null);
+}
+
+test "deep Zig nesting fails closed before the Zig parser runs" {
+    const allocator = std.testing.allocator;
+    const units = [_]struct { []const u8, []const u8, []const u8 }{
+        .{ "(", "1", ")" },
+        .{ "!", "a", "" },
+        .{ "-", "a", "" },
+        .{ "&", "a", "" },
+        .{ "try ", "a", "" },
+        .{ "if (a) 1 else ", "2", "" },
+        // Type prefixes interleave keywords, numbers, and identifiers.
+        .{ "*const ", "u8", "" },
+        .{ "[1]", "u8", "" },
+        .{ "[]const ", "u8", "" },
+        .{ "E!", "u8", "" },
+        .{ "fn () ", "u8", "" },
+        .{ "?*align(4) ", "u8", "" },
+        .{ "anyframe->", "u8", "" },
+    };
+    for (units) |unit| {
+        const open, const middle, const close = unit;
+        var source: std.ArrayList(u8) = .empty;
+        defer source.deinit(allocator);
+        try source.appendSlice(allocator, "const x = ");
+        for (0..100_000) |_| try source.appendSlice(allocator, open);
+        try source.appendSlice(allocator, middle);
+        for (0..100_000) |_| try source.appendSlice(allocator, close);
+        try source.appendSlice(allocator, ";");
+        const terminated = try allocator.dupeZ(u8, source.items);
+        defer allocator.free(terminated);
+        try std.testing.expectError(error.NestingLimitExceeded, zig_queries.parse(allocator, "deep.zig", terminated));
+    }
+}
+
+test "deep Zig statement nesting fails closed before the Zig parser runs" {
+    const allocator = std.testing.allocator;
+    // Each repeated unit nests the next without a bracket of its own.
+    const units = [_][]const u8{ "if (a) ", "while (a) ", "x: for (a) |_| ", "return ", "defer ", "if (a) inline for (b) |_| " };
+    for (units) |unit| {
+        var source: std.ArrayList(u8) = .empty;
+        defer source.deinit(allocator);
+        try source.appendSlice(allocator, "fn f() void { ");
+        for (0..100_000) |_| try source.appendSlice(allocator, unit);
+        try source.appendSlice(allocator, "{} }");
+        const terminated = try allocator.dupeZ(u8, source.items);
+        defer allocator.free(terminated);
+        try std.testing.expectError(error.NestingLimitExceeded, zig_queries.parse(allocator, "deep.zig", terminated));
+    }
+}
+
+/// Discovery on any bytes either finds declarations or fails with an error;
+/// it never panics, and a found declaration's offsets stay inside the file.
+fn checkZigProperties(bytes: []const u8) !void {
+    const allocator = std.testing.allocator;
+    const source = try allocator.dupeZ(u8, bytes);
+    defer allocator.free(source);
+    var discovery = zig_queries.parseWithLimits(allocator, "fuzz.zig", source, .{ .nesting = 64, .tokens = 4096 }) catch return;
+    defer discovery.deinit();
+    for (discovery.sources) |found| {
+        const offsets = found.sql_source_offsets.?;
+        try std.testing.expectEqual(found.sql.len + 1, offsets.len);
+        for (offsets) |offset| try std.testing.expect(offset <= source.len);
+    }
+}
+
+const zig_corpus = [_][]const u8{
+    "const sqlz = @import(\"sqlz\");\npub const q = sqlz.Query(.{ .sql = \"SELECT \\x41 :id\", .backends = .{ .sqlite = true }, .cardinality = .one, .params = struct { id: i64 }, .row = struct { a: ?i64 } });",
+    "pub const q = sqlz.Query(.{ .sql = \\\\SELECT 1\n\\\\FROM t\n, .backends = .{ .postgres = true }, .cardinality = .many });",
+    "pub const q = sqlz.Query(.{ .sql = \"unterminated",
+    "pub const q = sqlz.Query(.{ .sql = 1, .backends = 2 });",
+    "\xEF\xBB\xBFconst a = 1;",
+    "((((((((((((",
+};
+
+test "Zig discovery properties hold for the seed corpus and arbitrary bytes" {
+    for (zig_corpus) |source| try checkZigProperties(source);
+    var prng: std.Random.DefaultPrng = .init(0x219);
+    const random = prng.random();
+    var buffer: [256]u8 = undefined;
+    for (0..1_000) |_| {
+        // Mutate a corpus entry so most inputs still look like declarations.
+        const seed = zig_corpus[random.uintLessThan(usize, zig_corpus.len)];
+        const length = @min(seed.len, buffer.len);
+        @memcpy(buffer[0..length], seed[0..length]);
+        for (0..random.uintLessThan(usize, 8)) |_| {
+            if (length == 0) break;
+            buffer[random.uintLessThan(usize, length)] = random.int(u8);
+        }
+        try checkZigProperties(buffer[0..length]);
+    }
+}
+
+fn fuzzZig(_: void, smith: *std.testing.Smith) anyerror!void {
+    var buffer: [1024]u8 = undefined;
+    const length = smith.slice(&buffer);
+    try checkZigProperties(buffer[0..length]);
+}
+
+test "fuzz Zig declarations" {
+    try std.testing.fuzz({}, fuzzZig, .{ .corpus = &zig_corpus });
+}

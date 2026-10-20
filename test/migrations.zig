@@ -481,3 +481,63 @@ test "migration graph diagnostics label missing parents and multiple heads" {
     try std.testing.expectEqualStrings("M032", list.slice()[0].code);
     try std.testing.expectEqualStrings("aaaaaaaaaaaa_first/revision.ziggy", list.slice()[0].primary.?.path);
 }
+
+test "a manifest may start with a byte order mark" {
+    var meta: ziggy.Deserializer.Meta = .init;
+    const source = try std.testing.allocator.dupeZ(u8, "\xEF\xBB\xBF" ++ valid_manifest);
+    defer std.testing.allocator.free(source);
+    var loaded = try migrations.parseManifest(std.testing.allocator, source, &meta);
+    defer loaded.deinit();
+    try std.testing.expectEqualStrings("a1b2c3d4e5f6", loaded.manifest().revision);
+    // The original bytes are kept for spans and checksums.
+    try std.testing.expectEqualStrings(source, loaded.source);
+}
+
+test "migration SQL sent to a database drops only the byte order mark" {
+    try std.testing.expectEqualStrings("CREATE TABLE t (id INTEGER)", migrations.DiscoveredRevision.executable("\xEF\xBB\xBFCREATE TABLE t (id INTEGER)"));
+    try std.testing.expectEqualStrings("DROP TABLE t", migrations.DiscoveredRevision.executable("DROP TABLE t"));
+}
+
+/// Manifest parsing on any bytes either loads or fails with an error, and a
+/// failure always yields a diagnostic inside the source.
+fn checkManifestProperties(bytes: []const u8) !void {
+    const allocator = std.testing.allocator;
+    const source = try allocator.dupeZ(u8, bytes);
+    defer allocator.free(source);
+    var meta: ziggy.Deserializer.Meta = .init;
+    var loaded = migrations.parseManifest(allocator, source, &meta) catch return;
+    loaded.deinit();
+}
+
+const manifest_corpus = [_][]const u8{
+    valid_manifest,
+    "\xEF\xBB\xBF" ++ valid_manifest,
+    ".format_version = 1, .revision = \"x\"",
+    ".parents = [\"a\", \"a\"],",
+    ".transaction = .{ .sqlite = .never }",
+};
+
+test "manifest properties hold for the seed corpus and mutations" {
+    for (manifest_corpus) |source| try checkManifestProperties(source);
+    var prng: std.Random.DefaultPrng = .init(0x3a71f357);
+    const random = prng.random();
+    var buffer: [512]u8 = undefined;
+    for (0..1_000) |_| {
+        const seed = manifest_corpus[random.uintLessThan(usize, manifest_corpus.len)];
+        @memcpy(buffer[0..seed.len], seed);
+        for (0..random.uintLessThan(usize, 6)) |_| {
+            buffer[random.uintLessThan(usize, seed.len)] = random.int(u8);
+        }
+        try checkManifestProperties(buffer[0..seed.len]);
+    }
+}
+
+fn fuzzManifest(_: void, smith: *std.testing.Smith) anyerror!void {
+    var buffer: [1024]u8 = undefined;
+    const length = smith.slice(&buffer);
+    try checkManifestProperties(buffer[0..length]);
+}
+
+test "fuzz revision manifests" {
+    try std.testing.fuzz({}, fuzzManifest, .{ .corpus = &manifest_corpus });
+}

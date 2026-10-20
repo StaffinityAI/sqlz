@@ -32,8 +32,12 @@ Status vocabulary:
 The following foundations are implemented and must remain green:
 
 - strict versioned project configuration and revision-manifest parsing;
-- one project input boundary: canonical root and symlink confinement and
-  enforced byte, revision, query, and diagnostic limits (slice 2);
+- one project input boundary: canonical root and symlink confinement, UTF-8
+  validation, and enforced byte, revision, query, token, nesting, and
+  diagnostic limits (slices 2 and 3);
+- a source manager with byte offsets, scalar-value columns, BOM and LF/CRLF
+  handling, and tab-expanded excerpts, and one dialect-aware SQL lexer shared by
+  parameter rewriting, SQLite normalization, and limit checks (slice 3);
 - migration discovery, DAG validation, deterministic ordering, offline catalog
   replay, and merge-parent catalog convergence for the implemented DDL subset;
 - pinned `libpg_query`, direct protobuf-C AST traversal, portable named-parameter
@@ -94,7 +98,7 @@ or PostgreSQL. Production-ready means:
 | --- | --- | --- |
 | 1. Status documentation | Complete | Full |
 | 2. Source trust boundaries and config enforcement | Complete (0.1) | Reduced: no external roots; token and nesting limits in slice 3 |
-| 3. Source manager and lexer | Partial | Full |
+| 3. Source manager and lexer | Complete | Full |
 | 4. SQL and migration-DDL surface | Partial | Reduced: freeze the current subset; downgrade checking and opaque directive |
 | 5. Builtin catalogs and supplements | Not started | Deferred to 0.2 |
 | 6. Semantic diagnostics and warnings | Partial | Reduced: stable error codes, no fallback spans, minimal warnings |
@@ -127,8 +131,8 @@ or PostgreSQL. Production-ready means:
 
 Work proceeds in waves. Each wave lists the slices that can run in parallel:
 
-1. **Unblock:** decide slice 13 (ordinary migration design only); slice 3.
-   Slice 2 is complete.
+1. **Unblock:** decide slice 13 (ordinary migration design only). Slices 2 and 3
+   are complete.
 2. **Migration core (backend-neutral, testable offline):** slices 14, 15, 16, and
    17, in that order. In parallel, the downgrade-checking and opaque-directive
    parts of slice 4, because the runners execute downgrade SQL.
@@ -206,8 +210,7 @@ and `config.field_usage` names a consumer or deferral for every format-1 field.
 
 - External-root registration (0.2): there is no `ProjectOptions` field and no
   configuration spelling for a path outside the project, so nothing is exempt.
-- `tokens_per_source` and `nesting_depth`: accepted and validated, enforced by
-  slice 3.
+- `tokens_per_source` and `nesting_depth`: enforced by slice 3.
 - `warnings_as_errors`: no effect until slice 6 introduces warnings.
 - `catalog_supplements`: rejected unless empty until slice 5 (0.2).
 - Checkpoint manifests and `history.ziggy` are not read in 0.1 (slices 21-23); they
@@ -240,11 +243,57 @@ documented deferral exists for every format-1 configuration field.
 
 ### 3. Complete source-manager and lexer correctness
 
-**Status:** Partial
+**Status:** Complete
 
 **Depends on:** Slice 2
 
 **0.1 scope:** Full.
+
+**Implemented:**
+
+- `src/source.zig` is the source manager. Offsets are byte offsets into the
+  original file; a leading BOM is not a column; columns count Unicode scalar
+  values; a CR before an LF belongs to the line ending; excerpts render a tab at
+  width four and replace control characters. `diagnostics.Span` carries the
+  excerpt line, and human output renders it with a `^`/`-` underline.
+- `inputs.Inputs.readFile` validates every read as UTF-8 and fails with S011 at
+  the first malformed byte; `config.load` does the same for `sqlz.ziggy`.
+  Manifests and the configuration accept a BOM; migration SQL keeps its original
+  bytes and drops the BOM only when sent to a database.
+- `src/lexer.zig` is one lexer for both dialects: standard, `E'...'`, and
+  dollar-quoted strings; double-quoted, and in SQLite bracket and backtick,
+  identifiers; nested PostgreSQL block comments; casts; operators; native
+  placeholders; and `:name` parameters. Rewriting is built on it, which fixed
+  parameters inside PostgreSQL subscripts (`ARRAY[:a]`), escape strings, dollar
+  quotes, and nested comments. SQLite normalization rejects the forms the two
+  lexers disagree on.
+- `limits.tokens_per_source` and `limits.nesting_depth` are enforced before any
+  parser runs: by the lexer for named, embedded, and migration SQL (S021 at the
+  crossing token) and inside `parser`, and by a Zig token pass before
+  `std.zig.Ast.parse`. Nesting estimates tree depth (brackets, `CASE`, operator
+  chains, set operations, joins; in Zig, prefix and type operators, `fn` types,
+  nested control flow, and `else if` chains per bracket level). SQLite text is
+  also checked as PostgreSQL lexes it, so SQLite-only quoting cannot hide depth
+  from `libpg_query`. The limit is capped at 1024, and a whole-pipeline test
+  checks the cap.
+- `libpg_query` is always built optimized: unoptimized, its tree serializer
+  overflowed an 8 MiB stack at roughly 450 chained operators.
+- Fixed on the way: syntax-error positions were relative to the SQL rather than
+  the file, and `libpg_query`'s character cursor was read as a byte offset; a
+  NUL byte silently truncated what was checked; an empty statement list (`;`)
+  crashed SQLite validation; a failed `.sql` directive parse freed its codec
+  list incorrectly.
+- Fixtures: `test/source.zig`, the lexer, rewrite, limit, and property suites in
+  `test/parser.zig`, excerpt goldens in `test/diagnostics.zig`, project-level
+  boundary and boundary-plus-one fixtures in `test/inputs.zig`, and fuzz targets
+  for SQL bytes, directives (`test/query_files.zig`), Zig declarations
+  (`test/zig_queries.zig`), and manifests (`test/migrations.zig`).
+
+**Recorded deferrals:**
+
+- Retained fuzz corpora and long fuzzing runs in CI belong to slice 31; each
+  target's seed corpus runs in every test run.
+- Columns count scalar values, not grapheme clusters or East Asian widths.
 
 **Deliverables:**
 
@@ -1126,8 +1175,6 @@ bootstrap is the single documented exception until slice 28 lands.
 
 | Promise or contract | Current state | Closing slice | Release |
 | --- | --- | --- | --- |
-| All configuration limits and path boundaries are enforced | Paths, symlinks, byte, revision, query, and diagnostic limits are enforced; token and nesting limits are not | 3 | 0.1 |
-| Source manager follows BOM/UTF-8/column/line-ending rules | Position mapping exists; the full contract lacks coverage | 3 | 0.1 |
 | Full documented query/DDL subset, opaque directives, and downgrade checks | A practical subset exists; unsupported and round-trip gaps remain | 4 | 0.1 (reduced); full surface 0.2 |
 | Versioned builtin catalogs and supplements | Narrow hard-coded semantics exist; supplements are not loaded | 5 | 0.2 |
 | Complete diagnostics and warning policy | Core cases are rich; some failures are generic and warnings are absent | 6 | 0.1 (reduced); full warnings 0.2 |

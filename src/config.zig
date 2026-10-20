@@ -1,5 +1,6 @@
 const std = @import("std");
 const ziggy = @import("ziggy");
+const source_manager = @import("sqlz_source");
 
 pub const Sqlite = struct {
     profile: []const u8,
@@ -64,6 +65,11 @@ pub const ValidationError = error{
 
 pub const Error = ziggy.Deserializer.Error || ValidationError;
 
+/// The largest accepted `limits.nesting_depth`. The lexers keep one fixed
+/// stack entry per level, and the parsers recurse once per level, so the
+/// limit itself needs a bound.
+pub const max_nesting_depth: u32 = 1024;
+
 /// The fixed bound for reading `sqlz.ziggy` itself. The configured
 /// `limits.source_bytes` is unknown until the file is parsed, so the file is
 /// first read under this bound and then charged against the parsed limits.
@@ -104,8 +110,8 @@ pub const field_usage = [_]FieldUsage{
     .{ .field = "codecs.postgres_types", .usage = .checker, .consumer = "codec scalar resolution" },
     .{ .field = "limits", .usage = .checker, .consumer = "inputs.Inputs" },
     .{ .field = "limits.source_bytes", .usage = .checker, .consumer = "inputs.Inputs: every read, including `sqlz.ziggy`" },
-    .{ .field = "limits.tokens_per_source", .usage = .deferred, .consumer = "slice 3: rewriting, parsing, and Zig discovery" },
-    .{ .field = "limits.nesting_depth", .usage = .deferred, .consumer = "slice 3: parsing, Zig discovery, and AST adaptation" },
+    .{ .field = "limits.tokens_per_source", .usage = .checker, .consumer = "SQL lexer before rewriting and parsing; Zig tokenizer before declaration discovery" },
+    .{ .field = "limits.nesting_depth", .usage = .checker, .consumer = "SQL lexer before libpg_query and AST adaptation; Zig tokenizer before declaration discovery" },
     .{ .field = "limits.diagnostics", .usage = .checker, .consumer = "diagnostics.List cap" },
     .{ .field = "limits.revisions", .usage = .checker, .consumer = "migration discovery, before manifests are read" },
     .{ .field = "limits.queries", .usage = .checker, .consumer = "named and embedded query discovery" },
@@ -140,7 +146,10 @@ pub fn parse(
     errdefer arena.deinit();
     // Dictionary keys borrow the source even with `copy_strings`, so the
     // loaded value keeps its own copy instead of the caller's buffer.
+    // A byte order mark becomes whitespace, keeping every reported offset an
+    // offset into the original file.
     const owned_source = try arena.allocator().dupeZ(u8, source);
+    @memset(owned_source[0..source_manager.bomLength(owned_source)], ' ');
     const value = try ziggy.deserializeLeaky(Config, arena.allocator(), owned_source, meta, .{
         .copy_strings = .always,
     });
@@ -162,6 +171,7 @@ pub fn load(
         else => return err,
     };
     defer allocator.free(raw);
+    if (source_manager.invalidUtf8Offset(raw) != null) return error.InvalidUtf8;
     const source = try allocator.dupeZ(u8, raw);
     defer allocator.free(source);
     var meta: ziggy.Deserializer.Meta = .init;
@@ -226,6 +236,7 @@ pub fn validate(config: *const Config) ValidationError!void {
     if (limits.source_bytes == 0 or
         limits.tokens_per_source == 0 or
         limits.nesting_depth == 0 or
+        limits.nesting_depth > max_nesting_depth or
         limits.diagnostics == 0 or
         limits.revisions == 0 or
         limits.queries == 0 or

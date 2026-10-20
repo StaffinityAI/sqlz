@@ -60,9 +60,15 @@ pub fn appendCatalogDiagnostic(
         };
         for (sources, 0..) |source, source_index| {
             if (std.mem.trim(u8, source.sql, &std.ascii.whitespace).len == 0) continue;
+            // Replay already held this SQL to the project's limits, which can
+            // be no wider than these.
+            const limits: parser.Limits = .{
+                .tokens = std.math.maxInt(u64),
+                .nesting = parser.lexer.max_nesting_depth,
+            };
             var parsed = switch (if (source_index == 0) migrations.Backend.postgres else backend) {
-                .sqlite => parser.parseSqlite(allocator, source.sql),
-                .postgres => parser.parse(allocator, source.sql),
+                .sqlite => parser.parseSqliteWithDialect(allocator, source.sql, .{ .limits = limits }),
+                .postgres => parser.parsePostgresWithDialect(allocator, source.sql, .{ .limits = limits }),
             } catch continue;
             defer parsed.deinit();
             const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ revision.directory, source.path });
@@ -683,32 +689,25 @@ fn hasCte(ctes: []const ir.Cte, name: []const u8) bool {
     return false;
 }
 
-fn querySpan(source: *const query_files.Source, offset: usize, length: usize) diagnostics.Span {
+/// The file span of `offset..offset + length` in a query's SQL, carrying the
+/// excerpt of its first line.
+pub fn querySpan(source: *const query_files.Source, offset: usize, length: usize) diagnostics.Span {
+    const start, const end = fileRange(source, offset, offset + length);
+    if (source.source_text) |text| return diagnostics.spanAt(source.path, text, start, end);
+    // A source built without its file, as tests do, positions within the SQL.
+    return diagnostics.spanAt(source.path, source.sql, offset, offset + length);
+}
+
+/// Maps an offset range in a query's SQL to the same range in its file.
+fn fileRange(source: *const query_files.Source, start: usize, end: usize) struct { usize, usize } {
+    std.debug.assert(start <= end);
     if (source.sql_source_offsets) |offsets| {
-        const start_offset = offsets[@min(offset, offsets.len - 1)];
-        const end_offset = offsets[@min(offset + length, offsets.len - 1)];
-        const text = source.source_text.?;
-        return .{
-            .path = source.path,
-            .start = diagnostics.positionAt(text, start_offset),
-            .end = diagnostics.positionAt(text, end_offset),
-        };
+        std.debug.assert(offsets.len == source.sql.len + 1);
+        return .{ offsets[@min(start, offsets.len - 1)], offsets[@min(end, offsets.len - 1)] };
     }
-    const local_start = diagnostics.positionAt(source.sql, offset);
-    const local_end = diagnostics.positionAt(source.sql, offset + length);
-    return .{
-        .path = source.path,
-        .start = .{
-            .offset = source.sql_offset + local_start.offset,
-            .line = source.sql_line + local_start.line - 1,
-            .column = if (local_start.line == 1) source.sql_column + local_start.column - 1 else local_start.column,
-        },
-        .end = .{
-            .offset = source.sql_offset + local_end.offset,
-            .line = source.sql_line + local_end.line - 1,
-            .column = if (local_end.line == 1) source.sql_column + local_end.column - 1 else local_end.column,
-        },
-    };
+    if (source.source_text == null) return .{ start, end };
+    const length = source.sql.len;
+    return .{ source.sql_offset + @min(start, length), source.sql_offset + @min(end, length) };
 }
 
 fn originSpan(origin: catalog.Origin, length: usize) diagnostics.Span {

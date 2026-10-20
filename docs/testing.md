@@ -39,7 +39,11 @@ possible so they can fail before integration infrastructure is involved.
 ## Required suites
 
 - lexer/parser unit tests, golden ASTs, recovery diagnostics, property tests, and
-  fuzz targets;
+  fuzz targets. The source-manager, lexer, rewrite, and limit goldens live in
+  `test/source.zig` and `test/parser.zig`; fuzz targets for SQL bytes,
+  directives, Zig declarations, and revision manifests run their seed corpus in
+  every test run and explore further under Zig's fuzzer (`zig build test
+  --fuzz`) on platforms that support it;
 - catalog signature, coercion, nullability, overload, and codec-resolution tests;
 - migration DAG planning, replay, merge convergence, checksum, identity, lock,
   journal, interruption, and state-upgrade tests;

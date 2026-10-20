@@ -14,7 +14,9 @@ Rows whose consumer is not implemented yet fix the rule that consumer must follo
 | Configured roots | A root path reads files outside the project | Lexical path rules in `config.validate`; canonical containment check in `inputs.Inputs.openRoot` | enforced |
 | Symlinks in roots | A file or directory link reaches outside the project, loops, or duplicates sources | Opened file handles must resolve inside the project; directory links are never followed; both fail with S022 | enforced |
 | Non-regular inputs | A FIFO or device in place of a source blocks or floods the check | Only regular files are opened; anything else fails with S022 | enforced |
-| Input size and count | Oversized or numerous sources exhaust memory or time | `source_bytes`, `registered_source_bytes`, `revisions`, `queries`, and `diagnostics` limits, checked before buffering; fixed 1 MiB bound for `sqlz.ziggy` | enforced; token and nesting limits in slice 3 |
+| Input size and count | Oversized or numerous sources exhaust memory or time | `source_bytes`, `registered_source_bytes`, `revisions`, `queries`, and `diagnostics` limits, checked before buffering; fixed 1 MiB bound for `sqlz.ziggy` | enforced |
+| Source bytes | Malformed UTF-8, a NUL byte, or deeply nested or very long SQL or Zig crashes, hangs, or slips text past a parser | Every read is validated as UTF-8 (S011); `tokens_per_source` and `nesting_depth` are checked by a lexer before `libpg_query` or the Zig parser runs (S021); a NUL byte fails the parse; `libpg_query` is always built optimized; fuzz and property suites cover each front end | enforced |
+| Terminal output | Source text in a diagnostic excerpt moves the cursor or recolors the terminal | Control characters in excerpts are replaced before rendering | enforced |
 | Generated cache paths | Generated code lands outside the build cache or collides | Output path is a build-system `addOutputFileArg` in the content-addressed cache; generated names come from validated identifiers | enforced; atomicity in slice 12 |
 | Dynamic SQL identifiers | Schema or table names from configuration or catalogs inject SQL | Identifiers are validated or quoted by dialect-aware helpers, never concatenated raw; values are always bound | enforced for search path and bootstrap; required of migration state SQL |
 | State ownership | A database is migrated by the wrong project or with forged state | `project_id` identity and checksum checks; state lives in a dedicated schema/table set | slices 15-16 |
@@ -31,8 +33,9 @@ canonical project root, checks each opened handle against it (so a link swapped
 in after a check cannot redirect a read), and charges the read against the
 configured limits before parsing. Directory symlinks
 inside roots are never followed. There is no external-root registration in 0.1,
-so no input outside the directory holding `sqlz.ziggy` is ever read. Parser
-limits prevent unbounded input, nesting, diagnostics, or project counts. Generated modules are written only to the
+so no input outside the directory holding `sqlz.ziggy` is ever read. Every
+read is validated as UTF-8, and the token and nesting limits are enforced by a
+lexer before any parser recurses, so no source can exhaust the stack. Generated modules are written only to the
 build cache using collision-resistant content keys; SQL identifiers are quoted by
 dialect-aware helpers, never concatenated from unchecked runtime strings.
 
