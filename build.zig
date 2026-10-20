@@ -776,6 +776,9 @@ pub fn build(b: *std.Build) !void {
         });
 
         const example_names = [_][]const u8{
+            "basic_sql_file",
+            "basic_embedded_query",
+            "basic_transaction",
             "account_crud",
             "preferences_upsert",
             "recursive_roles",

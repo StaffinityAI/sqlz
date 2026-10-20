@@ -81,7 +81,18 @@ Every scenario under `examples/` is checked offline: the examples are one sqlz
 project whose schema lives in `examples/migrations` and whose SQL lives in
 `examples/queries`, with every example directory registered as a Zig root, so a
 query declared in Zig anywhere under `examples/` is checked too. Each is also an independently runnable
-executable, for example `zig build run-account_crud`. Four of them demonstrate
+executable, for example `zig build run-account_crud`.
+
+Start with the three `basic_*` examples. Each imports only `sqlz` (and the
+generated `queries` module where it uses `.sql` files), opens an in-memory
+SQLite database, and prints what it does:
+
+- `basic_sql_file` runs queries from `.sql` files through the generated module
+  and shows the `Result` union a database call returns;
+- `basic_embedded_query` declares its queries in Zig and streams rows;
+- `basic_transaction` rolls back one transaction and commits another.
+
+Four of the others demonstrate
 the surface an application needs beyond plain query execution — `enum_roles`
 maps a column and a parameter onto a Zig enum through a registered codec,
 `arena_rows` collects a result set into an arena scope with no per-row cleanup,
