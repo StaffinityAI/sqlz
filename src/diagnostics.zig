@@ -268,7 +268,7 @@ pub fn codeForError(err: anyerror) []const u8 {
         error.DiagnosticLimitReached => "S099",
         error.UnsupportedFormatVersion, error.InvalidProjectId, error.InvalidPath, error.InvalidLimit, error.RuntimeBackendWithoutProfile, error.MissingBackend, error.InvalidSqlRootAlias, error.UnsupportedSqliteProfile, error.UnsupportedSqliteCapabilities, error.UnsupportedPostgresProfile, error.InvalidCodecId, error.MissingCodecPatterns, error.UnsupportedCatalogSupplements => "S020",
         error.ConfigurationTooLarge, error.SourceTooLarge, error.RegisteredSourceLimitExceeded, error.RevisionLimitExceeded, error.QueryLimitExceeded => "S021",
-        error.PathEscapesProject, error.SymlinkedDirectory => "S022",
+        error.PathEscapesProject, error.SymlinkedDirectory, error.NotRegularFile => "S022",
         error.OutOfMemory => "I001",
         else => "I999",
     };
@@ -300,6 +300,7 @@ pub fn messageForError(err: anyerror) []const u8 {
         error.QueryLimitExceeded => "project queries exceed `limits.queries`",
         error.PathEscapesProject => "project input resolves outside the project directory",
         error.SymlinkedDirectory => "symlinked directories are not followed in project roots",
+        error.NotRegularFile => "project input is not a regular file",
         error.IncompatibleCodec => "codec does not match the inferred database type",
         error.IncompatibleBackendContract => "backend query contracts are incompatible",
         error.ProjectCheckFailed => "project checking produced one or more diagnostics",

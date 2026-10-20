@@ -92,17 +92,25 @@ pub fn build(b: *std.Build) !void {
     libpg_query_mod.addIncludePath(libpg_query_root.path(b, "vendor"));
     libpg_query_mod.addIncludePath(libpg_query_root.path(b, "src/include"));
     libpg_query_mod.addIncludePath(libpg_query_root.path(b, "src/postgres/include"));
+    var libpg_query_flags: std.ArrayList([]const u8) = .empty;
+    try libpg_query_flags.appendSlice(b.allocator, &.{
+        "-std=gnu99",
+        "-fno-strict-aliasing",
+        "-fwrapv",
+        "-Wno-unused-function",
+        "-Wno-unused-value",
+        "-Wno-unused-variable",
+    });
+    // libpg_query's pg_config.h assumes a declared strlcpy, which glibc has
+    // only from 2.38 (Debian 12 ships 2.36). Supply one on older hosts.
+    if (glibcLacksStrlcpy(host_target.result)) {
+        try libpg_query_flags.appendSlice(b.allocator, &.{ "-include", b.pathFromRoot("src/c/strlcpy_compat.h") });
+        libpg_query_mod.addCSourceFile(.{ .file = b.path("src/c/strlcpy_compat.c") });
+    }
     libpg_query_mod.addCSourceFiles(.{
         .root = libpg_query_root,
         .files = try libpgQuerySources(b),
-        .flags = &.{
-            "-std=gnu99",
-            "-fno-strict-aliasing",
-            "-fwrapv",
-            "-Wno-unused-function",
-            "-Wno-unused-value",
-            "-Wno-unused-variable",
-        },
+        .flags = libpg_query_flags.items,
     });
     const libpg_query = b.addLibrary(.{
         .name = "pg_query",
@@ -958,6 +966,11 @@ pub fn build(b: *std.Build) !void {
         test_step.dependOn(&b.addFail("pg.zig is required for the complete test suite").step);
         integration_step.dependOn(&b.addFail("pg.zig is required for integration tests").step);
     }
+}
+
+fn glibcLacksStrlcpy(target: std.Target) bool {
+    if (target.os.tag != .linux or !target.isGnuLibC()) return false;
+    return target.os.version_range.linux.glibc.order(.{ .major = 2, .minor = 38, .patch = 0 }) == .lt;
 }
 
 fn libpgQuerySources(b: *std.Build) ![]const []const u8 {

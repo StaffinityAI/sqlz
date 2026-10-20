@@ -12,6 +12,7 @@ pub const Error = error{
     RegisteredSourceLimitExceeded,
     RevisionLimitExceeded,
     QueryLimitExceeded,
+    NotRegularFile,
 };
 
 /// The project-level limits a discovery pass enforces. Defaults match the
@@ -75,8 +76,20 @@ pub const Inputs = struct {
     /// Opens a configured root. The root may be spelled through a symlink, but
     /// its canonical location must stay inside the project.
     pub fn openRoot(self: *Inputs, path: []const u8) !std.Io.Dir {
-        try self.confine(self.project_dir, path);
-        return self.project_dir.openDir(self.io, path, .{ .iterate = true });
+        var root = self.project_dir.openDir(self.io, path, .{ .iterate = true }) catch |err| {
+            try self.fail(path);
+            return err;
+        };
+        errdefer root.close(self.io);
+        // Resolve the opened handle rather than the path, so a link swapped
+        // in after the check cannot redirect what is read.
+        var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const length = try root.realPath(self.io, &buffer);
+        if (!within(self.project_path, buffer[0..length])) {
+            try self.fail(path);
+            return error.PathEscapesProject;
+        }
+        return root;
     }
 
     /// Charges bytes the caller read itself, such as the configuration file,
@@ -95,27 +108,52 @@ pub const Inputs = struct {
         self.registered_bytes += length;
     }
 
-    /// Reads one source file. The read is bounded by whichever limit is
-    /// closer, so an oversized file fails before it is buffered whole.
+    /// Reads one source file. The opened handle, not the path, is checked
+    /// against the project root, so a link swapped in after the check cannot
+    /// redirect the read. The read is bounded by whichever limit is closer, so
+    /// an oversized file fails before it is buffered whole.
     pub fn readFile(
         self: *Inputs,
         allocator: std.mem.Allocator,
         dir: std.Io.Dir,
         sub_path: []const u8,
     ) ![]u8 {
-        try self.confine(dir, sub_path);
+        // Opening a FIFO blocks until a writer appears, so only regular files
+        // are opened at all.
+        const stat = dir.statFile(self.io, sub_path, .{}) catch |err| {
+            try self.failAt(dir, sub_path);
+            return err;
+        };
+        if (stat.kind != .file) {
+            try self.failAt(dir, sub_path);
+            return error.NotRegularFile;
+        }
+        var file = dir.openFile(self.io, sub_path, .{}) catch |err| {
+            try self.failAt(dir, sub_path);
+            return err;
+        };
+        defer file.close(self.io);
+        var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const length = try file.realPath(self.io, &buffer);
+        if (!within(self.project_path, buffer[0..length])) {
+            try self.failAt(dir, sub_path);
+            return error.PathEscapesProject;
+        }
+
         const remaining = self.limits.registered_source_bytes - self.registered_bytes;
         const bound = @min(self.limits.source_bytes, remaining);
         const bound_bytes = std.math.cast(usize, bound) orelse std.math.maxInt(usize) - 1;
+        var reader = file.reader(self.io, &.{});
         // `limited(n)` fails once `n` bytes are reached, so a file of exactly
         // the limit needs one byte of headroom to be accepted.
-        const contents = dir.readFileAlloc(self.io, sub_path, allocator, .limited(bound_bytes + 1)) catch |err| switch (err) {
+        const contents = reader.interface.allocRemaining(allocator, .limited(bound_bytes + 1)) catch |err| switch (err) {
             error.StreamTooLong => {
                 try self.failAt(dir, sub_path);
                 if (bound == self.limits.source_bytes) return error.SourceTooLarge;
                 return error.RegisteredSourceLimitExceeded;
             },
-            else => return err,
+            error.ReadFailed => return reader.err.?,
+            error.OutOfMemory => return error.OutOfMemory,
         };
         errdefer allocator.free(contents);
         self.charge(contents.len) catch |err| {
@@ -143,8 +181,9 @@ pub const Inputs = struct {
     /// caller would read the entry if it is a file. Symlinked directories are
     /// never followed, since a silently skipped directory would drop sources
     /// and a followed one could loop or reach the same sources twice. A
-    /// symlinked candidate file must resolve inside the project; any other
-    /// symlinked file is never read, so where it points does not matter.
+    /// dangling candidate fails rather than being skipped. Containment of a
+    /// candidate is checked when `readFile` opens it; any other symlinked file
+    /// is never read, so where it points does not matter.
     pub fn entryKind(
         self: *Inputs,
         dir: std.Io.Dir,
@@ -162,7 +201,6 @@ pub const Inputs = struct {
             try self.failAt(dir, basename);
             return error.SymlinkedDirectory;
         }
-        if (candidate) try self.confine(dir, basename);
         return stat.kind;
     }
 
@@ -203,24 +241,12 @@ pub const Inputs = struct {
         return true;
     }
 
-    fn confine(self: *Inputs, dir: std.Io.Dir, sub_path: []const u8) !void {
-        var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const length = dir.realPathFile(self.io, sub_path, &buffer) catch |err| {
-            try self.failAt(dir, sub_path);
-            return err;
-        };
-        if (!within(self.project_path, buffer[0..length])) {
-            try self.failAt(dir, sub_path);
-            return error.PathEscapesProject;
-        }
-    }
-
     fn failAt(self: *Inputs, dir: std.Io.Dir, sub_path: []const u8) !void {
         var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const length = dir.realPath(self.io, &buffer) catch return self.fail(sub_path);
         const directory = buffer[0..length];
         if (!within(self.project_path, directory)) return self.fail(sub_path);
-        const relative = std.mem.trimStart(u8, directory[self.project_path.len..], "/");
+        const relative = std.mem.trimStart(u8, directory[self.project_path.len..], &.{std.fs.path.sep});
         if (relative.len == 0) return self.fail(if (sub_path.len == 0) "." else sub_path);
         const joined = try std.fs.path.join(self.allocator, &.{ relative, sub_path });
         defer self.allocator.free(joined);
@@ -243,6 +269,7 @@ pub fn isBoundaryError(err: anyerror) bool {
         error.RegisteredSourceLimitExceeded,
         error.RevisionLimitExceeded,
         error.QueryLimitExceeded,
+        error.NotRegularFile,
         => true,
         else => false,
     };
@@ -256,6 +283,7 @@ fn help(err: anyerror) []const u8 {
         error.RegisteredSourceLimitExceeded => "raise `.limits.registered_source_bytes` or narrow the configured roots",
         error.RevisionLimitExceeded => "raise `.limits.revisions`",
         error.QueryLimitExceeded => "raise `.limits.queries` or narrow the configured roots",
+        error.NotRegularFile => "replace it with a regular file",
         else => unreachable,
     };
 }
@@ -263,5 +291,6 @@ fn help(err: anyerror) []const u8 {
 fn within(root: []const u8, path: []const u8) bool {
     if (!std.mem.startsWith(u8, path, root)) return false;
     if (path.len == root.len) return true;
-    return root.len > 0 and (root[root.len - 1] == '/' or path[root.len] == '/');
+    const sep = std.fs.path.sep;
+    return root.len > 0 and (root[root.len - 1] == sep or path[root.len] == sep);
 }

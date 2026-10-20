@@ -236,10 +236,6 @@ fn columnAt(contents: []const u8, offset: usize) usize {
     return offset - line_start + 1;
 }
 
-fn sameNamespace(lhs: []const u8, rhs: []const u8) bool {
-    return std.mem.eql(u8, std.fs.path.dirname(lhs) orelse "", std.fs.path.dirname(rhs) orelse "");
-}
-
 /// Discovers every query file under `root` and rejects the first duplicate
 /// variant. `discoverAll` leaves duplicates for the caller to report.
 pub fn discover(
@@ -249,27 +245,63 @@ pub fn discover(
 ) anyerror!Discovery {
     var discovery = try discoverAll(allocator, project_inputs, root);
     errdefer discovery.deinit();
-    for (0..discovery.sources.len) |index| {
-        if (duplicateVariant(discovery.sources, index) != null) return error.DuplicateQueryVariant;
+    var variants = try Variants.init(allocator, discovery.sources);
+    defer variants.deinit(allocator);
+    for (variants.duplicate) |duplicate| {
+        if (duplicate != null) return error.DuplicateQueryVariant;
     }
     return discovery;
 }
 
-/// Directories are namespaces, so a name repeats freely across them. Within one
-/// directory, files sharing a name are that query's backend variants and must
-/// not both cover a backend. Returns the earlier source `sources[index]`
-/// collides with.
-pub fn duplicateVariant(sources: []const Source, index: usize) ?usize {
-    const source = sources[index];
-    for (sources[0..index], 0..) |existing, existing_index| {
-        if (sameNamespace(existing.path, source.path) and
-            std.mem.eql(u8, existing.name, source.name) and
-            ((existing.backends.sqlite and source.backends.sqlite) or
-                (existing.backends.postgres and source.backends.postgres)))
-            return existing_index;
+/// How sources group into logical queries. Directories are namespaces, so a
+/// name repeats freely across them. Within one directory, files sharing a name
+/// are that query's backend variants and must not both cover a backend.
+/// Computed in one pass, since a project may hold many thousands of queries.
+pub const Variants = struct {
+    /// For each source, the index of the first source with the same directory
+    /// and name: the identity of its logical query.
+    group: []usize,
+    /// For each source, the earliest source it collides with on a backend.
+    duplicate: []?usize,
+
+    pub fn init(allocator: std.mem.Allocator, sources: []const Source) !Variants {
+        const Backends_ = struct { first: usize, sqlite: ?usize = null, postgres: ?usize = null };
+        var arena: std.heap.ArenaAllocator = .init(allocator);
+        defer arena.deinit();
+        var groups: std.StringHashMapUnmanaged(Backends_) = .empty;
+        const group = try allocator.alloc(usize, sources.len);
+        errdefer allocator.free(group);
+        const duplicate = try allocator.alloc(?usize, sources.len);
+        errdefer allocator.free(duplicate);
+        for (sources, 0..) |source, index| {
+            const key = try std.fmt.allocPrint(arena.allocator(), "{s}\x00{s}", .{
+                std.fs.path.dirname(source.path) orelse "",
+                source.name,
+            });
+            const entry = try groups.getOrPut(arena.allocator(), key);
+            if (!entry.found_existing) entry.value_ptr.* = .{ .first = index };
+            const state = entry.value_ptr;
+            group[index] = state.first;
+            var collision: ?usize = null;
+            if (source.backends.sqlite) {
+                if (state.sqlite) |first| collision = first else state.sqlite = index;
+            }
+            if (source.backends.postgres) {
+                if (state.postgres) |first| {
+                    collision = if (collision) |other| @min(other, first) else first;
+                } else state.postgres = index;
+            }
+            duplicate[index] = collision;
+        }
+        return .{ .group = group, .duplicate = duplicate };
     }
-    return null;
-}
+
+    pub fn deinit(self: *Variants, allocator: std.mem.Allocator) void {
+        allocator.free(self.group);
+        allocator.free(self.duplicate);
+        self.* = undefined;
+    }
+};
 
 pub fn discoverAll(
     allocator: std.mem.Allocator,

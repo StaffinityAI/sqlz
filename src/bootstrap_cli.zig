@@ -52,6 +52,13 @@ fn usage(err: anyerror) @TypeOf(err) {
     return err;
 }
 
+/// Names the input behind a boundary error, which the error alone cannot.
+fn inputFailure(project_inputs: *const inputs.Inputs, err: anyerror) anyerror {
+    if (inputs.isBoundaryError(err))
+        std.log.err("{s}: {t}", .{ project_inputs.failure_path orelse ".", err });
+    return err;
+}
+
 fn findMarker(args: []const []const u8) ?usize {
     for (args, 0..) |arg, index| if (std.mem.eql(u8, arg, registration_marker)) return index;
     return null;
@@ -132,16 +139,19 @@ fn run(
         .fromConfig(project.limits),
     );
     defer project_inputs.deinit();
-    try project_inputs.register(config_name, loaded.source_len);
+    project_inputs.register(config_name, loaded.source_len) catch |err|
+        return inputFailure(&project_inputs, err);
     if (project.backends.sqlite == null or project.backends.postgres == null)
         return error.BootstrapRequiresBothBackends;
     if (project.backends.postgres.?.search_path.len != 1 or
         std.mem.eql(u8, project.backends.postgres.?.search_path[0], "public"))
         return error.DedicatedPostgresSchemaRequired;
     const destination_schema = project.backends.postgres.?.search_path[0];
-    var migration_dir = try project_inputs.openRoot(project.migrations);
+    var migration_dir = project_inputs.openRoot(project.migrations) catch |err|
+        return inputFailure(&project_inputs, err);
     defer migration_dir.close(io);
-    var discovery = try migrations.discover(allocator, &project_inputs, migration_dir);
+    var discovery = migrations.discover(allocator, &project_inputs, migration_dir) catch |err|
+        return inputFailure(&project_inputs, err);
     defer discovery.deinit();
     for (discovery.revisions) |revision| {
         const manifest = revision.manifest.manifest();

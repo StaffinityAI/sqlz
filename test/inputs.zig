@@ -415,5 +415,17 @@ test "boundary errors are checked-source failures" {
         error.QueryLimitExceeded,
         error.PathEscapesProject,
         error.SymlinkedDirectory,
+        error.NotRegularFile,
     }) |err| try std.testing.expectEqual(@as(u8, 1), diagnostics.exitCode(err));
+}
+
+test "a source path that is not a regular file fails instead of blocking" {
+    var fixture: Fixture = .init();
+    defer fixture.deinit();
+    try fixture.writeQuery("queries/a.sql", "a");
+    // A directory where `revision.ziggy` belongs is a non-regular input that
+    // every platform can create; FIFOs take the same path.
+    try fixture.tmp.dir.createDirPath(io, "migrations/000000000001_t0/revision.ziggy");
+    _ = try fixture.writeConfig("[]", "");
+    try fixture.expectDiagnostic("S022", "migrations/000000000001_t0/revision.ziggy");
 }

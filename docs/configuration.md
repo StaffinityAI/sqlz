@@ -50,7 +50,10 @@ resolve inside it after symlinks are followed:
   followed and fails the check, since skipping it would silently drop sources
   and following it could loop or reach the same sources twice.
 
-An escaping path fails with S022. sqlz 0.1 has no build API for registering
+Containment is checked on each opened root and file handle rather than on its
+path, so a link swapped in after the check cannot redirect a read. Inputs must be
+regular files; a FIFO or device where a source belongs fails instead of blocking.
+An escaping path or non-regular input fails with S022. sqlz 0.1 has no build API for registering
 external roots, so there is no exception to this rule; a later release may add
 one together with an explicit registration on `ProjectOptions`.
 

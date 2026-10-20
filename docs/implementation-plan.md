@@ -32,6 +32,8 @@ Status vocabulary:
 The following foundations are implemented and must remain green:
 
 - strict versioned project configuration and revision-manifest parsing;
+- one project input boundary: canonical root and symlink confinement and
+  enforced byte, revision, query, and diagnostic limits (slice 2);
 - migration discovery, DAG validation, deterministic ordering, offline catalog
   replay, and merge-parent catalog convergence for the implemented DDL subset;
 - pinned `libpg_query`, direct protobuf-C AST traversal, portable named-parameter
@@ -91,7 +93,7 @@ or PostgreSQL. Production-ready means:
 | Slice | Status | 0.1 scope |
 | --- | --- | --- |
 | 1. Status documentation | Complete | Full |
-| 2. Source trust boundaries and config enforcement | Complete | Full |
+| 2. Source trust boundaries and config enforcement | Complete (0.1) | Reduced: no external roots; token and nesting limits in slice 3 |
 | 3. Source manager and lexer | Partial | Full |
 | 4. SQL and migration-DDL surface | Partial | Reduced: freeze the current subset; downgrade checking and opaque directive |
 | 5. Builtin catalogs and supplements | Not started | Deferred to 0.2 |
@@ -162,39 +164,59 @@ subsystem and matches this plan, the public README, and the codebase.
 
 ### 2. Fix source trust boundaries and configuration enforcement
 
-**Status:** Complete
-
-**Landed:** `src/inputs.zig` is the single read boundary for the checker and
-bootstrap. It resolves the canonical project root, confines configured roots and
-every read (including symlinked files and fixed-name revision files) to it,
-never follows directory symlinks, and charges each read against `source_bytes`
-and `registered_source_bytes` before buffering. Revision and query counts are
-checked before the corresponding files are read. `sqlz.ziggy` is read under a
-fixed 1 MiB bound and then counted like any other input. Boundary errors are S021
-(limits) and S022 (paths) diagnostics naming the offending file. The threat model
-is in [security.md](security.md#threat-model); boundary and boundary-plus-one
-fixtures are in `test/inputs.zig`; `config.field_usage` and its test cover every
-format-1 field.
-
-Recorded deferrals, each owned by a later slice:
-
-- External-root registration: 0.1 has no build API for it, so every input must
-  resolve inside the project directory and nothing is exempt. Adding one needs a
-  `ProjectOptions` field and a configuration spelling for paths outside the root.
-- `tokens_per_source` and `nesting_depth` are accepted but enforced in slice 3.
-- `warnings_as_errors` has no effect until slice 6 introduces warnings.
-- `catalog_supplements` must be empty (rejected otherwise) until slice 5 (0.2).
-- Checkpoint manifests and `history.ziggy` are not read in 0.1 (slices 21-23); they
-  join the same boundary when they are.
-- `allow_untested_version`, profiles, project ID, and `migration_lock_timeout_ms`
-  are emitted as the generated `sqlz_project` namespace; the SQLite version gate
-  (slice 10) and the migration runners (slices 18-19) consume them.
+**Status:** Complete for the 0.1 scope
 
 **Depends on:** Slice 1
 
-**0.1 scope:** Full.
+**0.1 scope:** Reduced. Every input must resolve inside the project directory;
+external-root registration is deferred to 0.2. Enforcement of `tokens_per_source`
+and `nesting_depth` moves to slice 3, which owns the lexer and parser that count
+tokens and nesting. **0.1 gate:** boundary and boundary-plus-one fixtures exist
+for `source_bytes` (including `sqlz.ziggy`), `registered_source_bytes`,
+`revisions`, `queries`, and `diagnostics`; symlink escape fixtures fail closed;
+and `config.field_usage` names a consumer or deferral for every format-1 field.
 
-**Deliverables:**
+**Implemented:**
+
+- `src/inputs.zig` is the single read boundary for the checker and the bootstrap
+  command. It resolves the canonical project root once, then checks each opened
+  root and file handle, not its path, against it, so a link swapped in after a
+  check cannot redirect a read. Only regular files are opened, so a FIFO cannot
+  block the check.
+- Symlinked source files must resolve inside the project. Symlinked directories,
+  including revision directories, are never followed and fail the check.
+  Symlinks the checker would never read are ignored; a dangling one with a
+  source extension fails.
+- Every read is bounded by the closer of `source_bytes` and the remaining
+  `registered_source_bytes` before it is buffered, and limits are inclusive.
+  `sqlz.ziggy` is read under a fixed 1 MiB bound, then counted like any other
+  input. Revision directories are counted before any manifest is read, and named
+  SQL files before any is read; embedded declarations share the query limit.
+- Boundary errors are S021 (limits) and S022 (paths and non-regular files)
+  diagnostics naming the offending file, with exit code 1. The bootstrap command
+  logs the same path.
+- Configuration rejects a non-empty `catalog_supplements` and root aliases with
+  the reserved `sqlz` prefix, and keeps its own copy of the source.
+- The generated module exposes `project_id`, both profiles,
+  `allow_untested_version`, and `migration_lock_timeout_ms` as `sqlz_project`.
+- The threat model is in [security.md](security.md#threat-model). Fixtures are in
+  `test/inputs.zig`, and `config.field_usage` with its test covers every field.
+
+**Recorded deferrals:**
+
+- External-root registration (0.2): there is no `ProjectOptions` field and no
+  configuration spelling for a path outside the project, so nothing is exempt.
+- `tokens_per_source` and `nesting_depth`: accepted and validated, enforced by
+  slice 3.
+- `warnings_as_errors`: no effect until slice 6 introduces warnings.
+- `catalog_supplements`: rejected unless empty until slice 5 (0.2).
+- Checkpoint manifests and `history.ziggy` are not read in 0.1 (slices 21-23); they
+  join the same boundary when they are.
+- `sqlz_project` consumers: the SQLite version gate (slice 10), PostgreSQL callers
+  that build a `VersionPolicy` (slice 11), and the migration runners and runtime
+  bundle (slices 18, 19, and 24).
+
+**Deliverables (long-term):**
 
 - Threat-model configured roots, symlinks, generated cache paths, dynamic SQL
   identifiers, state ownership, schema privileges, destructive commands, secrets,
@@ -234,13 +256,16 @@ documented deferral exists for every format-1 configuration field.
 - Recognize PostgreSQL dollar-quoted strings and all supported string, identifier,
   comment, cast, and operator contexts during named-parameter rewriting.
 - Enforce `tokens_per_source` and `nesting_depth` during rewriting, parsing, Zig
-  declaration discovery, and AST adaptation.
+  declaration discovery, and AST adaptation, reporting S021 like the other
+  limits enforced by slice 2.
 - Add parameter rewrite/source-map properties and fuzz targets for SQL bytes,
   directives, Zig declarations, and manifest inputs.
 
 **Acceptance gate:** Golden fixtures cover BOM, malformed UTF-8, multibyte text,
 tabs, LF/CRLF, every quote/comment form, dollar quotes, and rewritten positions;
-arbitrary bytes and deep nesting cannot panic, hang, or bypass configured limits.
+boundary and boundary-plus-one fixtures exist for `tokens_per_source` and
+`nesting_depth`; arbitrary bytes and deep nesting cannot panic, hang, or bypass
+configured limits.
 
 ### 4. Complete the documented SQL and migration-DDL surface
 
@@ -446,7 +471,9 @@ owned by the slices implementing those operations.
   discard pooled handles instead of reusing them.
 - Enforce configured SQLite profile versions at connection and migration time:
   reject older engines and newer engines unless `allow_untested_version` is set;
-  emit the documented warning/event for the allowed newer case.
+  emit the documented warning/event for the allowed newer case. The profile and
+  override are already emitted as the generated `sqlz_project.sqlite_profile`
+  and `sqlz_project.allow_untested_version` (slice 2).
 - Cover direct, borrowed, transaction, stream, and pooled ownership modes with
   failure injection.
 
@@ -499,7 +526,8 @@ combinations.
 **Deliverables:**
 
 - Test same-cache edits, additions, removals, and nested SQL, Zig, Ziggy, migration,
-  and supplement inputs. Register checkpoint and `history.ziggy` candidate inputs
+  and supplement inputs. Symlinked candidate files are already registered as
+  inputs (slice 2); their invalidation still needs a fixture. Register checkpoint and `history.ziggy` candidate inputs
   now; their semantic invalidation tests land with slices 21-24.
 - Define local content-addressed cache keys separately from generated-query metadata
   and persisted migration fingerprints.
@@ -648,7 +676,8 @@ continuation is ambiguous.
 
 **Deliverables:**
 
-- Acquire an immediate write transaction with configured busy/lock timeout; never
+- Acquire an immediate write transaction with the configured busy/lock timeout
+  (`sqlz_project.migration_lock_timeout_ms`, emitted by slice 2); never
   run unlocked.
 - Initialize/upgrade state and validate identity/checksums before execution.
 - Preflight the whole plan, execute each revision transactionally, update applied
@@ -672,7 +701,8 @@ identity/checksum drift, journal visibility, and poisoned connection handling.
 
 **Deliverables:**
 
-- Acquire a project-scoped advisory lock with configured timeout; never run
+- Acquire a project-scoped advisory lock with the configured timeout
+  (`sqlz_project.migration_lock_timeout_ms`, emitted by slice 2); never run
   unlocked.
 - Initialize/upgrade state and perform the same full-plan/identity validation as
   SQLite.
@@ -957,7 +987,9 @@ JSON output, journals, and connection URLs.
 
 **Deliverables:**
 
-- Verify every early threat-model decision against final code and tests.
+- Verify every early threat-model decision against final code and tests. The
+  threat-model table in `security.md` exists (slice 2) and marks each row as
+  enforced or owned by a later slice.
 - Ensure dynamic identifiers originate in validated catalogs and use dialect-aware
   quoting; keep values bound.
 - Test redaction across human/JSON output, runtime errors, journals, telemetry,
@@ -992,6 +1024,9 @@ the 0.1 rows of `testing.md` and `compatibility.md`.
 - Add parser, catalog, declaration, graph, and planner fuzz/property suites with
   retained regression corpora.
 - Keep the pre-commit/offline gate deterministic and service-free.
+- Cover an older-glibc Linux host. libpg_query assumes a declared `strlcpy`,
+  which glibc has only from 2.38, so `build.zig` supplies a shim on older hosts;
+  it was verified by hand on Debian 12 (glibc 2.36) and has no CI job yet.
 
 **Acceptance gate:** A checked CI matrix exactly matches `testing.md` and
 `compatibility.md`, with a named job or documented local gate for every row.
@@ -1114,6 +1149,7 @@ bootstrap is the single documented exception until slice 28 lands.
 These are planned and designed, but outside the 0.1 production cut:
 
 - versioned builtin catalogs and Ziggy project supplements (slice 5);
+- build-registered external roots outside the project directory (slice 2);
 - the full warning registry, stable query IDs, and lifecycle telemetry (slices 6,
   8, and 9);
 - arrays of custom-codec values (slice 7);

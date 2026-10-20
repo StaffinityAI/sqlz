@@ -302,8 +302,15 @@ fn generateLoaded(
         }
         const inputs = try allocator.alloc(generator.CheckedInput, discovery.sources.len);
         errdefer allocator.free(inputs);
+        var variants = try query_files.Variants.init(allocator, discovery.sources);
+        defer variants.deinit(allocator);
+        // The checked input that first represents each logical query; later
+        // backend variants must match its contract.
+        const first_checked = try allocator.alloc(?usize, discovery.sources.len);
+        defer allocator.free(first_checked);
+        @memset(first_checked, null);
         for (discovery.sources, 0..) |*source, source_index| {
-            if (query_files.duplicateVariant(discovery.sources, source_index)) |first_index| {
+            if (variants.duplicate[source_index]) |first_index| {
                 const list = diagnostic_list orelse return error.DuplicateQueryVariant;
                 try appendDuplicateVariantDiagnostic(allocator, &discovery.sources[first_index], source, list);
                 continue;
@@ -348,12 +355,13 @@ fn generateLoaded(
                 .postgres_sql = postgres_sql,
             };
             checked_count += 1;
-            for (inputs[0 .. checked_count - 1]) |prior| {
-                if (!sameLogicalQuery(prior.source, source)) continue;
+            const group = variants.group[source_index];
+            if (first_checked[group]) |prior_index| {
+                const prior = inputs[prior_index];
                 if (prior.source.cardinality != source.cardinality or
                     !contractsEqual(prior.checked, &checked[checked_count - 1]))
                     return error.IncompatibleBackendContract;
-            }
+            } else first_checked[group] = checked_count - 1;
         }
         states[initialized] = .{
             .discovery = discovery,
@@ -452,13 +460,6 @@ fn nameSpan(source: *const query_files.Source) diagnostics.Span {
             .column = source.name_column + source.name.len,
         },
     };
-}
-
-fn sameLogicalQuery(left: *const query_files.Source, right: *const query_files.Source) bool {
-    if (!std.mem.eql(u8, left.name, right.name)) return false;
-    const left_parent = std.fs.path.dirname(left.path) orelse "";
-    const right_parent = std.fs.path.dirname(right.path) orelse "";
-    return std.mem.eql(u8, left_parent, right_parent);
 }
 
 fn appendPostgresSyntaxDiagnostic(

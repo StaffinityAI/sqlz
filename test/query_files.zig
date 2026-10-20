@@ -93,3 +93,30 @@ test "a query name repeats freely across directories" {
     defer discovery.deinit();
     try std.testing.expectEqual(@as(usize, 3), discovery.sources.len);
 }
+
+test "variants group by directory and name in one pass" {
+    const sqlite = "-- sqlz.backends: sqlite\n-- sqlz.cardinality: exec\nDELETE FROM users";
+    const postgres = "-- sqlz.backends: postgres\n-- sqlz.cardinality: exec\nDELETE FROM users";
+    const both = "-- sqlz.backends: sqlite, postgres\n-- sqlz.cardinality: exec\nDELETE FROM users";
+    const files = [_]struct { []const u8, []const u8 }{
+        .{ "a/one.sql", "-- sqlz.name: q\n" ++ sqlite },
+        .{ "a/two.sql", "-- sqlz.name: q\n" ++ postgres },
+        .{ "a/three.sql", "-- sqlz.name: q\n" ++ both },
+        .{ "b/one.sql", "-- sqlz.name: q\n" ++ both },
+    };
+    var sources: [files.len]query_files.Source = undefined;
+    var parsed: usize = 0;
+    defer for (sources[0..parsed]) |*source| source.deinit();
+    for (files, 0..) |file, index| {
+        sources[index] = try query_files.parse(std.testing.allocator, file[0], file[1]);
+        parsed += 1;
+    }
+    var variants = try query_files.Variants.init(std.testing.allocator, &sources);
+    defer variants.deinit(std.testing.allocator);
+    try std.testing.expectEqualSlices(usize, &.{ 0, 0, 0, 3 }, variants.group);
+    try std.testing.expectEqual(@as(?usize, null), variants.duplicate[0]);
+    try std.testing.expectEqual(@as(?usize, null), variants.duplicate[1]);
+    // Both backends collide; the earlier source is reported.
+    try std.testing.expectEqual(@as(?usize, 0), variants.duplicate[2]);
+    try std.testing.expectEqual(@as(?usize, null), variants.duplicate[3]);
+}
