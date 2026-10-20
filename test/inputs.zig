@@ -379,3 +379,41 @@ test "inputs reports the first boundary path and keeps it" {
     try std.testing.expectError(error.SourceTooLarge, project_inputs.register("second", 5));
     try std.testing.expectEqualStrings("first", project_inputs.failure_path.?);
 }
+
+test "symlinks that are never read may point anywhere" {
+    var outside = std.testing.tmpDir(.{});
+    defer outside.cleanup();
+    try outside.dir.writeFile(io, .{ .sub_path = "notes.txt", .data = "outside" });
+    const target = try outside.dir.realPathFileAlloc(io, "notes.txt", allocator);
+    defer allocator.free(target);
+
+    var fixture: Fixture = .init();
+    defer fixture.deinit();
+    try fixture.writeStandard();
+    try fixture.tmp.dir.symLink(io, target, "queries/notes.txt", .{});
+    try fixture.tmp.dir.symLink(io, "missing.txt", "queries/dangling.txt", .{});
+    try fixture.tmp.dir.symLink(io, target, "migrations/README", .{});
+    _ = try fixture.writeConfig("[]", "");
+    try fixture.expectGenerates();
+}
+
+test "a dangling symlinked query file fails instead of being skipped" {
+    var fixture: Fixture = .init();
+    defer fixture.deinit();
+    try fixture.writeStandard();
+    try fixture.tmp.dir.symLink(io, "missing.sql", "queries/gone.sql", .{});
+    _ = try fixture.writeConfig("[]", "");
+    try std.testing.expectError(error.FileNotFound, fixture.generate());
+}
+
+test "boundary errors are checked-source failures" {
+    for ([_]anyerror{
+        error.ConfigurationTooLarge,
+        error.SourceTooLarge,
+        error.RegisteredSourceLimitExceeded,
+        error.RevisionLimitExceeded,
+        error.QueryLimitExceeded,
+        error.PathEscapesProject,
+        error.SymlinkedDirectory,
+    }) |err| try std.testing.expectEqual(@as(u8, 1), diagnostics.exitCode(err));
+}

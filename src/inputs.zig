@@ -139,23 +139,30 @@ pub const Inputs = struct {
         return self.readFile(allocator, dir, sub_path);
     }
 
-    /// Resolves the kind of a directory entry. Symlinked files must resolve
-    /// inside the project; symlinked directories are never followed, since a
-    /// silently skipped directory would drop sources and a followed one could
-    /// loop or reach the same sources twice.
+    /// Resolves the kind of a directory entry. `candidate` says whether the
+    /// caller would read the entry if it is a file. Symlinked directories are
+    /// never followed, since a silently skipped directory would drop sources
+    /// and a followed one could loop or reach the same sources twice. A
+    /// symlinked candidate file must resolve inside the project; any other
+    /// symlinked file is never read, so where it points does not matter.
     pub fn entryKind(
         self: *Inputs,
         dir: std.Io.Dir,
         basename: []const u8,
         kind: std.Io.File.Kind,
+        candidate: bool,
     ) !std.Io.File.Kind {
         if (kind != .sym_link) return kind;
-        try self.confine(dir, basename);
-        const stat = try dir.statFile(self.io, basename, .{});
+        const stat = dir.statFile(self.io, basename, .{}) catch |err| {
+            if (!candidate) return .sym_link;
+            try self.failAt(dir, basename);
+            return err;
+        };
         if (stat.kind == .directory) {
             try self.failAt(dir, basename);
             return error.SymlinkedDirectory;
         }
+        if (candidate) try self.confine(dir, basename);
         return stat.kind;
     }
 

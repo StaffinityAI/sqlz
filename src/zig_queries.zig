@@ -49,8 +49,9 @@ pub fn discover(
     defer walker.deinit();
     while (try walker.next(io)) |entry| {
         if (hiddenPath(entry.path)) continue;
-        const kind = try project_inputs.entryKind(entry.dir, entry.basename, entry.kind);
-        if (kind != .file or !std.mem.endsWith(u8, entry.path, ".zig")) continue;
+        const candidate = std.mem.endsWith(u8, entry.basename, ".zig");
+        const kind = try project_inputs.entryKind(entry.dir, entry.basename, entry.kind, candidate);
+        if (kind != .file or !candidate) continue;
         try paths.append(allocator, try allocator.dupe(u8, entry.path));
     }
     std.mem.sort([]const u8, paths.items, {}, struct {

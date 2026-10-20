@@ -216,7 +216,8 @@ fn discoverImpl(
     }
     var iterator = root.iterate();
     while (try iterator.next(io)) |entry| {
-        const kind = try project_inputs.entryKind(root, entry.name, entry.kind);
+        // Only directories are revisions; files in the root are never read.
+        const kind = try project_inputs.entryKind(root, entry.name, entry.kind, false);
         if (kind != .directory) continue;
         // Count before any manifest is read, so an oversized history fails
         // without buffering it.

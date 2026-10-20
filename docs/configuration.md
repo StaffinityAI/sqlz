@@ -43,6 +43,9 @@ resolve inside it after symlinks are followed:
   inside the project root;
 - a symlinked file inside a root is read only when its target resolves inside the
   project root, and fixed-name files such as `revision.ziggy` follow the same rule;
+  a dangling symlink with a source extension fails rather than being skipped;
+- a symlinked file the checker would never read, such as `notes.txt` in a SQL
+  root, is ignored wherever it points;
 - a symlinked directory inside a root, including a revision directory, is never
   followed and fails the check, since skipping it would silently drop sources
   and following it could loop or reach the same sources twice.

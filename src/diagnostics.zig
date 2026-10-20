@@ -317,5 +317,6 @@ pub fn isCheckedSourceError(err: anyerror) bool {
     const code = codeForError(err);
     return code[0] == 'M' or code[0] == 'C' or code[0] == 'Q' or
         code[0] == 'T' or code[0] == 'G' or std.mem.eql(u8, code, "S010") or
-        std.mem.eql(u8, code, "S020");
+        std.mem.eql(u8, code, "S020") or std.mem.eql(u8, code, "S021") or
+        std.mem.eql(u8, code, "S022");
 }
