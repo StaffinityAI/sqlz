@@ -2,6 +2,7 @@ const std = @import("std");
 const ziggy = @import("ziggy");
 const diagnostics = @import("sqlz_diagnostics");
 const inputs = @import("sqlz_inputs");
+const source_manager = @import("sqlz_source");
 
 pub const Backend = enum { sqlite, postgres };
 pub const Direction = enum { up, down };
@@ -67,6 +68,12 @@ pub const DiscoveredRevision = struct {
     postgres_up: []const u8,
     postgres_down: []const u8,
 
+    /// Migration SQL as a database receives it. The file's original bytes,
+    /// byte order mark included, stay in the revision for checksums.
+    pub fn executable(sql: []const u8) []const u8 {
+        return source_manager.withoutBom(sql);
+    }
+
     pub fn commonSql(self: *const DiscoveredRevision, direction: Direction) []const u8 {
         return switch (direction) {
             .up => self.common_up,
@@ -130,7 +137,7 @@ pub fn parseManifest(
 ) ManifestError!LoadedManifest {
     var arena: std.heap.ArenaAllocator = .init(allocator);
     errdefer arena.deinit();
-    const value = try ziggy.deserializeLeaky(Manifest, arena.allocator(), source, meta, .{
+    const value = try ziggy.deserializeLeaky(Manifest, arena.allocator(), try maskBom(arena.allocator(), source), meta, .{
         .copy_strings = .always,
     });
     try validateManifest(&value);
@@ -139,6 +146,15 @@ pub fn parseManifest(
         .source = try arena.allocator().dupe(u8, source),
         .arena = arena,
     };
+}
+
+/// A copy of a Ziggy source with its byte order mark replaced by spaces, so
+/// the deserializer sees plain whitespace and every offset it reports is an
+/// offset into the original file.
+pub fn maskBom(allocator: std.mem.Allocator, source: [:0]const u8) std.mem.Allocator.Error![:0]u8 {
+    const copy = try allocator.dupeZ(u8, source);
+    @memset(copy[0..source_manager.bomLength(copy)], ' ');
+    return copy;
 }
 
 pub fn validateManifest(manifest: *const Manifest) ManifestValidationError!void {
@@ -353,23 +369,10 @@ fn appendManifestDiagnostic(
     const field = manifestErrorField(err);
     const span = if (field) |name|
         fieldSpan(path, source, name)
-    else if (isZiggyError(err)) blk: {
-        const loc = meta.error_loc;
-        const selection = loc.getSelection(source);
-        break :blk diagnostics.Span{
-            .path = path,
-            .start = .{
-                .offset = loc.start,
-                .line = selection.start.line,
-                .column = selection.start.col,
-            },
-            .end = .{
-                .offset = loc.end,
-                .line = selection.end.line,
-                .column = selection.end.col,
-            },
-        };
-    } else fieldSpan(path, source, "format_version");
+    else if (isZiggyError(err))
+        diagnostics.spanAt(path, source, meta.error_loc.start, meta.error_loc.end)
+    else
+        fieldSpan(path, source, "format_version");
     try list.appendDiagnostic(.{
         .severity = .err,
         .code = manifestErrorCode(err),
@@ -594,23 +597,7 @@ fn fieldSpan(path: []const u8, source: []const u8, field: []const u8) diagnostic
     var end = value_start;
     while (end < source.len and source[end] != '\n' and source[end] != ',') : (end += 1) {}
     if (end == value_start) end = @min(value_start + 1, source.len);
-    return .{
-        .path = path,
-        .start = positionAt(source, value_start),
-        .end = positionAt(source, end),
-    };
-}
-
-fn positionAt(source: []const u8, offset: usize) diagnostics.Position {
-    var line: usize = 1;
-    var column: usize = 1;
-    for (source[0..@min(offset, source.len)]) |byte| {
-        if (byte == '\n') {
-            line += 1;
-            column = 1;
-        } else column += 1;
-    }
-    return .{ .offset = offset, .line = line, .column = column };
+    return diagnostics.spanAt(path, source, value_start, end);
 }
 
 fn manifestErrorField(err: anyerror) ?[]const u8 {

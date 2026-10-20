@@ -45,12 +45,16 @@ No generated output is replaced when checking fails.
 ### Source manager
 
 Files are read as UTF-8. A UTF-8 byte order mark is accepted and excluded from
-source columns. Invalid UTF-8 produces a byte-accurate diagnostic and prevents
-parsing that file. Source offsets are byte offsets; displayed columns count
-Unicode scalar values and tabs use a fixed width of four for caret rendering.
+source columns. Invalid UTF-8 (including overlong forms, surrogates, and values
+past U+10FFFF) fails with S011 at the offending byte and prevents parsing that
+file. Source offsets are byte offsets; displayed columns count Unicode scalar
+values, a tab is one column, and excerpts render tabs at a fixed width of four so
+the underline lines up. Control characters in excerpts are replaced.
 
-Line endings may be LF or CRLF and are normalized only in the source manager's
-line index. Original bytes participate in checksums and diagnostics.
+Line endings may be LF or CRLF; a CR directly before an LF belongs to the line
+ending, and a lone CR does not end a line. Line endings are normalized only in
+the source manager's line index. Original bytes participate in checksums and
+diagnostics; the byte order mark is removed only from SQL sent to a database.
 
 ### Lexer
 
@@ -59,11 +63,16 @@ The shared lexer recognizes:
 - identifiers, quoted identifiers, keywords, numbers, operators, punctuation,
   comments, and statement terminators;
 - ordinary and dialect-specific string literal forms;
-- PostgreSQL dollar-quoted strings and `::` casts;
+- PostgreSQL dollar-quoted strings, `E'...'` escape strings, nested block
+  comments, and `::` casts;
 - SQLite bracket/backtick identifiers where the dialect permits them;
+- native placeholders (`$1`, `?`, `?1`, `$name`, `@name`) where the dialect has
+  them;
 - sqlz named parameters of the form `:identifier`.
 
-Tokens retain leading comments needed for directives and exact source spans.
+Comments are tokens of their own with exact spans but do not count toward
+`limits.tokens_per_source`. The same pass estimates nesting for
+`limits.nesting_depth`, so both limits are enforced before any parser recurses.
 The lexer does not decide whether a word is reserved in a particular syntactic
 position; the dialect parser does.
 

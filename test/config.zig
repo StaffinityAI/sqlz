@@ -214,3 +214,36 @@ test "every format-1 field has exactly one documented use" {
     // names a field that does not exist.
     try std.testing.expectEqual(expected, config.field_usage.len);
 }
+
+fn parseWithLimits(limits: []const u8) !config.Loaded {
+    var meta: ziggy.Deserializer.Meta = .init;
+    const text = try std.fmt.allocPrint(std.testing.allocator, "{s}\n.limits = .{{ {s} }},\n", .{ valid, limits });
+    defer std.testing.allocator.free(text);
+    const source = try std.testing.allocator.dupeZ(u8, text);
+    defer std.testing.allocator.free(source);
+    return config.parse(std.testing.allocator, source, &meta);
+}
+
+test "nesting_depth is bounded by the largest depth the parsers accept" {
+    var at_bound = try parseWithLimits(".nesting_depth = 1024");
+    at_bound.deinit();
+    try std.testing.expectEqual(@as(u32, 1024), config.max_nesting_depth);
+    try std.testing.expectError(error.InvalidLimit, parseWithLimits(".nesting_depth = 1025"));
+    try std.testing.expectError(error.InvalidLimit, parseWithLimits(".tokens_per_source = 0"));
+}
+
+test "a configuration may start with a byte order mark" {
+    var meta: ziggy.Deserializer.Meta = .init;
+    const source = try std.testing.allocator.dupeZ(u8, "\xEF\xBB\xBF" ++ valid);
+    defer std.testing.allocator.free(source);
+    var loaded = try config.parse(std.testing.allocator, source, &meta);
+    defer loaded.deinit();
+    try std.testing.expectEqualStrings("migrations", loaded.config().migrations);
+}
+
+test "a configuration that is not UTF-8 is rejected before parsing" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "sqlz.ziggy", .data = valid ++ "\n// \xFF\n" });
+    try std.testing.expectError(error.InvalidUtf8, config.load(std.testing.allocator, std.testing.io, tmp.dir, "sqlz.ziggy"));
+}

@@ -211,8 +211,10 @@ test "PostgreSQL project syntax diagnostics preserve original source spans" {
     try std.testing.expectEqual(@as(usize, 1), list.slice().len);
     const primary = list.slice()[0].primary.?;
     try std.testing.expectEqualStrings("invalid.sql", primary.path);
-    try std.testing.expectEqual(@as(usize, 1), primary.start.line);
-    try std.testing.expect(primary.start.column > 1);
+    // Positions are in the file, after the directive header, not in the SQL.
+    try std.testing.expectEqual(@as(usize, 5), primary.start.line);
+    try std.testing.expectEqual(@as(usize, 16), primary.start.column);
+    try std.testing.expectEqualStrings("SELECT :id FROM", primary.excerpt.?);
 }
 
 test "catalog replay errors become source diagnostics with fixes" {
@@ -1055,4 +1057,44 @@ fn writeRelationDiagnosticProject(tmp: *std.testing.TmpDir) !void {
         \\SELECT id FROM usres
         ,
     });
+}
+
+test "query diagnostics point into the original file through a BOM, CRLF, tabs, and multibyte text" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try writeDiagnosticProject(&tmp, 100);
+    const contents = "\xEF\xBB\xBF-- sqlz.name: first\r\n-- sqlz.backends: sqlite\r\n-- sqlz.cardinality: many\r\n" ++
+        "\r\nSELECT\r\n\t'é' AS label, iid FROM users\r\n";
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "queries/a.sql", .data = contents });
+    try tmp.dir.deleteFile(std.testing.io, "queries/b.sql");
+    var list: diagnostics.List = .init(std.testing.allocator, 100);
+    defer list.deinit();
+    try std.testing.expectError(error.ProjectCheckFailed, codegen.generateProjectWithCodecsAndDiagnostics(
+        std.testing.allocator,
+        std.testing.io,
+        tmp.dir,
+        "sqlz.ziggy",
+        &.{},
+        &list,
+    ));
+    try std.testing.expectEqual(@as(usize, 1), list.slice().len);
+    const diagnostic = list.slice()[0];
+    try std.testing.expectEqualStrings("Q021", diagnostic.code);
+    const primary = diagnostic.primary.?;
+    try std.testing.expectEqual(std.mem.indexOf(u8, contents, "iid").?, primary.start.offset);
+    try std.testing.expectEqual(@as(usize, 6), primary.start.line);
+    try std.testing.expectEqual(@as(usize, 16), primary.start.column);
+    try std.testing.expectEqual(@as(usize, 19), primary.end.column);
+
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    try diagnostics.render(&output.writer, diagnostic, .human);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        output.written(),
+        "a.sql:6:16: error[Q021]: column `iid` does not exist\n" ++
+            "  |\n" ++
+            "6 |     'é' AS label, iid FROM users\n" ++
+            "  |                   ^^^\n",
+    ) != null);
 }

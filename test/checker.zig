@@ -839,3 +839,41 @@ test "a declared type the checker cannot read is left unverified" {
         \\});
     , &.{});
 }
+
+test "queries at the largest accepted nesting check without exhausting the stack" {
+    const allocator = std.testing.allocator;
+    var schema = catalog.Catalog.init(allocator);
+    defer schema.deinit();
+    try checker.applySqliteRevisionAtomic(&schema, allocator, "CREATE TABLE users (id BIGINT PRIMARY KEY)", "");
+    const depth = checker.parser.lexer.max_nesting_depth;
+    const shapes = [_]struct { []const u8, []const u8, []const u8, []const u8 }{
+        .{ "SELECT ", "(", "id", ")" },
+        .{ "SELECT id", " + id", "", "" },
+        .{ "SELECT ", "NOT ", "true", "" },
+        .{ "SELECT ", "COALESCE(", "id", ", 0)" },
+    };
+    for (shapes) |shape| {
+        const prefix, const unit, const middle, const tail = shape;
+        var sql: std.ArrayList(u8) = .empty;
+        defer sql.deinit(allocator);
+        try sql.appendSlice(allocator, prefix);
+        // Leave room for the projection alias and the clauses around it.
+        for (0..depth - 8) |_| try sql.appendSlice(allocator, unit);
+        try sql.appendSlice(allocator, middle);
+        for (0..depth - 8) |_| try sql.appendSlice(allocator, tail);
+        try sql.appendSlice(allocator, " AS value FROM users");
+        const contents = try std.fmt.allocPrint(
+            allocator,
+            "-- sqlz.name: deep\n-- sqlz.backends: sqlite, postgres\n-- sqlz.cardinality: many\n{s}",
+            .{sql.items},
+        );
+        defer allocator.free(contents);
+        var source = try query_files.parse(allocator, "deep.sql", contents);
+        defer source.deinit();
+        const limits: checker.parser.Limits = .{ .nesting = depth };
+        var sqlite = try checker.checkNamedSqliteWithDialect(allocator, &schema, &source, .{ .limits = limits });
+        sqlite.deinit();
+        var postgres = try checker.checkNamedPostgresWithDialect(allocator, &schema, &source, .{ .limits = limits });
+        postgres.deinit();
+    }
+}

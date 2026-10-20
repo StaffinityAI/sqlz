@@ -20,7 +20,33 @@ pub fn parse(
     allocator: std.mem.Allocator,
     path: []const u8,
     contents: [:0]const u8,
-) Error!Discovery {
+) (Error || LimitError)!Discovery {
+    return parseWithLimits(allocator, path, contents, .{});
+}
+
+pub const LimitError = error{ TokenLimitExceeded, NestingLimitExceeded };
+
+pub const Limits = struct {
+    tokens: u64 = 1_000_000,
+    nesting: u32 = 256,
+};
+
+pub const Violation = struct {
+    err: LimitError,
+    /// The token that crossed the limit.
+    start: usize,
+    end: usize,
+};
+
+/// Like `parse`, but first bounds the tokens and nesting the Zig parser will
+/// see, since it recurses once per nesting level.
+pub fn parseWithLimits(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    contents: [:0]const u8,
+    limits: Limits,
+) (Error || LimitError)!Discovery {
+    if (checkLimits(contents, limits)) |violation| return violation.err;
     var tree = try std.zig.Ast.parse(allocator, contents, .zig);
     defer tree.deinit(allocator);
     if (tree.errors.len != 0) return error.InvalidZig;
@@ -65,12 +91,20 @@ pub fn discover(
         for (sources.items) |*source| source.deinit();
         sources.deinit(allocator);
     }
+    const limits: Limits = .{
+        .tokens = project_inputs.limits.tokens_per_source,
+        .nesting = project_inputs.limits.nesting_depth,
+    };
     for (paths.items) |path| {
         const contents = try project_inputs.readFile(allocator, root, path);
         defer allocator.free(contents);
         const terminated = try allocator.dupeZ(u8, contents);
         defer allocator.free(terminated);
-        var parsed = try parse(allocator, path, terminated);
+        if (checkLimits(terminated, limits)) |violation| {
+            try project_inputs.failInside(root, path, contents, violation.start, violation.end);
+            return violation.err;
+        }
+        var parsed = try parseWithLimits(allocator, path, terminated, limits);
         var moved: usize = 0;
         defer {
             for (parsed.sources[moved..]) |*source| source.deinit();
@@ -432,4 +466,66 @@ fn hiddenPath(path: []const u8) bool {
             std.mem.eql(u8, component, "zig-pkg")) return true;
     }
     return false;
+}
+
+/// The largest `nesting` limit sqlz accepts, matching the SQL lexer.
+pub const max_nesting_depth: u32 = 1024;
+
+/// Returns the first token that crosses the token or nesting limit. Nesting
+/// counts open brackets, plus what the Zig parser also descends into one level
+/// at a time: a run of prefix operators (`!`, `-`, `~`, `&`, `*`, `?`, `try`,
+/// `comptime`) nests each operand under the previous one, and each `else if`
+/// nests the rest of its chain.
+pub fn checkLimits(contents: [:0]const u8, limits: Limits) ?Violation {
+    std.debug.assert(limits.tokens > 0 and limits.nesting > 0);
+    std.debug.assert(limits.nesting <= max_nesting_depth);
+    var tokenizer: std.zig.Tokenizer = .init(contents);
+    var tokens: u64 = 0;
+    // `else if` links per open bracket level. A level past the limit fails
+    // the check before it is stored, so the stack never overflows.
+    var chains: [max_nesting_depth + 1]u32 = undefined;
+    var depth: u32 = 0;
+    chains[0] = 0;
+    var chain_total: u64 = 0;
+    var prefix: u64 = 0;
+    var previous: std.zig.Token.Tag = .invalid;
+    while (true) {
+        const token = tokenizer.next();
+        if (token.tag == .eof) return null;
+        tokens += 1;
+        if (tokens > limits.tokens)
+            return .{ .err = error.TokenLimitExceeded, .start = token.loc.start, .end = token.loc.end };
+        switch (token.tag) {
+            .l_paren, .l_bracket, .l_brace => {
+                if (depth + prefix + chain_total + 1 > limits.nesting)
+                    return .{ .err = error.NestingLimitExceeded, .start = token.loc.start, .end = token.loc.end };
+                depth += 1;
+                chains[depth] = 0;
+            },
+            .r_paren, .r_bracket, .r_brace => if (depth > 0) {
+                chain_total -= chains[depth];
+                depth -= 1;
+            },
+            .keyword_if => if (previous == .keyword_else) {
+                chains[depth] += 1;
+                chain_total += 1;
+            } else {
+                chain_total -= chains[depth];
+                chains[depth] = 0;
+            },
+            .semicolon => {
+                chain_total -= chains[depth];
+                chains[depth] = 0;
+            },
+            else => {},
+        }
+        switch (token.tag) {
+            .bang, .minus, .minus_percent, .tilde, .ampersand, .asterisk, .question_mark, .keyword_try, .keyword_comptime => prefix += 1,
+            .l_paren, .l_bracket => {},
+            else => prefix = 0,
+        }
+        previous = token.tag;
+        if (depth + prefix + chain_total > limits.nesting)
+            return .{ .err = error.NestingLimitExceeded, .start = token.loc.start, .end = token.loc.end };
+    }
 }

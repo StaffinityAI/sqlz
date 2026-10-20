@@ -103,7 +103,7 @@ generated module for runtime code, or explicitly deferred. The table is
 | `backends.sqlite.database`, `backends.sqlite.capabilities` | checker: only `main` and `bundled` in 0.1 |
 | `catalog_supplements` | checker: rejected unless empty |
 | `limits.source_bytes`, `limits.registered_source_bytes`, `limits.revisions`, `limits.queries`, `limits.diagnostics` | checker: enforced on every read and count |
-| `limits.tokens_per_source`, `limits.nesting_depth` | deferred to slice 3 (lexer, parser, and Zig discovery) |
+| `limits.tokens_per_source`, `limits.nesting_depth` | checker: SQL lexer before rewriting and parsing; Zig tokenizer before declaration discovery |
 | `warnings_as_errors` | deferred to slice 6: the checker emits no warnings yet |
 | `project_id`, `backends.*.profile`, `allow_untested_version`, `migration_lock_timeout_ms` | runtime: generated `sqlz_project` namespace |
 
@@ -193,8 +193,16 @@ fails with S021, naming the file or root that crossed it.
   is read.
 - `queries` counts named SQL files, checked before any is read, and embedded
   declarations together.
-- `tokens_per_source` and `nesting_depth` are accepted but not yet enforced; the
-  lexer and parser work in slice 3 applies them.
+- `tokens_per_source` bounds the tokens in each SQL source (a named query, an
+  embedded query's SQL, or a migration file) and each `.zig` file under a Zig
+  root. Comments are not tokens.
+- `nesting_depth` bounds how deeply a source nests, checked before any parser
+  runs. In SQL, each bracket and `CASE` is a level, and so is each operator or
+  operator keyword within one list element, since `1+1+1` parses as nested
+  expressions; flattened `AND`/`OR` chains cost one level, and set operations
+  and joins accumulate per statement. In Zig, brackets, runs of prefix
+  operators, and `else if` chains count. The limit may not exceed 1024.
+- Both report S021 at the token that crossed the limit.
 Checkpoint manifests count toward the revision limit. Entries in
 `migrations/history.ziggy` have a separate count bounded by the same default
 10,000 limit in the initial implementation, and all checkpoint/history bytes count

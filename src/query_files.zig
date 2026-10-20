@@ -1,5 +1,6 @@
 const std = @import("std");
 const inputs = @import("sqlz_inputs");
+const source_manager = @import("sqlz_source");
 
 pub const Backends = struct {
     sqlite: bool = false,
@@ -45,15 +46,17 @@ pub const Source = struct {
     backends: Backends,
     cardinality: Cardinality,
     sql: []const u8,
+    /// Byte offset of `sql` in `source_text`.
     sql_offset: usize = 0,
-    sql_line: usize = 1,
-    sql_column: usize = 1,
     /// Where the `sqlz.name` directive's value sits, for diagnostics that
     /// point at the query's name rather than its SQL.
     name_offset: usize = 0,
-    name_line: usize = 1,
-    name_column: usize = 1,
+    /// For embedded SQL, the offset in `source_text` of each byte of `sql`
+    /// plus one past its end; a Zig string literal's escapes make the two
+    /// differ. Null for a `.sql` file, whose SQL is the slice of `source_text`
+    /// at `sql_offset`.
     sql_source_offsets: ?[]const usize = null,
+    /// The whole original file, BOM included, for spans and excerpts.
     source_text: ?[]const u8 = null,
     param_codecs: []const CodecOverride = &.{},
     column_codecs: []const CodecOverride = &.{},
@@ -87,6 +90,15 @@ fn freeOverrides(allocator: std.mem.Allocator, overrides: []const CodecOverride)
         allocator.free(override.codec);
     }
     allocator.free(overrides);
+}
+
+/// Frees a list still being built: its items and its whole capacity.
+fn freeOverrideList(allocator: std.mem.Allocator, list: *std.ArrayList(CodecOverride)) void {
+    for (list.items) |override| {
+        allocator.free(override.name);
+        allocator.free(override.codec);
+    }
+    list.deinit(allocator);
 }
 
 fn appendOverride(
@@ -137,12 +149,13 @@ pub fn parse(allocator: std.mem.Allocator, path: []const u8, contents: []const u
     var seen: std.StringHashMapUnmanaged(void) = .empty;
     defer seen.deinit(allocator);
     var param_codecs: std.ArrayList(CodecOverride) = .empty;
-    errdefer freeOverrides(allocator, param_codecs.items);
+    errdefer freeOverrideList(allocator, &param_codecs);
     var column_codecs: std.ArrayList(CodecOverride) = .empty;
-    errdefer freeOverrides(allocator, column_codecs.items);
+    errdefer freeOverrideList(allocator, &column_codecs);
 
     var sql_start: ?usize = null;
-    var position: usize = 0;
+    // A byte order mark is not part of the first line.
+    var position: usize = source_manager.bomLength(contents);
     while (position < contents.len) {
         const newline = std.mem.indexOfScalarPos(u8, contents, position, '\n') orelse contents.len;
         const line_start = position;
@@ -198,17 +211,10 @@ pub fn parse(allocator: std.mem.Allocator, path: []const u8, contents: []const u
     errdefer allocator.free(owned_name);
     const owned_sql = try allocator.dupe(u8, sql);
     errdefer allocator.free(owned_sql);
+    const owned_text = try allocator.dupe(u8, contents);
+    errdefer allocator.free(owned_text);
     const sql_offset = raw_sql_start + @as(usize, @intCast(sql.ptr - raw_sql.ptr));
-    var sql_line: usize = 1;
-    var sql_column: usize = 1;
-    for (contents[0..sql_offset]) |byte| {
-        if (byte == '\n') {
-            sql_line += 1;
-            sql_column = 1;
-        } else {
-            sql_column += 1;
-        }
-    }
+    std.debug.assert(std.mem.eql(u8, contents[sql_offset..][0..sql.len], sql));
     return .{
         .allocator = allocator,
         .path = owned_path,
@@ -217,23 +223,11 @@ pub fn parse(allocator: std.mem.Allocator, path: []const u8, contents: []const u
         .cardinality = parsed_cardinality,
         .sql = owned_sql,
         .sql_offset = sql_offset,
-        .sql_line = sql_line,
-        .sql_column = sql_column,
         .name_offset = name_offset,
-        .name_line = lineAt(contents, name_offset),
-        .name_column = columnAt(contents, name_offset),
+        .source_text = owned_text,
         .param_codecs = try param_codecs.toOwnedSlice(allocator),
         .column_codecs = try column_codecs.toOwnedSlice(allocator),
     };
-}
-
-fn lineAt(contents: []const u8, offset: usize) usize {
-    return std.mem.count(u8, contents[0..offset], "\n") + 1;
-}
-
-fn columnAt(contents: []const u8, offset: usize) usize {
-    const line_start = if (std.mem.lastIndexOfScalar(u8, contents[0..offset], '\n')) |newline| newline + 1 else 0;
-    return offset - line_start + 1;
 }
 
 /// Discovers every query file under `root` and rejects the first duplicate

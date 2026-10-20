@@ -10,6 +10,12 @@ const generator = @import("sqlz_generator");
 const diagnostics = @import("sqlz_diagnostics");
 const sqlz_inputs = @import("sqlz_inputs");
 
+// Configuration bounds `limits.nesting_depth` by what both lexers can track.
+comptime {
+    std.debug.assert(config.max_nesting_depth == checker.parser.lexer.max_nesting_depth);
+    std.debug.assert(config.max_nesting_depth == zig_queries.max_nesting_depth);
+}
+
 pub const Error = error{
     UnboundCodec,
     UnregisteredCodec,
@@ -143,12 +149,18 @@ fn generateLoaded(
         return error.RuntimeBackendWithoutProfile;
     if (options.runtime.postgres and project.backends.postgres == null)
         return error.RuntimeBackendWithoutProfile;
+    const limits: checker.parser.Limits = .{
+        .tokens = project.limits.tokens_per_source,
+        .nesting = project.limits.nesting_depth,
+    };
     const sqlite_dialect: checker.SqliteDialect = if (project.backends.sqlite) |sqlite| .{
         .profile = checker.SqliteProfile.fromString(sqlite.profile) orelse unreachable,
-    } else .{};
+        .limits = limits,
+    } else .{ .limits = limits };
     const postgres_dialect: checker.PostgresDialect = if (project.backends.postgres) |postgres| .{
         .profile = checker.PostgresProfile.fromString(postgres.profile) orelse unreachable,
-    } else .{};
+        .limits = limits,
+    } else .{ .limits = limits };
 
     // Codec IDs and build bindings are one to one: the Ziggy file owns the
     // database patterns, `build.zig` owns the Zig declaration, and neither side
@@ -209,6 +221,8 @@ fn generateLoaded(
         try migrations.discover(allocator, project_inputs, migration_dir);
     defer migration_discovery.deinit();
     if (diagnostic_list) |list| if (list.slice().len != 0) return error.ProjectCheckFailed;
+    try checkMigrationLimits(&migration_discovery, limits, diagnostic_list);
+    if (diagnostic_list) |list| if (list.slice().len != 0) return error.ProjectCheckFailed;
     var sqlite_schema: ?catalog.Catalog = if (project.backends.sqlite != null)
         checker.replayDiscoveredSqliteWithDialect(allocator, &migration_discovery, sqlite_dialect) catch |err| {
             if (diagnostic_list) |list| {
@@ -245,7 +259,8 @@ fn generateLoaded(
             // is the point — their `.params`/`.row` structs must agree with the
             // SQL they sit next to.
             if (diagnostic_list) |list| {
-                if (try appendPostgresSyntaxDiagnostic(allocator, source, list)) continue;
+                if (try appendLimitDiagnostic(source, limits, list)) continue;
+                if (try appendPostgresSyntaxDiagnostic(allocator, source, limits, list)) continue;
             }
             checkSource(
                 allocator,
@@ -316,7 +331,8 @@ fn generateLoaded(
                 continue;
             }
             if (diagnostic_list) |list| {
-                if (try appendPostgresSyntaxDiagnostic(allocator, source, list)) continue;
+                if (try appendLimitDiagnostic(source, limits, list)) continue;
+                if (try appendPostgresSyntaxDiagnostic(allocator, source, limits, list)) continue;
             }
             var sqlite_sql: ?[]const u8 = null;
             var postgres_sql: ?[]const u8 = null;
@@ -451,13 +467,76 @@ fn appendDuplicateVariantDiagnostic(
 }
 
 fn nameSpan(source: *const query_files.Source) diagnostics.Span {
+    const text = source.source_text orelse "";
+    return diagnostics.spanAt(source.path, text, source.name_offset, source.name_offset + source.name.len);
+}
+
+/// Reports a query whose SQL crosses the token or nesting limit, in every
+/// dialect it is checked in, before any parser sees it.
+fn appendLimitDiagnostic(
+    source: *const query_files.Source,
+    limits: checker.parser.Limits,
+    list: *diagnostics.List,
+) !bool {
+    const dialects = [_]struct { bool, checker.parser.lexer.Dialect }{
+        .{ source.backends.sqlite, .sqlite },
+        .{ source.backends.postgres, .postgres },
+    };
+    for (dialects) |entry| {
+        const selected, const dialect = entry;
+        if (!selected) continue;
+        const violation = checker.parser.lexer.checkLimits(source.sql, dialect, limits) orelse continue;
+        try list.appendDiagnostic(limitDiagnostic(
+            violation,
+            checker.querySpan(source, violation.start, violation.end - violation.start),
+        ));
+        return true;
+    }
+    return false;
+}
+
+/// Checks every migration SQL file against the token and nesting limits, in
+/// the dialect it is parsed in: common files with the shared PostgreSQL
+/// grammar, backend files with their own.
+fn checkMigrationLimits(
+    discovery: *const migrations.Discovery,
+    limits: checker.parser.Limits,
+    diagnostic_list: ?*diagnostics.List,
+) !void {
+    const Dialect = checker.parser.lexer.Dialect;
+    for (discovery.revisions) |*revision| {
+        const files = [_]struct { []const u8, []const u8, Dialect }{
+            .{ "common.up.sql", revision.common_up, .postgres },
+            .{ "common.down.sql", revision.common_down, .postgres },
+            .{ "sqlite.up.sql", revision.sqlite_up, .sqlite },
+            .{ "sqlite.down.sql", revision.sqlite_down, .sqlite },
+            .{ "postgres.up.sql", revision.postgres_up, .postgres },
+            .{ "postgres.down.sql", revision.postgres_down, .postgres },
+        };
+        for (files) |file| {
+            const name, const text, const dialect = file;
+            const violation = checker.parser.lexer.checkLimits(text, dialect, limits) orelse continue;
+            const list = diagnostic_list orelse return violation.err();
+            var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            const path = std.fmt.bufPrint(&path_buffer, "{s}/{s}", .{ revision.directory, name }) catch
+                revision.directory;
+            try list.appendDiagnostic(limitDiagnostic(
+                violation,
+                diagnostics.spanAt(path, text, violation.start, violation.end),
+            ));
+        }
+    }
+}
+
+fn limitDiagnostic(violation: checker.parser.lexer.Violation, span: diagnostics.Span) diagnostics.Diagnostic {
     return .{
-        .path = source.path,
-        .start = .{ .offset = source.name_offset, .line = source.name_line, .column = source.name_column },
-        .end = .{
-            .offset = source.name_offset + source.name.len,
-            .line = source.name_line,
-            .column = source.name_column + source.name.len,
+        .severity = .err,
+        .code = diagnostics.codeForError(violation.err()),
+        .message = diagnostics.messageForError(violation.err()),
+        .primary = span,
+        .help = switch (violation.limit) {
+            .tokens => "split the source or raise `.limits.tokens_per_source`",
+            .nesting => "flatten the expression or raise `.limits.nesting_depth`",
         },
     };
 }
@@ -465,10 +544,11 @@ fn nameSpan(source: *const query_files.Source) diagnostics.Span {
 fn appendPostgresSyntaxDiagnostic(
     allocator: std.mem.Allocator,
     source: *const query_files.Source,
+    limits: checker.parser.Limits,
     list: *diagnostics.List,
 ) !bool {
     if (!source.backends.postgres) return false;
-    const result = try checker.parser.parseDetailedSource(allocator, source.path, source.sql);
+    const result = try checker.parser.parseDetailedWithLimits(allocator, source.path, source.sql, limits);
     switch (result) {
         .ok => |value| {
             var parsed = value;
@@ -478,7 +558,12 @@ fn appendPostgresSyntaxDiagnostic(
         .syntax_error => |value| {
             var diagnostic = value;
             defer diagnostic.deinit();
-            try list.appendDiagnostic(diagnostic.structured());
+            // The parser positions errors within the SQL; the file may hold
+            // directives before it or Zig string syntax around it.
+            var structured = diagnostic.structured();
+            const width = diagnostic.original_end - diagnostic.original_offset;
+            structured.primary = checker.querySpan(source, diagnostic.original_offset, width);
+            try list.appendDiagnostic(structured);
             return true;
         },
     }

@@ -42,16 +42,26 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
         .imports = &.{.{ .name = "ziggy", .module = ziggy_dep.module("ziggy") }},
     });
+    const source_mod = b.addModule("sqlz_source", .{
+        .root_source_file = b.path("src/source.zig"),
+        .target = host_target,
+        .optimize = optimize,
+    });
+    config_mod.addImport("sqlz_source", source_mod);
     const diagnostics_mod = b.addModule("sqlz_diagnostics", .{
         .root_source_file = b.path("src/diagnostics.zig"),
         .target = host_target,
         .optimize = optimize,
+        .imports = &.{.{ .name = "sqlz_source", .module = source_mod }},
     });
     const inputs_mod = b.addModule("sqlz_inputs", .{
         .root_source_file = b.path("src/inputs.zig"),
         .target = host_target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "sqlz_diagnostics", .module = diagnostics_mod }},
+        .imports = &.{
+            .{ .name = "sqlz_diagnostics", .module = diagnostics_mod },
+            .{ .name = "sqlz_source", .module = source_mod },
+        },
     });
     // An adapter module is published exactly when its option is enabled, even
     // before its lazy driver is fetched, so `addProject` can tell a disabled
@@ -83,9 +93,14 @@ pub fn build(b: *std.Build) !void {
     // source package into zig-pkg; compile those sources for the selected target
     // instead of relying on a platform-specific prebuilt archive.
     const libpg_query_root = b.path("zig-pkg/N-V-__8AABam8AGXKt6JaO4YJhtbE2eALOH3ykvUnCh-FnLG");
+    // libpg_query is always optimized. Its grammar and tree serializer
+    // recurse once per nesting level, and unoptimized frames are large enough
+    // that a few hundred levels overflow an 8 MiB stack. sqlz bounds nesting
+    // before calling it (`limits.nesting_depth`), and optimized frames keep
+    // even the largest accepted limit far inside the stack.
     const libpg_query_mod = b.createModule(.{
         .target = host_target,
-        .optimize = optimize,
+        .optimize = .ReleaseFast,
         .link_libc = true,
     });
     libpg_query_mod.addIncludePath(libpg_query_root);
@@ -151,6 +166,7 @@ pub fn build(b: *std.Build) !void {
             .{ .name = "ziggy", .module = ziggy_dep.module("ziggy") },
             .{ .name = "sqlz_diagnostics", .module = diagnostics_mod },
             .{ .name = "sqlz_inputs", .module = inputs_mod },
+            .{ .name = "sqlz_source", .module = source_mod },
         },
     });
     const ir_mod = b.addModule("sqlz_ir", .{
@@ -173,7 +189,10 @@ pub fn build(b: *std.Build) !void {
         .root_source_file = b.path("src/query_files.zig"),
         .target = host_target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "sqlz_inputs", .module = inputs_mod }},
+        .imports = &.{
+            .{ .name = "sqlz_inputs", .module = inputs_mod },
+            .{ .name = "sqlz_source", .module = source_mod },
+        },
     });
     const zig_queries_mod = b.addModule("sqlz_zig_queries", .{
         .root_source_file = b.path("src/zig_queries.zig"),
@@ -333,6 +352,18 @@ pub fn build(b: *std.Build) !void {
     const run_postgres_config = b.addRunArtifact(postgres_config_tests);
     test_step.dependOn(&run_postgres_config.step);
     offline_step.dependOn(&run_postgres_config.step);
+
+    const source_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/source.zig"),
+            .target = host_target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "sqlz_source", .module = source_mod }},
+        }),
+    });
+    const run_source = b.addRunArtifact(source_tests);
+    test_step.dependOn(&run_source.step);
+    offline_step.dependOn(&run_source.step);
 
     const diagnostics_tests = b.addTest(.{
         .root_module = b.createModule(.{
