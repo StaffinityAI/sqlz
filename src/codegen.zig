@@ -270,7 +270,7 @@ pub fn generateProjectWithOptions(
     while (iterator.next()) |entry| {
         var sql_dir = try project_dir.openDir(io, entry.value_ptr.*, .{ .iterate = true });
         defer sql_dir.close(io);
-        var discovery = try query_files.discover(allocator, io, sql_dir, source_limit);
+        var discovery = try query_files.discoverAll(allocator, io, sql_dir, source_limit);
         errdefer discovery.deinit();
         const checked = try allocator.alloc(checker.CheckedQuery, discovery.sources.len);
         var checked_count: usize = 0;
@@ -280,7 +280,12 @@ pub fn generateProjectWithOptions(
         }
         const inputs = try allocator.alloc(generator.CheckedInput, discovery.sources.len);
         errdefer allocator.free(inputs);
-        for (discovery.sources) |*source| {
+        for (discovery.sources, 0..) |*source, source_index| {
+            if (query_files.duplicateVariant(discovery.sources, source_index)) |first_index| {
+                const list = diagnostic_list orelse return error.DuplicateQueryVariant;
+                try appendDuplicateVariantDiagnostic(allocator, &discovery.sources[first_index], source, list);
+                continue;
+            }
             if (diagnostic_list) |list| {
                 if (try appendPostgresSyntaxDiagnostic(allocator, source, list)) continue;
             }
@@ -376,6 +381,43 @@ fn appendSourceDiagnostic(
         )) return true;
     };
     return false;
+}
+
+fn appendDuplicateVariantDiagnostic(
+    allocator: std.mem.Allocator,
+    first: *const query_files.Source,
+    duplicate: *const query_files.Source,
+    list: *diagnostics.List,
+) !void {
+    const sqlite = first.backends.sqlite and duplicate.backends.sqlite;
+    const postgres = first.backends.postgres and duplicate.backends.postgres;
+    const backend = if (sqlite and postgres) "sqlite and postgres" else if (sqlite) "sqlite" else "postgres";
+    const message = try std.fmt.allocPrint(
+        allocator,
+        "query `{s}` is already defined for {s} in this directory",
+        .{ duplicate.name, backend },
+    );
+    defer allocator.free(message);
+    try list.appendDiagnostic(.{
+        .severity = .err,
+        .code = diagnostics.codeForError(error.DuplicateQueryVariant),
+        .message = message,
+        .primary = nameSpan(duplicate),
+        .labels = &.{.{ .span = nameSpan(first), .message = "first defined here" }},
+        .help = "rename one of the queries, or give each file disjoint backends to make them variants of one query",
+    });
+}
+
+fn nameSpan(source: *const query_files.Source) diagnostics.Span {
+    return .{
+        .path = source.path,
+        .start = .{ .offset = source.name_offset, .line = source.name_line, .column = source.name_column },
+        .end = .{
+            .offset = source.name_offset + source.name.len,
+            .line = source.name_line,
+            .column = source.name_column + source.name.len,
+        },
+    };
 }
 
 fn sameLogicalQuery(left: *const query_files.Source, right: *const query_files.Source) bool {

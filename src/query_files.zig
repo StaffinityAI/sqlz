@@ -47,6 +47,11 @@ pub const Source = struct {
     sql_offset: usize = 0,
     sql_line: usize = 1,
     sql_column: usize = 1,
+    /// Where the `sqlz.name` directive's value sits, for diagnostics that
+    /// point at the query's name rather than its SQL.
+    name_offset: usize = 0,
+    name_line: usize = 1,
+    name_column: usize = 1,
     sql_source_offsets: ?[]const usize = null,
     source_text: ?[]const u8 = null,
     param_codecs: []const CodecOverride = &.{},
@@ -125,6 +130,7 @@ pub const Error = error{
 
 pub fn parse(allocator: std.mem.Allocator, path: []const u8, contents: []const u8) Error!Source {
     var name: ?[]const u8 = null;
+    var name_offset: usize = 0;
     var backends: ?Backends = null;
     var cardinality: ?Cardinality = null;
     var seen: std.StringHashMapUnmanaged(void) = .empty;
@@ -159,6 +165,7 @@ pub fn parse(allocator: std.mem.Allocator, path: []const u8, contents: []const u
         if (std.mem.eql(u8, key, "name")) {
             if (!isIdentifier(value)) return error.InvalidName;
             name = value;
+            name_offset = @intFromPtr(value.ptr) - @intFromPtr(contents.ptr);
         } else if (std.mem.eql(u8, key, "backends")) {
             backends = try parseBackends(value);
         } else if (std.mem.eql(u8, key, "cardinality")) {
@@ -211,12 +218,60 @@ pub fn parse(allocator: std.mem.Allocator, path: []const u8, contents: []const u
         .sql_offset = sql_offset,
         .sql_line = sql_line,
         .sql_column = sql_column,
+        .name_offset = name_offset,
+        .name_line = lineAt(contents, name_offset),
+        .name_column = columnAt(contents, name_offset),
         .param_codecs = try param_codecs.toOwnedSlice(allocator),
         .column_codecs = try column_codecs.toOwnedSlice(allocator),
     };
 }
 
+fn lineAt(contents: []const u8, offset: usize) usize {
+    return std.mem.count(u8, contents[0..offset], "\n") + 1;
+}
+
+fn columnAt(contents: []const u8, offset: usize) usize {
+    const line_start = if (std.mem.lastIndexOfScalar(u8, contents[0..offset], '\n')) |newline| newline + 1 else 0;
+    return offset - line_start + 1;
+}
+
+fn sameNamespace(lhs: []const u8, rhs: []const u8) bool {
+    return std.mem.eql(u8, std.fs.path.dirname(lhs) orelse "", std.fs.path.dirname(rhs) orelse "");
+}
+
+/// Discovers every query file under `root` and rejects the first duplicate
+/// variant. `discoverAll` leaves duplicates for the caller to report.
 pub fn discover(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    root: std.Io.Dir,
+    max_source_bytes: usize,
+) anyerror!Discovery {
+    var discovery = try discoverAll(allocator, io, root, max_source_bytes);
+    errdefer discovery.deinit();
+    for (0..discovery.sources.len) |index| {
+        if (duplicateVariant(discovery.sources, index) != null) return error.DuplicateQueryVariant;
+    }
+    return discovery;
+}
+
+/// Directories are namespaces, so a name repeats freely across them. Within one
+/// directory, files sharing a name are that query's backend variants and must
+/// not both cover a backend. Returns the earlier source `sources[index]`
+/// collides with.
+pub fn duplicateVariant(sources: []const Source, index: usize) ?usize {
+    const source = sources[index];
+    for (sources[0..index], 0..) |existing, existing_index| {
+        if (sameNamespace(existing.path, source.path) and
+            std.mem.eql(u8, existing.name, source.name) and
+            ((existing.backends.sqlite and source.backends.sqlite) or
+                (existing.backends.postgres and source.backends.postgres)))
+            return existing_index;
+    }
+    return null;
+}
+
+pub fn discoverAll(
     allocator: std.mem.Allocator,
     io: std.Io,
     root: std.Io.Dir,
@@ -250,12 +305,6 @@ pub fn discover(
         defer allocator.free(contents);
         var source = try parse(allocator, path, contents);
         errdefer source.deinit();
-        for (sources.items) |existing| {
-            if (std.mem.eql(u8, existing.name, source.name) and
-                ((existing.backends.sqlite and source.backends.sqlite) or
-                    (existing.backends.postgres and source.backends.postgres)))
-                return error.DuplicateQueryVariant;
-        }
         try sources.append(allocator, source);
     }
     return .{ .allocator = allocator, .sources = try sources.toOwnedSlice(allocator) };

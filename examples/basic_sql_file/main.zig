@@ -8,7 +8,7 @@ const sqlz = @import("sqlz");
 const queries = @import("queries");
 
 const add_user = queries.app.basic_sql_file.add_user;
-const get_user = queries.app.basic_sql_file.get_user;
+const find_user = queries.app.basic_sql_file.find_user;
 
 pub fn run(allocator: std.mem.Allocator, io: std.Io, out: *std.Io.Writer) !void {
     var conn = try sqlz.sqlite.open(allocator, io, ":memory:", .{});
@@ -29,7 +29,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, out: *std.Io.Writer) !void 
     // matter.
     _ = try sqlz.unwrap(add_user.execute(&conn, .{ .name = "Ada" }));
 
-    var found = (try sqlz.unwrap(get_user.fetchOptional(&conn, .{ .id = 1 }))) orelse
+    var found = (try sqlz.unwrap(find_user.fetchOptional(&conn, .{ .id = 1 }))) orelse
         return error.UserMissing;
     defer found.deinit();
     const user = found.row();

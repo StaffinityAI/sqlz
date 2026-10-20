@@ -67,3 +67,25 @@ test "rejects unknown directives and overlapping query names" {
         1024 * 1024,
     ));
 }
+
+test "a query name repeats freely across directories" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const query = "-- sqlz.name: find\n-- sqlz.backends: sqlite\n" ++
+        "-- sqlz.cardinality: exec\nDELETE FROM users";
+    for ([_][]const u8{ "users", "admins" }) |directory| {
+        var dir = try tmp.dir.createDirPathOpen(std.testing.io, directory, .{});
+        defer dir.close(std.testing.io);
+        try dir.writeFile(std.testing.io, .{ .sub_path = "find.sql", .data = query });
+    }
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "find.sql", .data = query });
+
+    var discovery = try query_files.discover(
+        std.testing.allocator,
+        std.testing.io,
+        tmp.dir,
+        1024 * 1024,
+    );
+    defer discovery.deinit();
+    try std.testing.expectEqual(@as(usize, 3), discovery.sources.len);
+}

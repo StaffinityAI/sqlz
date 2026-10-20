@@ -13,7 +13,6 @@ pub const Error = error{
     InvalidCardinality,
     InvalidDeclaredType,
     InvalidCodecMap,
-    DuplicateQueryVariant,
 } || std.mem.Allocator.Error || std.zig.string_literal.ParseError;
 
 pub fn parse(
@@ -74,13 +73,10 @@ pub fn discover(
             for (parsed.sources[moved..]) |*source| source.deinit();
             allocator.free(parsed.sources);
         }
+        // Embedded declarations generate nothing and are named through their
+        // own file's containers, so a name may repeat across them; Zig itself
+        // rejects a repeat within one container.
         for (parsed.sources) |*source| {
-            for (sources.items) |existing| {
-                if (std.mem.eql(u8, existing.name, source.name) and
-                    ((existing.backends.sqlite and source.backends.sqlite) or
-                        (existing.backends.postgres and source.backends.postgres)))
-                    return error.DuplicateQueryVariant;
-            }
             try sources.append(allocator, source.*);
             moved += 1;
         }

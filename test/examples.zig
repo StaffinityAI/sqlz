@@ -27,7 +27,7 @@ test "every example query is checked for SQLite and PostgreSQL" {
     try expectBoth(@import("embedded_declarations").by_tier);
     try expectBoth(@import("embedded_declarations").newest);
     try expectBoth(queries.app.basic_sql_file.add_user);
-    try expectBoth(queries.app.basic_sql_file.get_user);
+    try expectBoth(queries.app.basic_sql_file.find_user);
     try expectBoth(@import("basic_embedded_query").insert_user);
     try expectBoth(@import("basic_embedded_query").list_users);
     try expectBoth(@import("basic_transaction").insert_name);

@@ -1,4 +1,4 @@
--- sqlz.name: get_user
+-- sqlz.name: find_user
 -- sqlz.backends: sqlite, postgres
 -- sqlz.cardinality: optional
 
